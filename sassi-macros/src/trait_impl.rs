@@ -7,7 +7,16 @@
 //! `__DATA,__mod_init_func` / `.CRT$XCU` on native, the wasm32
 //! initializer on `wasm32-unknown-unknown`), so adopter crates with
 //! `#![forbid(unsafe_code)]` are not rejected — the `unsafe`
-//! attribute syntax never appears in the macro's output.
+//! attribute syntax never appears in the macro's output. Verified
+//! by `sassi-macros/tests/compile_pass/forbid_unsafe_code_adopter.rs`,
+//! which compiles a fixture crate declaring `#![forbid(unsafe_code)]`
+//! at the crate root and applying this macro.
+//!
+//! WASM target: `cargo build --target wasm32-unknown-unknown` is
+//! clean. Full runtime-test coverage on wasm32 (asserting that
+//! `Sassi::all_impl::<dyn Trait>()` actually returns registered
+//! entries under the wasm-bindgen-test runner) is tracked by sassi
+//! GitHub issue #3.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;

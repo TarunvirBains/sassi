@@ -25,6 +25,18 @@
 //! Macro expansion routes through [`crate::__private::inventory`] so
 //! emitted code does not depend on the workspace's exact
 //! `inventory` version reaching adopter `Cargo.lock` files.
+//!
+//! # WASM runtime registration
+//!
+//! `cargo build --target wasm32-unknown-unknown` finishes clean with
+//! the inventory-based registry, and `inventory` has documented
+//! support for the wasm32 startup-init slot. Full *runtime-test*
+//! coverage on `wasm32-unknown-unknown` requires the
+//! `wasm-bindgen-test` runner, which is tracked by sassi GitHub
+//! issue #3 (per-test wasm execution + full multi-target CI matrix).
+//! Until issue #3 lands, runtime registration on wasm32 is asserted
+//! transitively via inventory's documented WASM support (since 2019)
+//! rather than a direct sassi-side wasm-bindgen-test.
 
 use crate::sassi::orchestrator::Sassi;
 use std::any::{Any, TypeId};
