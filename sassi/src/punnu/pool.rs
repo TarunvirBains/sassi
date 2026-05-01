@@ -26,7 +26,7 @@
 use crate::cacheable::Cacheable;
 use crate::error::{FetchError, InsertError};
 use crate::executor::{DefaultExecutor, PunnuExecutor};
-use crate::punnu::config::{OnConflict, PunnuConfig};
+use crate::punnu::config::{CacheTier, OnConflict, PunnuConfig};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::single_flight::InFlightRegistry;
 use crate::punnu::ttl::Entry;
@@ -212,7 +212,7 @@ impl<T: Cacheable> Punnu<T> {
 
         // Locking + push are pure in-memory work — no awaits while
         // holding the lock.
-        let outcome = {
+        let (outcome, post_len) = {
             let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
             );
@@ -232,10 +232,14 @@ impl<T: Cacheable> Punnu<T> {
             // eviction (k != inserted id). We disambiguate by
             // comparing keys.
             let pushed = map.push(id.clone(), entry);
-            InsertOutcome {
-                existing,
-                replaced_or_evicted: pushed,
-            }
+            let post_len = map.len();
+            (
+                InsertOutcome {
+                    existing,
+                    replaced_or_evicted: pushed,
+                },
+                post_len,
+            )
         };
 
         // Drop the lock before emitting events — broadcast `send`
@@ -252,6 +256,7 @@ impl<T: Cacheable> Punnu<T> {
                 id: evicted_id,
                 reason: EventReason::LruEvict,
             });
+            self.metrics_record_eviction(EventReason::LruEvict);
         }
 
         // Then emit the insert / update event, choosing the variant
@@ -267,6 +272,12 @@ impl<T: Cacheable> Punnu<T> {
             _ => PunnuEvent::Insert { value: arc.clone() },
         };
         let _ = self.inner.events.send(event);
+
+        // Sample the LRU size after every insert. Spec §3.5.1 calls
+        // this an opportunistic gauge — emit on a meaningful change
+        // (post-insert, post-invalidate) rather than streaming on
+        // every read.
+        self.metrics_record_lru_size(post_len);
 
         Ok(arc)
     }
@@ -295,12 +306,17 @@ impl<T: Cacheable> Punnu<T> {
     /// `TtlExpired` event fires for a given expired entry, even
     /// under contention.
     pub fn get(&self, id: &T::Id) -> Option<Arc<T>> {
-        // Fast path: peek first to avoid the write lock when the id
-        // is missing entirely. `peek` does not touch recency, so the
-        // lookup-on-hit path still needs the write lock — but a miss
-        // is the common cold-cache case, so the read-only peek is
-        // worth the branch.
-        let expired = {
+        // Three terminal outcomes — the locked block decides which:
+        // - hit: return Some(arc), record_hit
+        // - miss (id absent entirely): return None, record_miss
+        // - expired: pop, emit TtlExpired event, record_miss + record_eviction
+        enum GetOutcome<T> {
+            Hit(Arc<T>),
+            Miss,
+            Expired,
+        }
+
+        let outcome = {
             // Sample `now` once before taking the write lock so the
             // decision is consistent across the peek + pop without
             // re-reading the clock under the lock. `now` is a cheap
@@ -315,27 +331,49 @@ impl<T: Cacheable> Punnu<T> {
             // the value. If it's expired, pop it under the same
             // lock — that's the race-safe spot to decide who fires
             // `TtlExpired`.
-            let peeked = map.peek(id)?;
-            if peeked.is_expired_at(now) {
-                map.pop(id);
-                true
-            } else {
-                // `get` is guaranteed to find the entry — we just
-                // peeked it under the same write lock.
-                let entry = map
-                    .get(id)
-                    .expect("entry present (just peeked under same lock)");
-                return Some(entry.value.clone());
+            match map.peek(id) {
+                None => GetOutcome::Miss,
+                Some(peeked) => {
+                    if peeked.is_expired_at(now) {
+                        map.pop(id);
+                        GetOutcome::Expired
+                    } else {
+                        // `get` is guaranteed to find the entry — we
+                        // just peeked it under the same write lock.
+                        let entry = map
+                            .get(id)
+                            .expect("entry present (just peeked under same lock)");
+                        GetOutcome::Hit(entry.value.clone())
+                    }
+                }
             }
         };
 
-        if expired {
-            let _ = self.inner.events.send(PunnuEvent::Invalidate {
-                id: id.clone(),
-                reason: EventReason::TtlExpired,
-            });
+        match outcome {
+            GetOutcome::Hit(arc) => {
+                self.metrics_record_hit(CacheTier::L1);
+                Some(arc)
+            }
+            GetOutcome::Miss => {
+                self.metrics_record_miss();
+                None
+            }
+            GetOutcome::Expired => {
+                let _ = self.inner.events.send(PunnuEvent::Invalidate {
+                    id: id.clone(),
+                    reason: EventReason::TtlExpired,
+                });
+                // TTL-driven expiry counts as both an eviction (entry
+                // left the cache) and a miss (the get returned None).
+                // Dashboards typically split eviction by reason, so we
+                // emit both — eviction with TtlExpired and the miss
+                // counter. Aligns with spec §3.5.1's "metrics
+                // dashboards typically split by every reason".
+                self.metrics_record_eviction(EventReason::TtlExpired);
+                self.metrics_record_miss();
+                None
+            }
         }
-        None
     }
 
     /// Drop a single entry by id. No-op if the id is not cached.
@@ -367,17 +405,20 @@ impl<T: Cacheable> Punnu<T> {
     /// would defeat the public-vs-internal split that motivates the
     /// two enums.
     pub(crate) async fn invalidate_internal(&self, id: &T::Id, reason: EventReason) {
-        let removed = {
+        let (removed, post_len) = {
             let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
             );
-            map.pop(id).is_some()
+            let removed = map.pop(id).is_some();
+            (removed, map.len())
         };
         if removed {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: id.clone(),
                 reason,
             });
+            self.metrics_record_eviction(reason);
+            self.metrics_record_lru_size(post_len);
         }
     }
 
@@ -446,6 +487,14 @@ impl<T: Cacheable> Punnu<T> {
             return Ok(Some(arc));
         }
 
+        // Time the fetch path end-to-end (registry attach + fetcher
+        // run + L1 insert) so the latency includes coalescing
+        // overhead. Spec §3.5.1: `record_fetch_latency` fires for
+        // every `get_or_fetch` invocation that hits the slow path
+        // (L1 miss). Hits don't pay fetch latency, so they don't
+        // emit the histogram point.
+        let start = self.inner.executor.now();
+
         // Single-flight coalescing on miss. The registry returns
         // `Arc<T>` when the fetcher returned `Some`; we then insert
         // into L1 so the next `get` is a hit.
@@ -453,11 +502,15 @@ impl<T: Cacheable> Punnu<T> {
 
         if let Some(arc) = &result {
             // Insert through the standard path so `OnConflict`,
-            // events, and (later) metrics fire as if the consumer
-            // had called `insert` directly. We use `insert_arc` —
-            // see below — which avoids cloning the inner value.
+            // events, and metrics fire as if the consumer had called
+            // `insert` directly. `insert_arc_into_l1` avoids cloning
+            // the inner value.
             self.insert_arc_into_l1(arc.clone()).await?;
         }
+
+        let elapsed = self.inner.executor.now() - start;
+        self.metrics_record_fetch_latency(elapsed);
+
         Ok(result)
     }
 
@@ -627,6 +680,52 @@ impl<T: Cacheable> Punnu<T> {
     pub fn _test_sweep_initialised(&self) -> Option<Arc<Notify>> {
         self.inner.sweep_initialised.clone()
     }
+
+    // ---------------------------------------------------------------
+    // Metrics helpers — internal `record_*` shims that no-op when
+    // `PunnuConfig::metrics` is `None`. Wired from the call sites
+    // above (`get`, `insert_arc_internal`, `invalidate_internal`,
+    // `get_or_fetch`). The shim pattern:
+    //   - returns `()` so call sites can `.metrics_record_*()` on
+    //     `&self` with no error handling.
+    //   - reads `type_name` once via `std::any::type_name::<T>()`
+    //     (zero runtime cost; resolved at compile time per generic
+    //     instantiation). Spec §3.5.1 documents that `type_name` is
+    //     a metrics label, not a stable cross-version protocol id —
+    //     wire-format keys use a different identifier.
+    //   - the `if let Some(m) = ...` guard ensures the no-op path
+    //     compiles to a single null-check at the call site.
+    // ---------------------------------------------------------------
+
+    fn metrics_record_hit(&self, tier: CacheTier) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_hit(std::any::type_name::<T>(), tier);
+        }
+    }
+
+    fn metrics_record_miss(&self) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_miss(std::any::type_name::<T>());
+        }
+    }
+
+    fn metrics_record_eviction(&self, reason: EventReason) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_eviction(std::any::type_name::<T>(), reason);
+        }
+    }
+
+    fn metrics_record_lru_size(&self, size: usize) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_lru_size(std::any::type_name::<T>(), size);
+        }
+    }
+
+    fn metrics_record_fetch_latency(&self, duration: Duration) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_fetch_latency(std::any::type_name::<T>(), duration);
+        }
+    }
 }
 
 /// Outcome of an `LruCache::push` pass — captured under the lock and
@@ -708,11 +807,15 @@ impl<T: Cacheable> PunnuBuilder<T> {
     /// - `config.lru_size == 0` — a zero-capacity LRU evicts every
     ///   insert immediately, which is a programmer error.
     /// - `config.ttl_sweep_interval == Some(Duration::ZERO)` — would
-    ///   reach `tokio::time::interval(0)` and panic at runtime. Use
-    ///   `None` to disable the sweep.
+    ///   reach the executor's `sleep(0)` in a tight loop. Use `None`
+    ///   to disable the sweep.
     /// - `config.event_channel_capacity == 0` — would reach
     ///   `broadcast::channel(0)` and panic at runtime. The minimum
     ///   sensible value is `1`.
+    /// - `config.namespace == Some(String::new())` — an empty string
+    ///   would silently prefix L2 backend keys with a leading
+    ///   separator and could collide with un-namespaced deployments.
+    ///   Use `None` to disable namespacing.
     pub fn build(self) -> Punnu<T> {
         let cap = NonZeroUsize::new(self.config.lru_size).unwrap_or_else(|| {
             panic!(
@@ -732,6 +835,15 @@ impl<T: Cacheable> PunnuBuilder<T> {
             "PunnuConfig::event_channel_capacity must be greater than 0; \
              the broadcast channel rejects a zero capacity"
         );
+        if let Some(ns) = &self.config.namespace {
+            assert!(
+                !ns.is_empty(),
+                "PunnuConfig::namespace must be non-empty when set; \
+                 use None to disable namespacing. An empty string would silently \
+                 prefix L2 backend keys with a leading separator and could collide \
+                 with un-namespaced deployments."
+            );
+        }
         let sweep_interval = self.config.ttl_sweep_interval;
         let (events, _) = broadcast::channel(self.config.event_channel_capacity);
         let executor: Arc<dyn PunnuExecutor> = Arc::new(DefaultExecutor);

@@ -195,11 +195,31 @@ pub(crate) fn spawn_sweep<T: Cacheable>(
                 to_remove
             };
 
+            // Record metrics outside the lock — `record_*` is a
+            // consumer-defined trait method that may do arbitrary
+            // work; we don't want it inside the L1 write-lock scope.
+            // Spec §3.5.1: TTL-driven evictions count, the dashboard
+            // splits by reason. We also sample `record_lru_size`
+            // once per sweep tick that removed anything (no-op when
+            // expired_ids is empty — the size didn't change).
+            let removed_count = expired_ids.len();
             for id in expired_ids {
                 let _ = inner.events.send(PunnuEvent::Invalidate {
                     id,
                     reason: EventReason::TtlExpired,
                 });
+                if let Some(m) = &inner.config.metrics {
+                    m.record_eviction(std::any::type_name::<T>(), EventReason::TtlExpired);
+                }
+            }
+            if removed_count > 0
+                && let Some(m) = &inner.config.metrics
+            {
+                let post_len = match inner.map.read() {
+                    Ok(g) => g.len(),
+                    Err(_) => continue,
+                };
+                m.record_lru_size(std::any::type_name::<T>(), post_len);
             }
         }
     }));
