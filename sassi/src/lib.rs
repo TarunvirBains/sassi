@@ -40,10 +40,17 @@
 #![warn(missing_docs)]
 
 pub mod cacheable;
+pub mod error;
 pub mod predicate;
+pub mod punnu;
 
 pub use cacheable::{Cacheable, Field};
+pub use error::{BackendError, InsertError};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp};
+pub use punnu::{
+    BackendFailureMode, CacheTier, EventReason, InvalidationReason, OnConflict, Punnu,
+    PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, TenantKey,
+};
 
 // Derive macro re-export. The trait and the derive share the name
 // `Cacheable` (different namespaces — type namespace for the trait,

@@ -1,6 +1,6 @@
 # sassi
 
-**Sassi** is a typed in-memory pool with composable predicate algebra and cross-runtime trait queries — usable from any Rust runtime (backend, Dioxus frontend, WASM) without coupling to a particular ORM, web framework, or storage layer.
+**Sassi** is a typed in-memory pool with composable predicate algebra and cross-runtime trait queries — designed for cross-runtime use (backend or Dioxus frontend) without coupling to a particular ORM, web framework, or storage layer. WASM target support tracking in [issue #3](https://github.com/TarunvirBains/sassi/issues/3) (lands via Cluster B Task 10's `PunnuExecutor` abstraction); see Status below.
 
 ## What it gives you
 
@@ -13,6 +13,8 @@
 ## Status
 
 **Pre-v0.1.0 alpha.** This repository is currently a skeleton; implementation lands per the design spec under `docs/superpowers/specs/` (local-only). v0.1.0 ships in lockstep with the [djogi](https://github.com/TarunvirBains/djogi) framework's v0.1.0 cut.
+
+- **WASM target** — deferred per [issue #3](https://github.com/TarunvirBains/sassi/issues/3); supported in v0.1.0 via Cluster B Task 10's `PunnuExecutor` abstraction (with Task 18 closing the CI matrix). The `runtime-wasm` feature flag is declared today as a forward-compatibility hook; no code is gated behind it yet.
 
 ## Workspace layout
 

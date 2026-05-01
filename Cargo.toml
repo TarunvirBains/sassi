@@ -12,9 +12,17 @@ authors = ["Tarunvir Bains"]
 rust-version = "1.95"
 
 [workspace.dependencies]
-# Async substrate
-tokio = { version = "1.48", default-features = false, features = ["sync", "rt"] }
+# Async substrate.
+# `sync` powers the broadcast channel that backs Punnu's event stream
+# (no runtime required; works on WASM too). `rt` + `time` are needed by
+# the optional background TTL sweep task. `macros` powers `#[tokio::test]`
+# in integration tests.
+tokio = { version = "1.48", default-features = false, features = ["sync", "rt", "time", "macros"] }
 futures = "0.3"
+
+# Error derive — `thiserror` is the de facto Rust convention for
+# library error types; keeps Display/Debug impls consistent.
+thiserror = "2"
 
 # Serde — opt-in for cross-runtime wire format
 serde = { version = "1", features = ["derive"] }
