@@ -13,14 +13,22 @@ authors.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["serde"]
+# `serde` enables the wire-format envelope (lands in a later cluster).
+# `runtime-tokio` enables the optional background TTL sweep task and is
+# the typical setup for native consumers; tests rely on it via
+# `#[tokio::test]`. `runtime-wasm` is the WASM-target counterpart and
+# selects the gloo-timers-based executor (lands in Task 10).
+default = ["serde", "runtime-tokio"]
 serde = ["dep:serde", "dep:serde_json"]
-# wasm consumers enable runtime-wasm; native consumers enable runtime-tokio
-runtime-tokio = ["tokio"]
+runtime-tokio = []
 runtime-wasm = []
 
 [dependencies]
-tokio = { workspace = true, optional = true }
+# `tokio` is unconditional — the broadcast channel that backs Punnu's
+# event stream lives behind `tokio::sync` and works on every supported
+# target, including WASM. The `runtime-tokio` feature only governs
+# whether the spawn-driven background sweep task is compiled in.
+tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
@@ -28,4 +36,5 @@ lru = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+thiserror = { workspace = true }
 sassi-macros = { path = "../sassi-macros", version = "0.1.0-alpha.0" }
