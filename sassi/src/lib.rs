@@ -8,16 +8,33 @@
 //! without any backend dependency. Predicates compose with `&`, `|`,
 //! `^`, `!` operators and run identically on both runtimes.
 //!
-//! See `docs/superpowers/specs/2026-04-30-sassi-design.md` for the
-//! full design (local; will be promoted to `docs/spec/` when finalized).
+//! Pre-v0.1.0 alpha. Public surface lands incrementally per the
+//! implementation plan; this version exposes the [`Cacheable`] trait
+//! and [`Field`] accessor that the rest of the surface builds on.
 //!
-//! Pre-v0.1.0; this crate is currently a skeleton. Implementation lands
-//! per the linked design spec; see the corresponding repository's
-//! implementation plan for sequencing.
+//! # Quick tour (preview)
+//!
+//! ```no_run
+//! # // no_run because Punnu doesn't exist yet — preview only
+//! # struct User { id: i64, age: u32 }
+//! # impl sassi::Cacheable for User {
+//! #     type Id = i64;
+//! #     type Fields = UserFields;
+//! #     fn id(&self) -> i64 { self.id }
+//! # }
+//! # #[derive(Default)] struct UserFields;
+//! ```
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
-/// Workspace placeholder. Real surface lands per the design spec.
+pub mod cacheable;
+
+pub use cacheable::{Cacheable, Field};
+
+/// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for
+/// runtime diagnostics and for producing `__sassi_v` envelope tags
+/// (see the wire-format module, landing in a later task).
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
