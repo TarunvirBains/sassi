@@ -1,6 +1,7 @@
 //! Attribute macro for registering cross-type trait implementations.
 //!
-//! Expansion emits the original impl plus one
+//! The macro supports only `#[sassi::trait_impl] impl Trait for Type`
+//! blocks. Expansion emits the original impl plus one
 //! `inventory::submit!` block. The `inventory` crate handles the
 //! platform-specific startup registration (`.init_array` /
 //! `__DATA,__mod_init_func` / `.CRT$XCU` on native, the wasm32
@@ -11,7 +12,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{ItemImpl, Path, parse_macro_input, spanned::Spanned};
+use syn::{ItemImpl, parse_macro_input, spanned::Spanned};
 
 /// Expand `#[sassi::trait_impl]` on a concrete trait impl.
 ///
@@ -36,6 +37,12 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = TokenStream2::from(args);
     let item = parse_macro_input!(input as ItemImpl);
 
+    if !args.is_empty() {
+        return syn::Error::new(args.span(), "sassi::trait_impl takes no arguments")
+            .to_compile_error()
+            .into();
+    }
+
     if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
         return syn::Error::new(
             item.generics.span(),
@@ -45,17 +52,8 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
 
-    let attr_trait = if args.is_empty() {
-        None
-    } else {
-        match syn::parse2::<Path>(args) {
-            Ok(path) => Some(path),
-            Err(err) => return err.to_compile_error().into(),
-        }
-    };
-
-    let impl_trait = match &item.trait_ {
-        Some((None, path, _for_token)) => Some(path.clone()),
+    let trait_path = match &item.trait_ {
+        Some((None, path, _for_token)) => path.clone(),
         Some((Some(not_token), _path, _for_token)) => {
             return syn::Error::new(
                 not_token.span(),
@@ -64,24 +62,10 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
         }
-        None => None,
-    };
-
-    let trait_path = match (attr_trait, impl_trait) {
-        (None, Some(path)) => path,
-        (Some(path), None) => path,
-        (Some(_), Some(path)) => {
-            return syn::Error::new(
-                path.span(),
-                "#[sassi::trait_impl] takes no arguments when applied to a trait impl",
-            )
-            .to_compile_error()
-            .into();
-        }
-        (None, None) => {
+        None => {
             return syn::Error::new(
                 item.impl_token.span(),
-                "#[sassi::trait_impl] must be applied to `impl Trait for Type` or passed a trait path",
+                "sassi::trait_impl must be applied to `impl Trait for Type`",
             )
             .to_compile_error()
             .into();

@@ -28,6 +28,7 @@
 
 use crate::sassi::orchestrator::Sassi;
 use std::any::{Any, TypeId};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Type-erased collector emitted by `#[sassi::trait_impl]`.
@@ -88,8 +89,17 @@ impl TraitRegistry {
     {
         let mut out = Vec::new();
         let target = TypeId::of::<Trait>();
+        let mut seen: HashSet<(TypeId, TypeId)> = HashSet::new();
         for entry in inventory::iter::<TraitImplEntry>() {
             if entry.trait_type_id != target {
+                continue;
+            }
+            if !seen.insert((entry.trait_type_id, entry.model_type_id)) {
+                tracing::debug!(
+                    "sassi: dedup — skipping duplicate registration for ({:?}, {:?})",
+                    entry.trait_type_id,
+                    entry.model_type_id
+                );
                 continue;
             }
             let erased = (entry.collect_fn)(sassi);
