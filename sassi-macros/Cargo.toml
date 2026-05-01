@@ -18,3 +18,7 @@ proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
 sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-alpha.0" }
+
+[dev-dependencies]
+sassi = { path = "../sassi", version = "0.1.0-alpha.0" }
+trybuild = "1"

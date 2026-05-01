@@ -1,0 +1,5 @@
+error: Cacheable: only structs are supported (no enums or unions)
+ --> tests/compile_fail/cacheable_on_enum.rs:6:6
+  |
+6 | enum NotAStruct {
+  |      ^^^^^^^^^^

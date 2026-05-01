@@ -34,6 +34,12 @@ pub mod predicate;
 pub use cacheable::{Cacheable, Field};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp};
 
+// Derive macro re-export. The trait and the derive share the name
+// `Cacheable` (different namespaces — type namespace for the trait,
+// macro namespace for the derive); this matches the standard pattern
+// used by stdlib `Clone`, `Debug`, etc.
+pub use sassi_macros::Cacheable;
+
 /// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for
 /// runtime diagnostics and for producing `__sassi_v` envelope tags
 /// (see the wire-format module, landing in a later task).
