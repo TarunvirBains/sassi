@@ -70,7 +70,8 @@ pub use sassi_macros::{Cacheable, trait_impl};
 /// private module layout.
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::sassi::trait_registry::register_trait_impl_raw;
+    pub use crate::sassi::trait_registry::TraitImplEntry;
+    pub use inventory;
 }
 
 /// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for

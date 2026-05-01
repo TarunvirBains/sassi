@@ -1,4 +1,12 @@
 //! Attribute macro for registering cross-type trait implementations.
+//!
+//! Expansion emits the original impl plus one
+//! `inventory::submit!` block. The `inventory` crate handles the
+//! platform-specific startup registration (`.init_array` /
+//! `__DATA,__mod_init_func` / `.CRT$XCU` on native, the wasm32
+//! initializer on `wasm32-unknown-unknown`), so adopter crates with
+//! `#![forbid(unsafe_code)]` are not rejected — the `unsafe`
+//! attribute syntax never appears in the macro's output.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -7,10 +15,23 @@ use syn::{ItemImpl, Path, parse_macro_input, spanned::Spanned};
 
 /// Expand `#[sassi::trait_impl]` on a concrete trait impl.
 ///
-/// The original impl is emitted unchanged. A small startup
-/// constructor registers the `(model type, trait)` pair with sassi's
+/// The original impl is emitted unchanged. A `inventory::submit!`
+/// block registers the `(model type, trait)` pair with sassi's
 /// hidden registry so `Sassi::all_impl::<dyn Trait>()` can collect
 /// matching entries later.
+///
+/// # Adopter constraints
+///
+/// - The impl block must be concrete — generic parameters, `where`
+///   clauses, and negative impls are rejected at expansion time
+///   with a span-pointing diagnostic.
+/// - The trait must satisfy `Send + Sync + 'static`. Without those
+///   bounds, the macro's emitted collector cannot box the typed
+///   `Vec<Arc<dyn Trait>>` as `Box<dyn Any + Send + Sync>` and the
+///   adopter sees a compile-time error at the macro invocation.
+///   `'static` is implied by `dyn Trait: Any` whenever the trait
+///   has no captured lifetimes; in practice almost every cross-type
+///   trait satisfies this naturally.
 pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = TokenStream2::from(args);
     let item = parse_macro_input!(input as ItemImpl);
@@ -88,33 +109,13 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
                 ::std::boxed::Box::new(values)
             }
 
-            #[used]
-            #[cfg_attr(
-                any(
-                    target_os = "android",
-                    target_os = "dragonfly",
-                    target_os = "freebsd",
-                    target_os = "linux",
-                    target_os = "netbsd",
-                    target_os = "openbsd"
-                ),
-                unsafe(link_section = ".init_array")
-            )]
-            #[cfg_attr(
-                any(target_os = "ios", target_os = "macos"),
-                unsafe(link_section = "__DATA,__mod_init_func")
-            )]
-            #[cfg_attr(target_os = "windows", unsafe(link_section = ".CRT$XCU"))]
-            static __SASSI_REGISTER_TRAIT_IMPL: extern "C" fn() = {
-                extern "C" fn __sassi_register_trait_impl() {
-                    ::sassi::__private::register_trait_impl_raw(
-                        ::std::any::TypeId::of::<dyn #trait_path>(),
-                        ::std::any::TypeId::of::<#model_ty>(),
-                        __sassi_collect_trait_impl,
-                    );
+            ::sassi::__private::inventory::submit! {
+                ::sassi::__private::TraitImplEntry {
+                    trait_type_id: ::std::any::TypeId::of::<dyn #trait_path>(),
+                    model_type_id: ::std::any::TypeId::of::<#model_ty>(),
+                    collect_fn: __sassi_collect_trait_impl,
                 }
-                __sassi_register_trait_impl
-            };
+            }
         };
     };
 

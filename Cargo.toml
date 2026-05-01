@@ -56,3 +56,12 @@ gloo-timers = { version = "0.4", features = ["futures"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
+
+# Typed distributed plugin registration. Used by sassi's
+# `#[sassi::trait_impl]` macro to register `(model type, trait)` pairs
+# at process startup without hand-rolling platform link sections.
+# Encapsulates the `unsafe(link_section)` machinery inside `inventory`
+# itself, so adopters that set `#![forbid(unsafe_code)]` are not
+# rejected by macro expansion. Has documented support for
+# `wasm32-unknown-unknown`.
+inventory = "0.3"

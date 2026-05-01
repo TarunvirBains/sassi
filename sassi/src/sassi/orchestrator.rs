@@ -75,6 +75,17 @@ impl Sassi {
     /// a trait implementation says the model type can participate,
     /// but a particular `Sassi` instance still decides which pools it
     /// owns.
+    ///
+    /// # Trait bounds
+    ///
+    /// `Trait` must satisfy `Send + Sync + 'static`. The bound is
+    /// load-bearing — the registry's collector boxes its typed
+    /// `Vec<Arc<dyn Trait>>` payload as
+    /// `Box<dyn Any + Send + Sync>` for type erasure across the
+    /// inventory boundary, and `Any` requires `'static`. Adopters
+    /// who declare a trait without those bounds receive a
+    /// compile-time error at the `Sassi::all_impl` call, not at
+    /// runtime.
     pub fn all_impl<Trait>(&self) -> Vec<Arc<Trait>>
     where
         Trait: ?Sized + Send + Sync + 'static,

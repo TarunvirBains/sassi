@@ -45,6 +45,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 sassi-macros = { path = "../sassi-macros", version = "0.1.0-alpha.0" }
+inventory = { workspace = true }
 # `web-time` is a drop-in for `std::time::Instant` that works on
 # `wasm32-unknown-unknown`. Used only on wasm — native builds keep
 # `tokio::time::Instant` so tests retain `tokio::time::pause()` /
