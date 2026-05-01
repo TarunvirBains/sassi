@@ -30,6 +30,12 @@ impl Cacheable for Item {
     fn id(&self) -> i64 {
         self.id
     }
+    fn fields() -> ItemFields {
+        ItemFields {
+            id: Field::new("id", |i| &i.id),
+            name: Field::new("name", |i| &i.name),
+        }
+    }
 }
 
 #[tokio::test]
@@ -249,6 +255,35 @@ fn build_panics_on_zero_lru_size() {
     let _ = Punnu::<Item>::builder()
         .config(PunnuConfig {
             lru_size: 0,
+            ..Default::default()
+        })
+        .build();
+}
+
+#[test]
+#[should_panic(expected = "PunnuConfig::ttl_sweep_interval must be greater than Duration::ZERO")]
+fn build_panics_on_zero_ttl_sweep_interval() {
+    // Guard against a `tokio::time::interval(Duration::ZERO)` panic
+    // at sweep-spawn time. The builder catches the bad shape with a
+    // descriptive message; consumers who want "no sweep" must pass
+    // `None`.
+    let _ = Punnu::<Item>::builder()
+        .config(PunnuConfig {
+            ttl_sweep_interval: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        })
+        .build();
+}
+
+#[test]
+#[should_panic(expected = "PunnuConfig::event_channel_capacity must be greater than 0")]
+fn build_panics_on_zero_event_channel_capacity() {
+    // Guard against a `tokio::sync::broadcast::channel(0)` panic at
+    // build time. The builder catches the bad shape and surfaces a
+    // descriptive message instead of the cryptic tokio panic.
+    let _ = Punnu::<Item>::builder()
+        .config(PunnuConfig {
+            event_channel_capacity: 0,
             ..Default::default()
         })
         .build();

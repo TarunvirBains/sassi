@@ -45,13 +45,20 @@
 #[cfg(feature = "runtime-tokio")]
 use crate::cacheable::Cacheable;
 #[cfg(feature = "runtime-tokio")]
-use crate::punnu::events::{InvalidationReason, PunnuEvent};
+use crate::punnu::events::{EventReason, PunnuEvent};
 #[cfg(feature = "runtime-tokio")]
 use crate::punnu::pool::PunnuInner;
 use std::sync::Arc;
 #[cfg(feature = "runtime-tokio")]
 use std::sync::Weak;
-use std::time::Instant;
+// `tokio::time::Instant` is a drop-in for `std::time::Instant` that
+// honours `tokio::time::pause()` / `advance()` in tests. Production
+// behaviour is identical (wall-clock semantics); test code that opts
+// into `#[tokio::test(start_paused = true)]` gets deterministic
+// virtual-time control over sassi's TTL bookkeeping. Tokio's `time`
+// feature is unconditionally enabled in the workspace, so this import
+// works for both `runtime-tokio` and the no-default-features build.
+use tokio::time::Instant;
 
 /// LRU storage cell — holds the cached payload plus per-entry
 /// metadata.
@@ -63,8 +70,11 @@ pub(crate) struct Entry<T> {
     pub value: Arc<T>,
 
     /// Absolute expiry deadline, computed from
-    /// `Instant::now() + ttl` at insert time. `None` means the entry
-    /// never expires on time (LRU eviction can still drop it).
+    /// `tokio::time::Instant::now() + ttl` at insert time. `None`
+    /// means the entry never expires on time (LRU eviction can still
+    /// drop it). `tokio::time::Instant` is a drop-in for
+    /// `std::time::Instant` that honours `tokio::time::pause` in
+    /// tests; production wall-clock semantics are unchanged.
     pub expires_at: Option<Instant>,
 }
 
@@ -116,10 +126,11 @@ impl<T> Clone for Entry<T> {
 /// cleanly. No explicit handle, no `JoinHandle` to drop, no
 /// `Notify` — the cancellation primitive is owner-loss itself.
 ///
-/// The executor abstraction lands in a later task; until then, the
-/// sweep is hard-coded to `tokio::spawn`. WASM consumers that opt
-/// in to TTL with `ttl_sweep_interval = Some(_)` will need the
-/// executor refactor.
+/// Direct `tokio::spawn` here is wasm-incompatible; refactored
+/// through `PunnuExecutor` in Cluster B, Task 10. WASM consumers
+/// that opt in to TTL with `ttl_sweep_interval = Some(_)` need that
+/// executor abstraction. Tracked at
+/// <https://github.com/TarunvirBains/sassi/issues/3>.
 #[cfg(feature = "runtime-tokio")]
 pub(crate) fn spawn_sweep<T: Cacheable>(weak: Weak<PunnuInner<T>>, interval: std::time::Duration) {
     tokio::spawn(async move {
@@ -164,7 +175,7 @@ pub(crate) fn spawn_sweep<T: Cacheable>(weak: Weak<PunnuInner<T>>, interval: std
             for id in expired_ids {
                 let _ = inner.events.send(PunnuEvent::Invalidate {
                     id,
-                    reason: InvalidationReason::TtlExpired,
+                    reason: EventReason::TtlExpired,
                 });
             }
         }

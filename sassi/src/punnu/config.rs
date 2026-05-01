@@ -17,15 +17,23 @@
 //! native consumer" — 10k-entry LRU, 256-event channel, L1-only on
 //! backend failure, last-write-wins on conflict, no TTL, no metrics.
 //!
-//! Several fields ([`PunnuConfig::default_ttl`],
-//! [`PunnuConfig::ttl_sweep_interval`], [`PunnuConfig::namespace`],
-//! [`PunnuConfig::metrics`]) wire up across multiple tasks; their
-//! variants are pinned here so the config shape is stable from
-//! v0.1.0-alpha.0 onward — adopters see the full surface, even though
-//! some hooks are not yet load-bearing.
+//! Several fields wire up across multiple tasks; their variants are
+//! pinned here so the config shape is stable from v0.1.0-alpha.0
+//! onward — adopters see the full surface, even though some hooks are
+//! not yet load-bearing. Each field's doc comment names the specific
+//! cluster/task that loads it:
+//!
+//! - [`PunnuConfig::default_ttl`] / [`PunnuConfig::ttl_sweep_interval`]
+//!   — already load-bearing in Cluster A, Task 6.
+//! - [`PunnuConfig::namespace`] — wired into `CacheBackend` keys in
+//!   Cluster D, Task 13.
+//! - [`PunnuConfig::metrics`] — hook called from `Punnu::insert` /
+//!   `get` / `invalidate` in Cluster B, Task 8.
+//! - [`PunnuConfig::backend_failure_mode`] — routing logic lives in
+//!   Cluster D, Task 13 (`CacheBackend` integration).
 
 use crate::error::BackendError;
-use crate::punnu::events::InvalidationReason;
+use crate::punnu::events::EventReason;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,7 +67,8 @@ pub struct PunnuConfig {
     /// What to do when an L2 backend write-through fails during
     /// [`crate::punnu::Punnu::insert`]. Default
     /// [`BackendFailureMode::L1Only`] — log the error, succeed against
-    /// L1 alone. Loaded by the L2 wiring landing in a later task.
+    /// L1 alone. Routing logic lives in Cluster D, Task 13
+    /// (`CacheBackend` integration).
     pub backend_failure_mode: BackendFailureMode,
 
     /// What to do when [`crate::punnu::Punnu::insert`] is called for an
@@ -88,7 +97,7 @@ pub struct PunnuConfig {
     /// production setups typically use `"prod_v1"` / `"staging_v1"`,
     /// and tests use a per-run UUID for parallel isolation. L1
     /// storage is unaffected — namespacing governs only L2 keys.
-    /// Wires up when L2 backends land in a later task.
+    /// Wired into `CacheBackend` keys in Cluster D, Task 13.
     pub namespace: Option<String>,
 
     /// Optional observability hook. When `Some`, every event of
@@ -98,6 +107,8 @@ pub struct PunnuConfig {
     /// metrics layer they already use (Prometheus, OpenTelemetry,
     /// statsd, …) without sassi pulling in a metrics framework.
     /// Default `None` is a no-op that costs nothing at runtime.
+    /// Hook called from `Punnu::insert` / `get` / `invalidate` in
+    /// Cluster B, Task 8.
     pub metrics: Option<Arc<dyn PunnuMetrics>>,
 }
 
@@ -178,7 +189,7 @@ pub enum OnConflict {
     LastWriteWins,
 
     /// New insert returns
-    /// [`crate::punnu::InsertError::Conflict`]; the existing entry is
+    /// [`crate::error::InsertError::Conflict`]; the existing entry is
     /// left in place.
     Reject,
 
@@ -220,8 +231,11 @@ pub trait PunnuMetrics: Send + Sync {
     /// An entry left the cache. The reason discriminator lets metrics
     /// distinguish LRU pressure (undersized capacity) from TTL expiry
     /// (configured freshness window) from manual / save / delete
-    /// invalidation.
-    fn record_eviction(&self, type_name: &'static str, reason: InvalidationReason);
+    /// invalidation. Takes the full [`EventReason`] taxonomy — metrics
+    /// dashboards typically split by every reason, including the
+    /// system-internal `LruEvict` / `TtlExpired` / `BackendInvalidation`
+    /// reasons that callers cannot directly trigger.
+    fn record_eviction(&self, type_name: &'static str, reason: EventReason);
 
     /// An L2 backend operation failed. Surfaces the underlying
     /// [`BackendError`] so dashboards can split by failure mode

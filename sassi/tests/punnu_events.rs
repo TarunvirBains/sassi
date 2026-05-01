@@ -13,7 +13,9 @@
 //! Implementation lives in Task 4 (`pool.rs`); this file is the
 //! observability test surface.
 
-use sassi::{Cacheable, Field, InvalidationReason, OnConflict, Punnu, PunnuConfig, PunnuEvent};
+use sassi::{
+    Cacheable, EventReason, Field, InvalidationReason, OnConflict, Punnu, PunnuConfig, PunnuEvent,
+};
 use tokio::sync::broadcast::error::TryRecvError;
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,12 @@ impl Cacheable for E {
     type Fields = EFields;
     fn id(&self) -> i64 {
         self.id
+    }
+    fn fields() -> EFields {
+        EFields {
+            id: Field::new("id", |e| &e.id),
+            label: Field::new("label", |e| &e.label),
+        }
     }
 }
 
@@ -114,7 +122,9 @@ async fn invalidate_emits_invalidate_with_reason() {
     match rx.try_recv().expect("expected Invalidate event") {
         PunnuEvent::Invalidate { id, reason } => {
             assert_eq!(id, 1);
-            assert_eq!(reason, InvalidationReason::Manual);
+            // Public `Manual` lifts into the wider taxonomy as
+            // `EventReason::Manual` on the event stream.
+            assert_eq!(reason, EventReason::Manual);
         }
         other => panic!("expected PunnuEvent::Invalidate, got {other:?}"),
     }
@@ -153,7 +163,7 @@ async fn lru_evict_fires_invalidate_event() {
         match ev {
             PunnuEvent::Invalidate {
                 id: 1,
-                reason: InvalidationReason::LruEvict,
+                reason: EventReason::LruEvict,
             } => saw_evict = true,
             PunnuEvent::Insert { value } if value.id == 1 => saw_insert_1 = true,
             PunnuEvent::Insert { value } if value.id == 2 => saw_insert_2 = true,
@@ -186,7 +196,7 @@ async fn lru_evict_event_orders_before_insert_event_for_new_entry() {
         matches!(
             first,
             PunnuEvent::Invalidate {
-                reason: InvalidationReason::LruEvict,
+                reason: EventReason::LruEvict,
                 ..
             }
         ),

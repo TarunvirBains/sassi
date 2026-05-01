@@ -21,6 +21,6 @@ pub mod tenant;
 pub(crate) mod ttl;
 
 pub use config::{BackendFailureMode, CacheTier, OnConflict, PunnuConfig, PunnuMetrics};
-pub use events::{InvalidationReason, PunnuEvent};
+pub use events::{EventReason, InvalidationReason, PunnuEvent};
 pub use pool::{Punnu, PunnuBuilder};
 pub use tenant::TenantKey;

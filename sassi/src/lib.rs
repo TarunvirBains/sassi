@@ -48,8 +48,8 @@ pub use cacheable::{Cacheable, Field};
 pub use error::{BackendError, InsertError};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp};
 pub use punnu::{
-    BackendFailureMode, CacheTier, InvalidationReason, OnConflict, Punnu, PunnuBuilder,
-    PunnuConfig, PunnuEvent, PunnuMetrics, TenantKey,
+    BackendFailureMode, CacheTier, EventReason, InvalidationReason, OnConflict, Punnu,
+    PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, TenantKey,
 };
 
 // Derive macro re-export. The trait and the derive share the name

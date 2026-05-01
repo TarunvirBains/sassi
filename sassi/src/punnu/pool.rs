@@ -26,15 +26,19 @@
 use crate::cacheable::Cacheable;
 use crate::error::InsertError;
 use crate::punnu::config::{OnConflict, PunnuConfig};
-use crate::punnu::events::{InvalidationReason, PunnuEvent};
+use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::ttl::Entry;
 #[cfg(feature = "runtime-tokio")]
 use crate::punnu::ttl::spawn_sweep;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::broadcast;
+// `tokio::time::Instant` is a drop-in for `std::time::Instant` that
+// honours `tokio::time::pause()` / `advance()` in tests. See the same
+// rationale in `crate::punnu::ttl`. Production behaviour is unchanged.
+use tokio::time::Instant;
 
 /// Typed in-memory pool — the cache primitive. See module-level docs
 /// for concurrency and identity-map contract.
@@ -103,6 +107,7 @@ impl<T: Cacheable> Punnu<T> {
     /// #     type Id = i64;
     /// #     type Fields = UserFields;
     /// #     fn id(&self) -> i64 { self.id }
+    /// #     fn fields() -> UserFields { UserFields }
     /// # }
     /// # #[derive(Default)] struct UserFields;
     /// let pool: Punnu<User> = Punnu::builder().build();
@@ -129,7 +134,7 @@ impl<T: Cacheable> Punnu<T> {
     ///
     /// If the insert pushes the LRU past `lru_size`, the
     /// least-recently-used entry is evicted and an
-    /// [`InvalidationReason::LruEvict`] event fires before the
+    /// [`EventReason::LruEvict`] event fires before the
     /// `Insert` / `Update` event.
     ///
     /// `async` because L2 backend write-through (a later task) is
@@ -219,7 +224,7 @@ impl<T: Cacheable> Punnu<T> {
         {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: evicted_id,
-                reason: InvalidationReason::LruEvict,
+                reason: EventReason::LruEvict,
             });
         }
 
@@ -256,7 +261,7 @@ impl<T: Cacheable> Punnu<T> {
     ///
     /// 1. The entry is removed from L1.
     /// 2. A [`PunnuEvent::Invalidate`] with reason
-    ///    [`InvalidationReason::TtlExpired`] is emitted.
+    ///    [`EventReason::TtlExpired`] is emitted.
     /// 3. `None` is returned.
     ///
     /// The expiry check + removal happen under the same write lock
@@ -296,7 +301,7 @@ impl<T: Cacheable> Punnu<T> {
         if expired {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: id.clone(),
-                reason: InvalidationReason::TtlExpired,
+                reason: EventReason::TtlExpired,
             });
         }
         None
@@ -304,11 +309,33 @@ impl<T: Cacheable> Punnu<T> {
 
     /// Drop a single entry by id. No-op if the id is not cached.
     /// Emits [`PunnuEvent::Invalidate`] with the supplied reason
-    /// when an entry was actually removed.
+    /// (lifted into the wider [`EventReason`] taxonomy) when an entry
+    /// was actually removed.
+    ///
+    /// Accepts only the [`InvalidationReason`] subset
+    /// (`Manual` / `OnSave` / `OnDelete`) — system-internal reasons
+    /// like LRU eviction or TTL expiry are constructed by sassi itself
+    /// and surface on the event stream as [`EventReason::LruEvict`] /
+    /// [`EventReason::TtlExpired`], not via this entry point.
     ///
     /// `async` because L2 backend invalidation (a later task) is
     /// async; the L1-only path resolves immediately.
     pub async fn invalidate(&self, id: &T::Id, reason: InvalidationReason) {
+        self.invalidate_internal(id, EventReason::from(reason))
+            .await
+    }
+
+    /// Internal invalidation entry point — accepts the full
+    /// [`EventReason`] taxonomy so sassi-internal call sites (LRU
+    /// pressure that bypasses `LruCache::push`, TTL sweep, future
+    /// backend-driven invalidation) can emit system-internal reasons
+    /// without going through [`InvalidationReason`].
+    ///
+    /// Identical L1 semantics to [`Punnu::invalidate`] otherwise.
+    /// `pub(crate)` so it cannot be used by external callers — that
+    /// would defeat the public-vs-internal split that motivates the
+    /// two enums.
+    pub(crate) async fn invalidate_internal(&self, id: &T::Id, reason: EventReason) {
         let removed = {
             let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
@@ -411,6 +438,7 @@ impl<T: Cacheable> PunnuBuilder<T> {
     /// #     type Id = i64;
     /// #     type Fields = UserFields;
     /// #     fn id(&self) -> i64 { self.id }
+    /// #     fn fields() -> UserFields { UserFields }
     /// # }
     /// # #[derive(Default)] struct UserFields;
     /// let pool: Punnu<User> = Punnu::builder()
@@ -436,9 +464,20 @@ impl<T: Cacheable> PunnuBuilder<T> {
     ///
     /// # Panics
     ///
-    /// Panics if `config.lru_size == 0` — a zero-capacity LRU is a
-    /// programmer error, not a runtime failure mode (every insert
-    /// would immediately evict itself).
+    /// Panics if any of the following config invariants is violated;
+    /// the builder catches the bad shape at construction time so the
+    /// failure surfaces with a clear message instead of a cryptic panic
+    /// from a downstream primitive (`tokio::time::interval(0)` or
+    /// `broadcast::channel(0)`):
+    ///
+    /// - `config.lru_size == 0` — a zero-capacity LRU evicts every
+    ///   insert immediately, which is a programmer error.
+    /// - `config.ttl_sweep_interval == Some(Duration::ZERO)` — would
+    ///   reach `tokio::time::interval(0)` and panic at runtime. Use
+    ///   `None` to disable the sweep.
+    /// - `config.event_channel_capacity == 0` — would reach
+    ///   `broadcast::channel(0)` and panic at runtime. The minimum
+    ///   sensible value is `1`.
     pub fn build(self) -> Punnu<T> {
         let cap = NonZeroUsize::new(self.config.lru_size).unwrap_or_else(|| {
             panic!(
@@ -446,6 +485,18 @@ impl<T: Cacheable> PunnuBuilder<T> {
                  a zero-capacity LRU evicts every insert immediately"
             )
         });
+        if let Some(d) = self.config.ttl_sweep_interval {
+            assert!(
+                !d.is_zero(),
+                "PunnuConfig::ttl_sweep_interval must be greater than Duration::ZERO; \
+                 use None to disable the background sweep"
+            );
+        }
+        assert!(
+            self.config.event_channel_capacity > 0,
+            "PunnuConfig::event_channel_capacity must be greater than 0; \
+             the broadcast channel rejects a zero capacity"
+        );
         let sweep_interval = self.config.ttl_sweep_interval;
         let (events, _) = broadcast::channel(self.config.event_channel_capacity);
         let inner = Arc::new(PunnuInner {

@@ -27,6 +27,19 @@ use std::sync::Arc;
 /// payload type that doesn't derive `Debug`. Subscribers that want
 /// debug output should match on the variant and format their own
 /// fields.
+///
+/// # Reason taxonomy: [`EventReason`] vs. [`InvalidationReason`]
+///
+/// [`PunnuEvent::Invalidate`] carries an [`EventReason`] — the full
+/// taxonomy including system-internal reasons ([`EventReason::LruEvict`],
+/// [`EventReason::TtlExpired`], [`EventReason::BackendInvalidation`])
+/// that the runtime constructs but callers cannot synthesise.
+/// [`crate::punnu::Punnu::invalidate`] takes the narrower
+/// [`InvalidationReason`] enum, which is the public subset
+/// (`Manual` / `OnSave` / `OnDelete`). The split keeps the call-side
+/// API honest — callers can't pass `LruEvict` to `invalidate` — while
+/// subscribers continue to see one unified reason discriminator on the
+/// event stream.
 pub enum PunnuEvent<T: Cacheable> {
     /// A new entry landed in the cache. With
     /// [`crate::punnu::OnConflict::LastWriteWins`] (default) this fires
@@ -55,11 +68,17 @@ pub enum PunnuEvent<T: Cacheable> {
     /// subscribers can distinguish manual invalidation, LRU eviction,
     /// and TTL expiry — common patterns (e.g., metrics, distributed
     /// invalidation fan-out) want to react differently per reason.
+    ///
+    /// `reason` is an [`EventReason`] (the full taxonomy) rather than
+    /// an [`InvalidationReason`] (the public subset accepted by
+    /// [`crate::punnu::Punnu::invalidate`]). System-internal reasons
+    /// like [`EventReason::LruEvict`] and [`EventReason::TtlExpired`]
+    /// are reachable here even though no caller can construct them.
     Invalidate {
         /// Id of the entry that left.
         id: T::Id,
-        /// Why the entry left.
-        reason: InvalidationReason,
+        /// Why the entry left — full taxonomy.
+        reason: EventReason,
     },
 }
 
@@ -113,8 +132,12 @@ where
     }
 }
 
-/// Why an entry left the cache. Surfaced inside
-/// [`PunnuEvent::Invalidate`].
+/// Caller-supplied invalidation reason — the public subset accepted by
+/// [`crate::punnu::Punnu::invalidate`].
+///
+/// Externally-initiated invalidation only. System-internal reasons
+/// (LRU eviction, TTL expiry, backend-driven invalidation) live in the
+/// sibling [`EventReason`] enum; callers cannot synthesise those.
 ///
 /// The variants are stable wire-level identifiers — distributed
 /// backends fan invalidations across processes by reason, so adding a
@@ -128,13 +151,6 @@ pub enum InvalidationReason {
     /// `punnu.invalidate(&id, InvalidationReason::Manual).await`.
     Manual,
 
-    /// LRU eviction — the cache was at capacity and pushed this entry
-    /// to make room for a newer one. Distinguishable from
-    /// [`InvalidationReason::TtlExpired`] for metrics: an LRU-driven
-    /// eviction often indicates an undersized `lru_size`, while a
-    /// TTL-driven eviction indicates the configured freshness window.
-    LruEvict,
-
     /// Driven by a successful `Model::save` on the bound
     /// `DjogiContext` (the same-process invalidation path described
     /// in spec §6.1). Sassi-side semantics: the consumer surfaces this
@@ -144,16 +160,72 @@ pub enum InvalidationReason {
     /// Driven by a successful `Model::delete` on the bound
     /// `DjogiContext` (spec §6.1).
     OnDelete,
+}
 
-    /// A distributed cache backend (Redis pub/sub, Postgres
-    /// LISTEN/NOTIFY, …) pushed an invalidation that the
-    /// [`crate::punnu::Punnu`] applied locally. Wires up in a later
-    /// task (full backend trait); pinned now so subscribers can
-    /// pattern-match against it from v0.1.0-alpha.0 onward.
-    BackendInvalidation,
+/// Full invalidation taxonomy emitted on [`PunnuEvent::Invalidate`].
+///
+/// Includes both the public reasons callers can pass to
+/// [`crate::punnu::Punnu::invalidate`] (lifted in via the
+/// [`From<InvalidationReason>`] conversion) and the system-internal
+/// reasons sassi constructs itself ([`EventReason::LruEvict`],
+/// [`EventReason::TtlExpired`], [`EventReason::BackendInvalidation`]).
+/// Subscribers see this enum on the event stream; only the
+/// [`InvalidationReason`] subset is reachable through the public
+/// `invalidate` call path.
+///
+/// The variants are stable wire-level identifiers — distributed
+/// backends fan invalidations across processes by reason, so adding a
+/// new variant is a minor-version event and removing one is a
+/// breaking change. Sassi reserves the right to add new variants in
+/// future minor releases (the type is `#[non_exhaustive]`).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventReason {
+    /// Caller-driven invalidation — public path
+    /// [`crate::punnu::Punnu::invalidate`] with
+    /// [`InvalidationReason::Manual`].
+    Manual,
 
-    /// The entry's TTL elapsed. Either a lazy check on `get`
-    /// observed expiry, or the optional background sweep task removed
-    /// the entry mid-tick. See spec §6.2.5 for the TTL contract.
+    /// Caller-driven invalidation — public path
+    /// [`crate::punnu::Punnu::invalidate`] with
+    /// [`InvalidationReason::OnSave`].
+    OnSave,
+
+    /// Caller-driven invalidation — public path
+    /// [`crate::punnu::Punnu::invalidate`] with
+    /// [`InvalidationReason::OnDelete`].
+    OnDelete,
+
+    /// System-internal: LRU eviction. The cache was at capacity and
+    /// pushed this entry to make room for a newer one. Distinguishable
+    /// from [`EventReason::TtlExpired`] for metrics: an LRU-driven
+    /// eviction often indicates an undersized `lru_size`, while a
+    /// TTL-driven eviction indicates the configured freshness window.
+    /// Not reachable via [`crate::punnu::Punnu::invalidate`].
+    LruEvict,
+
+    /// System-internal: the entry's TTL elapsed. Either a lazy check
+    /// on `get` observed expiry, or the optional background sweep
+    /// task removed the entry mid-tick. See spec §6.2.5 for the TTL
+    /// contract. Not reachable via [`crate::punnu::Punnu::invalidate`].
     TtlExpired,
+
+    /// System-internal: a distributed cache backend (Redis pub/sub,
+    /// Postgres LISTEN/NOTIFY, …) pushed an invalidation that the
+    /// [`crate::punnu::Punnu`] applied locally. Pushed by the
+    /// `CacheBackend::invalidation_stream` consumer in Cluster D,
+    /// Task 13; pinned now so subscribers can pattern-match against
+    /// it from v0.1.0-alpha.0 onward. Not reachable via
+    /// [`crate::punnu::Punnu::invalidate`].
+    BackendInvalidation,
+}
+
+impl From<InvalidationReason> for EventReason {
+    fn from(r: InvalidationReason) -> Self {
+        match r {
+            InvalidationReason::Manual => Self::Manual,
+            InvalidationReason::OnSave => Self::OnSave,
+            InvalidationReason::OnDelete => Self::OnDelete,
+        }
+    }
 }

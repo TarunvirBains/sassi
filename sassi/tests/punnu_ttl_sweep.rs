@@ -8,10 +8,27 @@
 //! `punnu_ttl_lazy.rs`.
 //!
 //! The sweep is gated behind the `runtime-tokio` feature (it
-//! depends on `tokio::spawn`); these tests use the default feature
-//! set, which includes `runtime-tokio`.
+//! depends on `tokio::spawn`); this whole test file is gated the
+//! same way so the no-default-features build (`cargo test
+//! --no-default-features`) skips it cleanly. With the feature off,
+//! `Punnu::insert` succeeds but the sweep task never spawns, so the
+//! "sweep should have removed expired entry" assertions would fail
+//! silently — the gate makes that contract explicit.
+//!
+//! All tests run under `#[tokio::test(start_paused = true)]` and use
+//! `tokio::time::advance(...)` to drive virtual time forward
+//! deterministically. Sassi's TTL bookkeeping reads
+//! `tokio::time::Instant::now()`, which honours the paused clock, so
+//! advancement is observable to the cache. Background sweep ticks
+//! also fire under the paused clock — `tokio::time::interval` is
+//! governed by the same virtual clock — so a `tokio::task::yield_now`
+//! after `advance` is sufficient to let the sweep loop process its
+//! pending tick(s). No real `sleep` calls; the tests are impervious
+//! to CI scheduling jitter.
 
-use sassi::{Cacheable, Field, InvalidationReason, Punnu, PunnuConfig, PunnuEvent};
+#![cfg(feature = "runtime-tokio")]
+
+use sassi::{Cacheable, EventReason, Field, Punnu, PunnuConfig, PunnuEvent};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -31,28 +48,71 @@ impl Cacheable for E {
     fn id(&self) -> i64 {
         self.id
     }
+    fn fields() -> EFields {
+        EFields {
+            id: Field::new("id", |e| &e.id),
+        }
+    }
 }
 
-#[tokio::test]
+/// Anchor the background sweep task's interval timer at the current
+/// virtual time.
+///
+/// `tokio::spawn(...)` queues the sweep's future but doesn't poll it
+/// until the runtime yields; on a `current_thread` runtime under
+/// `#[tokio::test(start_paused = true)]`, that means the sweep's
+/// `tokio::time::interval` is constructed only after the test code
+/// yields. If we `advance` before the sweep has been polled, the
+/// interval anchors at the *advanced* time and the sweep wakes one
+/// interval *after* the advance — the test then sees no removal.
+///
+/// Calling `prime_sweep` after `Punnu::builder().build()` and any
+/// inserts forces the sweep to be polled at least once: it creates
+/// its interval, awaits the immediate first tick (the sweep skips
+/// it), and parks on the second tick. Subsequent `advance` calls
+/// will then fire the registered timer.
+async fn prime_sweep() {
+    // Two yields cover both the spawn point and the immediate first
+    // tick the sweep awaits-and-discards. Cheap, deterministic.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+}
+
+/// Yield enough times for the background sweep loop to process its
+/// pending wake-ups after a `tokio::time::advance`. The sweep task's
+/// `tick.tick().await` is a wakeup point on the paused clock; one
+/// yield per tick we want to process is sufficient because the sweep
+/// does no awaits between ticks (it acquires the L1 lock
+/// synchronously, drains, releases).
+async fn drive_sweep_ticks(n: usize) {
+    for _ in 0..n {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn sweep_removes_expired_without_get() {
     // Without sweep, an expired entry stays in L1 storage until a
     // `get` triggers the lazy path. With sweep configured, it's
     // gone from `len` after at most one sweep interval after expiry.
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
-            default_ttl: Some(Duration::from_millis(50)),
-            ttl_sweep_interval: Some(Duration::from_millis(20)),
+            default_ttl: Some(Duration::from_secs(5)),
+            ttl_sweep_interval: Some(Duration::from_secs(1)),
             ..Default::default()
         })
         .build();
     p.insert(E { id: 1 }).await.unwrap();
     assert_eq!(p.len(), 1);
 
-    // Wait long enough for: TTL elapsed (50ms) + at least one sweep
-    // tick after expiry (20ms) + the initial tick the sweep skips
-    // (20ms) + slack. 200ms is generous and keeps the test stable
-    // on slow CI.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Pin the sweep's interval timer at virtual t=0 before advancing.
+    prime_sweep().await;
+
+    // Advance past TTL and several sweep ticks. The sweep skips the
+    // first immediate tick (see `spawn_sweep`), so we need a couple
+    // of ticks past the expiry to be sure the sweep observed it.
+    tokio::time::advance(Duration::from_secs(10)).await;
+    drive_sweep_ticks(4).await;
 
     assert_eq!(
         p.len(),
@@ -61,19 +121,21 @@ async fn sweep_removes_expired_without_get() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sweep_emits_ttl_expired_event() {
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
-            default_ttl: Some(Duration::from_millis(50)),
-            ttl_sweep_interval: Some(Duration::from_millis(20)),
+            default_ttl: Some(Duration::from_secs(5)),
+            ttl_sweep_interval: Some(Duration::from_secs(1)),
             ..Default::default()
         })
         .build();
     let mut rx = p.events();
     p.insert(E { id: 7 }).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    prime_sweep().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    drive_sweep_ticks(4).await;
 
     // Drain everything; we should observe an Insert + a TtlExpired
     // event for id 7.
@@ -83,7 +145,7 @@ async fn sweep_emits_ttl_expired_event() {
             ev,
             PunnuEvent::Invalidate {
                 id: 7,
-                reason: InvalidationReason::TtlExpired,
+                reason: EventReason::TtlExpired,
             }
         ) {
             saw_ttl = true;
@@ -92,52 +154,53 @@ async fn sweep_emits_ttl_expired_event() {
     assert!(saw_ttl, "background sweep must emit TtlExpired");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sweep_does_not_remove_unexpired_entries() {
     // An entry whose TTL hasn't elapsed must survive the sweep.
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
             // Long TTL on the entry, short sweep interval.
-            default_ttl: Some(Duration::from_secs(5)),
-            ttl_sweep_interval: Some(Duration::from_millis(20)),
+            default_ttl: Some(Duration::from_secs(60 * 60)),
+            ttl_sweep_interval: Some(Duration::from_secs(1)),
             ..Default::default()
         })
         .build();
     p.insert(E { id: 1 }).await.unwrap();
 
     // Several sweep ticks pass without the TTL elapsing.
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    prime_sweep().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    drive_sweep_ticks(6).await;
     assert_eq!(p.len(), 1, "unexpired entry must survive the sweep");
     assert!(p.get(&1).is_some());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sweep_handles_mixed_expired_and_fresh() {
     // Insert two entries with different TTLs. The shorter expires;
     // the longer survives.
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
-            ttl_sweep_interval: Some(Duration::from_millis(20)),
+            ttl_sweep_interval: Some(Duration::from_secs(1)),
             ..Default::default()
         })
         .build();
-    p.insert_with_ttl(E { id: 1 }, Duration::from_millis(40))
+    p.insert_with_ttl(E { id: 1 }, Duration::from_secs(5))
         .await
         .unwrap();
-    p.insert_with_ttl(E { id: 2 }, Duration::from_secs(5))
+    p.insert_with_ttl(E { id: 2 }, Duration::from_secs(60 * 60))
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(180)).await;
+    prime_sweep().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    drive_sweep_ticks(4).await;
 
-    assert!(
-        p.get(&1).is_none(),
-        "id 1 (40ms TTL) should have been swept"
-    );
-    assert!(p.get(&2).is_some(), "id 2 (5s TTL) should still be present");
+    assert!(p.get(&1).is_none(), "id 1 (5s TTL) should have been swept");
+    assert!(p.get(&2).is_some(), "id 2 (1h TTL) should still be present");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sweep_terminates_when_punnu_dropped() {
     // Owner-loss cancellation: when every Punnu<T> clone is dropped,
     // the sweep's Weak::upgrade returns None on the next tick and
@@ -147,32 +210,34 @@ async fn sweep_terminates_when_punnu_dropped() {
     // test process exits cleanly (no orphan tasks holding refs).
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
-            ttl_sweep_interval: Some(Duration::from_millis(10)),
+            ttl_sweep_interval: Some(Duration::from_secs(1)),
             ..Default::default()
         })
         .build();
     p.insert(E { id: 1 }).await.unwrap();
     drop(p);
     // Give the sweep one or two ticks to observe the drop and exit.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    drive_sweep_ticks(4).await;
     // No assertion — the test is the absence of a hang or panic.
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sweep_interval_off_means_no_background_removal() {
     // Default config has `ttl_sweep_interval = None`. An expired
     // entry stays in L1 (occupying capacity) until a `get` triggers
     // the lazy path. This matches the spec — sweep is opt-in.
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
-            default_ttl: Some(Duration::from_millis(40)),
+            default_ttl: Some(Duration::from_secs(5)),
             // ttl_sweep_interval explicitly None.
             ..Default::default()
         })
         .build();
     p.insert(E { id: 1 }).await.unwrap();
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    drive_sweep_ticks(4).await;
     assert_eq!(
         p.len(),
         1,
