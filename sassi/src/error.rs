@@ -54,6 +54,68 @@ pub enum InsertError {
     BackendFailed(#[from] BackendError),
 }
 
+/// Reasons a [`crate::punnu::Punnu::get_or_fetch`] (or batch variant)
+/// can fail.
+///
+/// Carries either a backend error from the L2 path, a serialization
+/// failure (e.g., when the wire-format envelope rejects a payload), a
+/// fetcher panic surfaced via the single-flight follower path, or an
+/// arbitrary boxed error supplied by the consumer's fetcher closure.
+///
+/// Spec §3.5.1 enumerates the four owner-loss cases the single-flight
+/// path must handle deterministically; `FetcherPanic` is the one that
+/// surfaces here. The other three (originator-drop-with-peers,
+/// all-awaiters-drop, caller-imposed-deadline) don't produce a
+/// `FetchError` — they either leave the fetch alive, drop it cleanly,
+/// or surface as a `tokio::time::error::Elapsed` from the caller's
+/// own `tokio::time::timeout` wrapper.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum FetchError {
+    /// L2 backend operation failed during the fetch path.
+    #[error("backend operation failed during fetch: {0}")]
+    Backend(#[from] BackendError),
+
+    /// Serialization / deserialization of a fetched payload failed.
+    /// Inner string is consumer-supplied (e.g., serde error rendering).
+    #[error("fetch serialization error: {0}")]
+    Serialization(String),
+
+    /// The consumer-supplied fetcher closure panicked. Sassi does not
+    /// `catch_unwind` around the fetcher (that would mask programmer
+    /// bugs); this variant surfaces only via the
+    /// [`futures::future::Shared`] follower-broadcast path described in
+    /// spec §3.5.1: when the fetcher panics, *every* awaiter sees this
+    /// error rather than one peer hanging on a dropped future. The
+    /// `type_name` is `std::any::type_name::<T>()` of the cached type
+    /// — useful as a diagnostic label.
+    #[error("fetcher panicked while resolving {type_name}: {message}")]
+    FetcherPanic {
+        /// `std::any::type_name::<T>()` of the cached type.
+        type_name: &'static str,
+        /// Best-effort panic-payload message (extracted from the
+        /// panic's `Box<dyn Any>`); empty when the payload isn't a
+        /// `String` / `&'static str`.
+        message: String,
+    },
+
+    /// The consumer's fetcher returned a custom error. Boxed so the
+    /// variant size stays small. Use [`FetchError::Custom`] when none
+    /// of the structured variants fit (transport errors specific to
+    /// the consumer's data source, business-logic rejections, etc.).
+    #[error("fetcher error: {0}")]
+    Custom(Box<dyn std::error::Error + Send + Sync>),
+
+    /// L1 insert failed after the fetcher returned a value — surfaces
+    /// when [`crate::punnu::OnConflict::Reject`] is configured and a
+    /// concurrent insert raced ahead, or when an L2 write-through
+    /// fails under [`crate::punnu::BackendFailureMode::Error`]. Lifts
+    /// [`InsertError`] into the fetch error space so
+    /// `Punnu::get_or_fetch` can return a single error type.
+    #[error("L1 insert failed during fetch: {0}")]
+    Insert(#[from] InsertError),
+}
+
 /// Errors from the [`CacheBackend`](crate) trait surface.
 ///
 /// The full backend trait lands in a later task; the variants are

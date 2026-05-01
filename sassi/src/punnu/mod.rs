@@ -17,6 +17,7 @@
 pub mod config;
 pub mod events;
 pub mod pool;
+pub(crate) mod single_flight;
 pub mod tenant;
 pub(crate) mod ttl;
 

@@ -47,7 +47,7 @@ pub mod punnu;
 pub(crate) mod time;
 
 pub use cacheable::{Cacheable, Field};
-pub use error::{BackendError, InsertError};
+pub use error::{BackendError, FetchError, InsertError};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp};
 pub use punnu::{
     BackendFailureMode, CacheTier, EventReason, InvalidationReason, OnConflict, Punnu,

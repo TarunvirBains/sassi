@@ -24,14 +24,16 @@
 //! so a sync lock under an async runtime is safe.
 
 use crate::cacheable::Cacheable;
-use crate::error::InsertError;
+use crate::error::{FetchError, InsertError};
 use crate::executor::{DefaultExecutor, PunnuExecutor};
 use crate::punnu::config::{OnConflict, PunnuConfig};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
+use crate::punnu::single_flight::InFlightRegistry;
 use crate::punnu::ttl::Entry;
 #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
 use crate::punnu::ttl::spawn_sweep;
 use lru::LruCache;
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -109,6 +111,13 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// <https://github.com/TarunvirBains/sassi/issues/4>.
     #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
     pub(crate) sweep_initialised: Option<Arc<Notify>>,
+
+    /// Single-flight in-flight fetch registry — deduplicates
+    /// concurrent [`Punnu::get_or_fetch`] callers for the same id so
+    /// the consumer's fetcher closure runs exactly once per cold
+    /// fetch. See [`crate::punnu::single_flight`] for the cancellation
+    /// contract.
+    pub(crate) in_flight: InFlightRegistry<T>,
 }
 
 impl<T: Cacheable> Punnu<T> {
@@ -372,6 +381,190 @@ impl<T: Cacheable> Punnu<T> {
         }
     }
 
+    /// Get-or-fetch convenience for the lazy-fetch-on-miss pattern.
+    ///
+    /// On L1 hit, returns the cached `Arc<T>` immediately (no fetcher
+    /// invocation). On miss, calls `fetcher`; if it returns
+    /// `Some(value)`, inserts the value into L1 (so a subsequent
+    /// `get` is a hit) and returns `Some(arc)`. If the fetcher
+    /// returns `None`, the cache is left untouched and `None` is
+    /// returned — distinct from "fetch failed".
+    ///
+    /// # Single-flight coalescing (spec §3.5.1)
+    ///
+    /// Concurrent `get_or_fetch` calls for the same `id` deduplicate:
+    /// exactly one fetcher runs per cold fetch, even when N callers
+    /// race. Subsequent in-flight callers `await` the same
+    /// [`futures::future::Shared`] future. On completion the registry
+    /// slot is cleared and the result lands in L1.
+    ///
+    /// # Cancellation contract
+    ///
+    /// Four owner-loss cases, all deterministic:
+    ///
+    /// 1. **Originating caller drops, peers polling.** The fetch
+    ///    stays alive while ≥1 peer awaits.
+    /// 2. **All awaiters drop simultaneously.** Fetch is cancelled;
+    ///    registry slot is cleared. Subsequent calls retry from cold.
+    /// 3. **Fetcher panics.** Every awaiter receives
+    ///    [`crate::error::FetchError::FetcherPanic`]. The registry
+    ///    slot is cleared.
+    /// 4. **Caller-imposed deadline.** Punnu does not impose one.
+    ///    Wrap the call in `tokio::time::timeout(...)` for case 4 —
+    ///    that surfaces as case 1 from the registry's perspective.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use sassi::Punnu;
+    /// # struct User { id: i64 }
+    /// # impl sassi::Cacheable for User {
+    /// #     type Id = i64;
+    /// #     type Fields = UserFields;
+    /// #     fn id(&self) -> i64 { self.id }
+    /// #     fn fields() -> UserFields { UserFields }
+    /// # }
+    /// # #[derive(Default)] struct UserFields;
+    /// # async fn run(p: Punnu<User>) -> Result<(), sassi::FetchError> {
+    /// let user = p.get_or_fetch(&42, |id| async move {
+    ///     // Pretend this is a database call.
+    ///     Ok::<_, sassi::FetchError>(Some(User { id }))
+    /// }).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_or_fetch<F, Fut>(
+        &self,
+        id: &T::Id,
+        fetcher: F,
+    ) -> Result<Option<Arc<T>>, FetchError>
+    where
+        F: FnOnce(T::Id) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Option<T>, FetchError>> + Send + 'static,
+    {
+        // L1 fast path — also runs the lazy TTL check via `get`.
+        if let Some(arc) = self.get(id) {
+            return Ok(Some(arc));
+        }
+
+        // Single-flight coalescing on miss. The registry returns
+        // `Arc<T>` when the fetcher returned `Some`; we then insert
+        // into L1 so the next `get` is a hit.
+        let result = self.inner.in_flight.get_or_fetch(id, fetcher).await?;
+
+        if let Some(arc) = &result {
+            // Insert through the standard path so `OnConflict`,
+            // events, and (later) metrics fire as if the consumer
+            // had called `insert` directly. We use `insert_arc` —
+            // see below — which avoids cloning the inner value.
+            self.insert_arc_into_l1(arc.clone()).await?;
+        }
+        Ok(result)
+    }
+
+    /// Batch get-or-fetch. Splits `ids` into "already cached"
+    /// (returned immediately) and "missing" (passed to
+    /// `batch_fetcher` as a single call). Avoids N round-trips when
+    /// the consumer naturally has a list of ids to resolve.
+    ///
+    /// # Single-flight semantics (v0.1)
+    ///
+    /// Within a single batch call, missing ids are deduplicated
+    /// before the batch fetcher is invoked (input may contain dupes).
+    /// Across concurrent batch calls, batch-level deduplication is
+    /// **not** implemented in v0.1 — two concurrent
+    /// `get_or_fetch_many(&[1, 2, 3])` calls invoke the batch fetcher
+    /// twice for the same set. Per-id single-flight coalescing across
+    /// concurrent *individual* `get_or_fetch` calls still applies as
+    /// usual; only the batch path skips the cross-batch dedup.
+    ///
+    /// Tracked as a v0.2 enhancement.
+    ///
+    /// # Result ordering
+    ///
+    /// The returned `Vec<Arc<T>>` does **not** preserve the input
+    /// `ids` order. Hits come first (in the order they were found
+    /// in L1), then fetched entries (in the order the batch fetcher
+    /// returned them). Consumers needing positional lookup should
+    /// build a `HashMap<T::Id, Arc<T>>` from the result.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use sassi::Punnu;
+    /// # struct User { id: i64 }
+    /// # impl sassi::Cacheable for User {
+    /// #     type Id = i64;
+    /// #     type Fields = UserFields;
+    /// #     fn id(&self) -> i64 { self.id }
+    /// #     fn fields() -> UserFields { UserFields }
+    /// # }
+    /// # #[derive(Default)] struct UserFields;
+    /// # async fn run(p: Punnu<User>) -> Result<(), sassi::FetchError> {
+    /// let users = p.get_or_fetch_many(&[1, 2, 3, 4, 5], |missing| async move {
+    ///     // Pretend this is one batched DB call.
+    ///     Ok::<_, sassi::FetchError>(missing.into_iter().map(|id| User { id }).collect())
+    /// }).await?;
+    /// # let _ = users; Ok(()) }
+    /// ```
+    pub async fn get_or_fetch_many<F, Fut>(
+        &self,
+        ids: &[T::Id],
+        batch_fetcher: F,
+    ) -> Result<Vec<Arc<T>>, FetchError>
+    where
+        F: FnOnce(Vec<T::Id>) -> Fut + Send,
+        Fut: Future<Output = Result<Vec<T>, FetchError>> + Send,
+    {
+        // Split cached vs missing. We dedup the `missing` list so the
+        // batch fetcher isn't asked for the same id twice within one
+        // call (consumers may pass dupes; batch backends rarely
+        // dedupe themselves).
+        let mut hits = Vec::new();
+        let mut missing: Vec<T::Id> = Vec::new();
+        let mut seen_missing: std::collections::HashSet<T::Id> = std::collections::HashSet::new();
+        for id in ids {
+            if let Some(arc) = self.get(id) {
+                hits.push(arc);
+            } else if seen_missing.insert(id.clone()) {
+                missing.push(id.clone());
+            }
+        }
+
+        if missing.is_empty() {
+            return Ok(hits);
+        }
+
+        // One batch fetch covers every missing id. Cross-batch
+        // dedup is documented as a v0.2 enhancement above.
+        let fetched = batch_fetcher(missing).await?;
+        let mut fetched_arcs = Vec::with_capacity(fetched.len());
+        for value in fetched {
+            // Route through the public `insert` path so OnConflict,
+            // event emission, and (later) metrics fire as if the
+            // consumer had inserted manually.
+            let arc = self.insert(value).await?;
+            fetched_arcs.push(arc);
+        }
+        hits.extend(fetched_arcs);
+        Ok(hits)
+    }
+
+    /// Insert a pre-built `Arc<T>` into L1 without cloning the
+    /// inner value. Used by [`Punnu::get_or_fetch`] after a
+    /// single-flight fetch — the fetcher returns `T`, single-flight
+    /// wraps it in an `Arc<T>` for cheap multi-awaiter sharing, and
+    /// this method threads the arc into L1 with the same OnConflict
+    /// + event-emission semantics as [`Punnu::insert`].
+    ///
+    /// `pub(crate)` because consumers should use `insert` (which
+    /// handles boxing); this is the internal escape hatch for the
+    /// single-flight path.
+    pub(crate) async fn insert_arc_into_l1(&self, arc: Arc<T>) -> Result<(), InsertError> {
+        let ttl = self.inner.config.default_ttl;
+        self.insert_arc_internal(arc, ttl).await?;
+        Ok(())
+    }
+
     /// Number of entries currently in the L1.
     ///
     /// Snapshots the current size; concurrent inserts / invalidates
@@ -553,6 +746,7 @@ impl<T: Cacheable> PunnuBuilder<T> {
             executor,
             #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
             sweep_initialised: sweep_initialised.clone(),
+            in_flight: InFlightRegistry::new(),
         });
 
         // Spawn the sweep before constructing the public handle so
