@@ -26,8 +26,10 @@
 use crate::cacheable::Cacheable;
 use crate::error::{FetchError, InsertError};
 use crate::executor::{DefaultExecutor, PunnuExecutor};
+use crate::predicate::MemQ;
 use crate::punnu::config::{CacheTier, OnConflict, PunnuConfig};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
+use crate::punnu::scope::PunnuScope;
 use crate::punnu::single_flight::InFlightRegistry;
 use crate::punnu::ttl::Entry;
 #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
@@ -765,9 +767,33 @@ impl<T: Cacheable> Punnu<T> {
         &self.inner.config
     }
 
-    // `scope()` (the predicate-driven query handle) is a future
-    // extension that pairs with the `MemQ<T>` algebra. Until then,
-    // callers compose with `Punnu::get` / iteration over `events()`.
+    /// Build an owned query scope over this pool.
+    ///
+    /// The scope captures a cloned `Punnu<T>` handle, not a borrow, so
+    /// callers can move the query handle freely. The supplied
+    /// operations remain lazy until a terminal method such as
+    /// [`PunnuScope::collect`] or [`PunnuScope::iter`] runs.
+    pub fn scope(&self, ops: impl Into<Vec<MemQ<T>>>) -> PunnuScope<T> {
+        PunnuScope::new(Arc::new(self.clone()), ops)
+    }
+
+    /// Snapshot unexpired entries for an owned query scope.
+    ///
+    /// Scope collection is read-shaped: it skips expired entries but
+    /// does not perform lazy TTL removal or emit invalidation events.
+    /// The public `get` path remains the place where lazy expiry
+    /// mutates the L1.
+    pub(crate) fn snapshot_unexpired(&self) -> Vec<Arc<T>> {
+        let now = self.inner.executor.now();
+        let map =
+            self.inner.map.read().expect(
+                "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
+            );
+        map.iter()
+            .filter(|(_, entry)| !entry.is_expired_at(now))
+            .map(|(_, entry)| entry.value.clone())
+            .collect()
+    }
 
     /// Test-only readiness handshake — resolves once the background
     /// TTL sweep task has been polled the first time and is parked on

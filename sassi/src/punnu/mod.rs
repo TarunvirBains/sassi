@@ -9,6 +9,7 @@
 pub mod config;
 pub mod events;
 pub mod pool;
+pub mod scope;
 pub(crate) mod single_flight;
 pub mod tenant;
 pub(crate) mod ttl;
@@ -16,4 +17,5 @@ pub(crate) mod ttl;
 pub use config::{BackendFailureMode, CacheTier, OnConflict, PunnuConfig, PunnuMetrics};
 pub use events::{EventReason, InvalidationReason, PunnuEvent};
 pub use pool::{Punnu, PunnuBuilder};
+pub use scope::PunnuScope;
 pub use tenant::TenantKey;
