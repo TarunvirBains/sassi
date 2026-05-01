@@ -164,6 +164,15 @@ impl<T> FieldPredicate<T> {
     /// equality/comparison ops `V` is the field's value type; for
     /// `Between` it's `(V, V)`; for `In`/`NotIn` it's `Vec<V>`;
     /// for null tests it's `()`; for string ops it's `String`.
+    ///
+    /// **Caller must know `V` at compile time.** This is sufficient for
+    /// in-process typed lowering (e.g., djogi's `Q<T>` SQL emitter,
+    /// which has access to the model's field-type registry via the
+    /// generated `Cacheable::Fields` shape). It is **not** sufficient
+    /// for generic predicate persistence (serde-based round-trip across
+    /// processes without a shared type registry); that case requires a
+    /// separate codec layer that pairs each `LookupOp` with a
+    /// type-aware deserializer — out of scope for v0.1.
     #[inline]
     pub fn value_as<V: Any + 'static>(&self) -> Option<&V> {
         self.value.downcast_ref::<V>()
