@@ -1,0 +1,36 @@
+[workspace]
+members = ["sassi", "sassi-codegen", "sassi-macros"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-alpha.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/TarunvirBains/sassi"
+homepage = "https://github.com/TarunvirBains/sassi"
+authors = ["Tarunvir Bains"]
+rust-version = "1.95"
+
+[workspace.dependencies]
+# Async substrate
+tokio = { version = "1.48", default-features = false, features = ["sync", "rt"] }
+futures = "0.3"
+
+# Serde — opt-in for cross-runtime wire format
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Cache primitives
+lru = "0.12"
+dashmap = "6"
+
+# Logging — standard tracing surface
+tracing = "0.1"
+
+# Async-trait — until trait async stabilizes for object-safe traits
+async-trait = "0.1"
+
+# Macro substrate
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

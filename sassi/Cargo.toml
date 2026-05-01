@@ -1,0 +1,31 @@
+[package]
+name = "sassi"
+description = "Typed in-memory pool with composable predicate algebra and cross-runtime trait queries."
+readme = "../README.md"
+keywords = ["cache", "lru", "predicate", "query", "rust"]
+categories = ["caching", "data-structures"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["serde"]
+serde = ["dep:serde", "dep:serde_json"]
+# wasm consumers enable runtime-wasm; native consumers enable runtime-tokio
+runtime-tokio = ["tokio"]
+runtime-wasm = []
+
+[dependencies]
+tokio = { workspace = true, optional = true }
+futures = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+lru = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+sassi-macros = { path = "../sassi-macros", version = "0.1.0-alpha.0" }

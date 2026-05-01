@@ -1,0 +1,19 @@
+[package]
+name = "sassi-codegen"
+description = "Shared codegen primitives for sassi-macros and downstream proc-macro consumers (e.g., djogi-macros). Library crate, NOT a proc-macro crate."
+readme = "../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = false
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }

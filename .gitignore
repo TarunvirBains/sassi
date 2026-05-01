@@ -1,0 +1,17 @@
+# Local-only working docs — superpowers brainstorming, design rounds,
+# codex review findings. Mirrors the djogi convention.
+docs/superpowers/
+
+# Rust build artifacts
+/target
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Environment files
+.env
+.env.local
