@@ -414,14 +414,31 @@ async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
     // Step 2: Actor A starts get_or_fetch with a fetcher that awaits
     // a Notify. Cache is empty → initial get(1) misses → registers
     // in-flight fetch → fetcher runs → fetcher parks on Notify.
+    //
+    // The fetcher fires `fetcher_started_tx` *before* awaiting `go`,
+    // giving the test a deterministic readiness signal: by the time
+    // the test sees the oneshot resolve, Actor A has definitely (a)
+    // called the initial `self.get(id)` (cache miss), (b) registered
+    // the single-flight entry, and (c) entered the fetcher body.
+    // Actor A is parked on `go.notified()`. Without this, a
+    // `yield_now()` heuristic could let Actor B's insert beat Actor
+    // A's initial `get`, and Actor A's later `get` would lazy-pop
+    // the expired B entry before on_fetched ran — making the test
+    // vacuous against pre-fix code. Same shape as the issue #4
+    // sweep handshake: deterministic readiness > yield count.
     let go = Arc::new(Notify::new());
     let go_for_fetch = go.clone();
     let p_for_fetch = p.clone();
+    let (fetcher_started_tx, fetcher_started_rx) = tokio::sync::oneshot::channel::<()>();
     let actor_a = tokio::spawn(async move {
         p_for_fetch
             .get_or_fetch(&1, move |id| {
                 let go = go_for_fetch.clone();
                 async move {
+                    // Signal the fetcher body has been entered —
+                    // Actor A is past the cache-miss path and
+                    // registered in-flight before any Actor B work.
+                    let _ = fetcher_started_tx.send(());
                     go.notified().await;
                     Ok::<_, FetchError>(Some(E {
                         id,
@@ -432,10 +449,13 @@ async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
             .await
     });
 
-    // Yield so Actor A registers the in-flight fetch + parks on the
-    // Notify before Actor B runs.
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+    // Wait for Actor A to enter the fetcher (deterministic — the
+    // oneshot resolves only when the fetcher body runs, which only
+    // happens after Actor A's initial get-miss + single-flight
+    // registration).
+    fetcher_started_rx
+        .await
+        .expect("Actor A's fetcher must enter before Actor B inserts");
 
     // Step 3: Actor B inserts at id=1 with default 1s TTL.
     p.insert(E {
