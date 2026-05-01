@@ -16,13 +16,24 @@
 //!
 //! ```no_run
 //! # // no_run because Punnu doesn't exist yet — preview only
-//! # struct User { id: i64, age: u32 }
-//! # impl sassi::Cacheable for User {
-//! #     type Id = i64;
-//! #     type Fields = UserFields;
-//! #     fn id(&self) -> i64 { self.id }
-//! # }
-//! # #[derive(Default)] struct UserFields;
+//! use sassi::Field;
+//! struct User { id: i64, age: u32 }
+//! #[derive(Default)]
+//! struct UserFields {
+//!     pub id: Field<User, i64>,
+//!     pub age: Field<User, u32>,
+//! }
+//! impl sassi::Cacheable for User {
+//!     type Id = i64;
+//!     type Fields = UserFields;
+//!     fn id(&self) -> i64 { self.id }
+//!     fn fields() -> UserFields {
+//!         UserFields {
+//!             id: Field::new("id", |u| &u.id),
+//!             age: Field::new("age", |u| &u.age),
+//!         }
+//!     }
+//! }
 //! ```
 
 #![forbid(unsafe_code)]

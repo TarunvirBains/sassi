@@ -36,17 +36,17 @@ fn derive_emits_fields_constructor_with_real_extractors() {
         on_sale: false,
     };
 
-    // Every accessor's `extract` returns a reference to the matching field.
-    assert_eq!(*(f.id.extract)(&item), 7);
-    assert_eq!((f.name.extract)(&item), "Gadget");
-    assert_eq!(*(f.price.extract)(&item), 999);
-    assert!(!*(f.on_sale.extract)(&item));
+    // Every accessor's `extract` method returns a reference to the matching field.
+    assert_eq!(*f.id.extract(&item), 7);
+    assert_eq!(f.name.extract(&item), "Gadget");
+    assert_eq!(*f.price.extract(&item), 999);
+    assert!(!*f.on_sale.extract(&item));
 
-    // Every accessor's `name` matches the field identifier.
-    assert_eq!(f.id.name, "id");
-    assert_eq!(f.name.name, "name");
-    assert_eq!(f.price.name, "price");
-    assert_eq!(f.on_sale.name, "on_sale");
+    // Every accessor's `name()` matches the field identifier.
+    assert_eq!(f.id.name(), "id");
+    assert_eq!(f.name.name(), "name");
+    assert_eq!(f.price.name(), "price");
+    assert_eq!(f.on_sale.name(), "on_sale");
 }
 
 #[test]

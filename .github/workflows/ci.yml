@@ -112,7 +112,23 @@ jobs:
           key: ${{ runner.os }}-cargo-redis-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-redis-
 
+      # sassi-cache-redis lands in Task 13; until then this job is a
+      # no-op. Detect via `cargo metadata` rather than gating on a
+      # path filter so re-adding the crate later requires no workflow
+      # edit.
+      - name: Detect sassi-cache-redis presence
+        id: redis-crate
+        run: |
+          if cargo metadata --no-deps --format-version 1 \
+              | grep -q '"name":"sassi-cache-redis"'; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::sassi-cache-redis not yet in workspace; skipping redis job"
+          fi
+
       - name: Test sassi-cache-redis
+        if: steps.redis-crate.outputs.exists == 'true'
         run: cargo test -p sassi-cache-redis
 
   docs:

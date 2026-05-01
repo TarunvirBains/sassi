@@ -6,9 +6,9 @@
 //!   `^`, `!` operators. Lowers cleanly to SQL when consumed by an ORM
 //!   that knows the `Field<T, V>` shape (e.g., djogi). Evaluates
 //!   identically against an in-memory `&T` via [`BasicPredicate::evaluate`].
-//! - [`MemQ<T>`] (later task) — the in-memory-only extension. Adds
-//!   closure predicates and trait-impl predicates that can't be
-//!   projected into SQL.
+//! - `MemQ<T>` (lands in Cluster C, Task 11) — the in-memory-only
+//!   extension. Adds closure predicates and trait-impl predicates that
+//!   can't be projected into SQL.
 //!
 //! This module owns the universal base; `MemQ` lives next to the
 //! `Punnu` query handle since it's only useful in conjunction with an

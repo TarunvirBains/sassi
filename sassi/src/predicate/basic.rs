@@ -12,6 +12,10 @@ use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 /// Universal predicate algebra over `T`.
 ///
+/// Marked `#[non_exhaustive]` to keep room for new variants (e.g.,
+/// future `IfThenElse`) without semver-breaking downstream pattern
+/// matches.
+///
 /// # Composition
 ///
 /// ```
@@ -27,6 +31,7 @@ use std::ops::{BitAnd, BitOr, BitXor, Not};
 /// assert!(active_adult.evaluate(&alice));
 /// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BasicPredicate<T> {
     /// Always-true sentinel. Useful as an identity for `And` reductions.
     True,
@@ -36,9 +41,11 @@ pub enum BasicPredicate<T> {
     /// [`Field::eq`](crate::cacheable::Field) etc.
     Field(FieldPredicate<T>),
     /// Logical conjunction. Flattened: `a & b & c` produces a single
-    /// `And(vec![a, b, c])` rather than nested binary nodes.
+    /// `And(vec![a, b, c])` rather than nested binary nodes. An empty
+    /// `Vec` evaluates to `true` (vacuous-truth identity).
     And(Vec<BasicPredicate<T>>),
-    /// Logical disjunction. Flattened analogously to `And`.
+    /// Logical disjunction. Flattened analogously to `And`. An empty
+    /// `Vec` evaluates to `false` (no disjuncts succeed).
     Or(Vec<BasicPredicate<T>>),
     /// Logical negation. Double-negation collapses on construction.
     Not(Box<BasicPredicate<T>>),
@@ -52,13 +59,15 @@ impl<T> BasicPredicate<T> {
     /// short-circuiting where possible (`And` stops at the first
     /// `false`, `Or` at the first `true`).
     ///
-    /// `True` returns `true`; `False` returns `false`; `Field`
-    /// invokes the closure captured at construction time.
+    /// Vacuous identities: empty `And(vec![])` returns `true`; empty
+    /// `Or(vec![])` returns `false`. `True` returns `true`; `False`
+    /// returns `false`; `Field` invokes the closure captured at
+    /// construction time.
     pub fn evaluate(&self, value: &T) -> bool {
         match self {
             Self::True => true,
             Self::False => false,
-            Self::Field(fp) => (fp.eval)(value),
+            Self::Field(fp) => fp.evaluate(value),
             Self::And(children) => children.iter().all(|c| c.evaluate(value)),
             Self::Or(children) => children.iter().any(|c| c.evaluate(value)),
             Self::Not(inner) => !inner.evaluate(value),
