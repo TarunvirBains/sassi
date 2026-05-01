@@ -27,16 +27,19 @@ impl Cacheable for User {
     fn id(&self) -> i64 {
         self.id
     }
+    fn fields() -> UserFields {
+        UserFields {
+            id: Field::new("id", |u| &u.id),
+            name: Field::new("name", |u| &u.name),
+            age: Field::new("age", |u| &u.age),
+            banned: Field::new("banned", |u| &u.banned),
+            nickname: Field::new("nickname", |u| &u.nickname),
+        }
+    }
 }
 
 fn fields() -> UserFields {
-    UserFields {
-        id: Field::new("id", |u| &u.id),
-        name: Field::new("name", |u| &u.name),
-        age: Field::new("age", |u| &u.age),
-        banned: Field::new("banned", |u| &u.banned),
-        nickname: Field::new("nickname", |u| &u.nickname),
-    }
+    User::fields()
 }
 
 fn alice() -> User {

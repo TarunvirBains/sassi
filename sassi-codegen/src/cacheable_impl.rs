@@ -1,20 +1,22 @@
-//! [`generate_cacheable_impl`] — emits `impl Cacheable for T`, the
-//! `T::fields()` constructor, and the wiring between them.
+//! [`generate_cacheable_impl`] — emits `impl Cacheable for T`, including
+//! the `id()` extractor and the `fields()` constructor wired to real
+//! extractors. Both methods are required by the trait so generic code
+//! over `T: Cacheable` can call them without knowing the concrete type.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Field, Fields};
 
-/// Emit:
+/// Emit `impl Cacheable for T`:
 ///
-/// 1. `impl Cacheable for T` — picks `Type::Id` from the field literally
-///    named `id`, sets `Type::Fields = {Name}Fields` (from
-///    [`generate_fields_struct`](super::fields_struct::generate_fields_struct)),
-///    and implements `id(&self)` as `self.id.clone()`.
-/// 2. An inherent `impl T { pub fn fields() -> {Name}Fields { ... } }`
-///    constructor that wires every accessor to its real extractor — the
-///    canonical alternative to `T::Fields::default()`'s unwired
-///    accessors.
+/// 1. `type Id` — set to the type of the field literally named `id`.
+/// 2. `type Fields` — set to `{Name}Fields` (companion struct produced
+///    by [`generate_fields_struct`](super::fields_struct::generate_fields_struct)).
+/// 3. `fn id(&self) -> Self::Id` — clones `self.id`.
+/// 4. `fn fields() -> Self::Fields` — constructs the companion with
+///    every accessor wired to its real extractor. Required as a trait
+///    method (rather than inherent) so generic code can call
+///    `T::fields()` without knowing the concrete type.
 pub fn generate_cacheable_impl(
     input: &DeriveInput,
     sassi_path: &TokenStream,
@@ -60,14 +62,8 @@ pub fn generate_cacheable_impl(
             fn id(&self) -> Self::Id {
                 ::core::clone::Clone::clone(&self.id)
             }
-        }
 
-        impl #struct_name {
-            /// Construct the field-accessor companion struct with every
-            /// accessor wired to its real extractor. Prefer this over
-            /// `Self::Fields::default()`, which returns unwired
-            /// placeholder accessors that panic if invoked.
-            pub fn fields() -> #fields_name {
+            fn fields() -> Self::Fields {
                 #fields_name {
                     #(#field_constructors,)*
                 }
