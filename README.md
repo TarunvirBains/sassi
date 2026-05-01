@@ -7,7 +7,7 @@
 - **`Punnu<T>`** — typed pool holding `Arc<T>` entries by `Cacheable::Id`, with bounded LRU eviction, opt-in TTL, optional pluggable L2 backend (Redis, Postgres, file, in-memory, GPU memory — backends are a trait, not a hardcoded list).
 - **`BasicPredicate<T>`** — universal predicate algebra (`&`, `|`, `^`, `!`) that runs identically on backend (lowers to SQL via consumer) and frontend (evaluates against `&T` in memory).
 - **`MemQ<T>`** — in-memory-only extension algebra for closures and trait-impl predicates that can't be expressed in SQL.
-- **`#[sassi::trait_impl(MyTrait)]`** — register a trait impl for cross-type queries: ask "all cached entries impl-ing `MyTrait`" across every `Punnu` in a process.
+- **`#[sassi::trait_impl]`** — apply to `impl MyTrait for MyType` to register the impl for cross-type queries: ask "all cached entries impl-ing `MyTrait`" across every `Punnu` in a process.
 - **Cross-runtime semantics** — same predicates round-trip across backend → wire → frontend via `Serialize` envelopes; visages cached on the frontend without giving the frontend any backend dependency.
 
 ## Status
