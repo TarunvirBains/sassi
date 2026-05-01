@@ -29,8 +29,10 @@
 #![warn(missing_docs)]
 
 pub mod cacheable;
+pub mod predicate;
 
 pub use cacheable::{Cacheable, Field};
+pub use predicate::{BasicPredicate, FieldPredicate, LookupOp};
 
 /// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for
 /// runtime diagnostics and for producing `__sassi_v` envelope tags
