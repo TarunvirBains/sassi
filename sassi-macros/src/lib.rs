@@ -1,7 +1,7 @@
 //! # sassi-macros
 //!
-//! Proc macros for sassi: `#[derive(Cacheable)]` (more on the way:
-//! `#[sassi::trait_impl(...)]` lands in a later task).
+//! Proc macros for sassi: `#[derive(Cacheable)]` and
+//! `#[sassi::trait_impl]`.
 //!
 //! Macros call into `sassi-codegen` for the actual `TokenStream`
 //! emission so the codegen logic stays in a regular library crate
@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod cacheable;
+mod trait_impl;
 
 use proc_macro::TokenStream;
 
@@ -33,4 +34,20 @@ use proc_macro::TokenStream;
 #[proc_macro_derive(Cacheable)]
 pub fn derive_cacheable(input: TokenStream) -> TokenStream {
     cacheable::derive_cacheable(input)
+}
+
+/// Attribute macro for registering a trait implementation with
+/// `Sassi::all_impl::<dyn Trait>()`.
+///
+/// Apply it to a concrete trait impl:
+///
+/// ```ignore
+/// #[sassi::trait_impl]
+/// impl Nameable for User {
+///     fn name(&self) -> &str { &self.name }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
+    trait_impl::trait_impl(args, input)
 }

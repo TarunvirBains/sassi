@@ -44,22 +44,34 @@ pub mod error;
 pub(crate) mod executor;
 pub mod predicate;
 pub mod punnu;
+pub mod sassi;
 mod time;
 
 pub use cacheable::{Cacheable, Field};
 pub use error::{BackendError, FetchError, InsertError};
-pub use predicate::{BasicPredicate, FieldPredicate, LookupOp};
+pub use predicate::{BasicPredicate, FieldPredicate, LookupOp, MemQ};
 pub use punnu::{
     BackendFailureMode, CacheTier, EventReason, InvalidationReason, OnConflict, Punnu,
-    PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, TenantKey,
+    PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, PunnuScope, TenantKey,
 };
+pub use sassi::Sassi;
 pub use time::Instant;
 
 // Derive macro re-export. The trait and the derive share the name
 // `Cacheable` (different namespaces — type namespace for the trait,
 // macro namespace for the derive); this matches the standard pattern
 // used by stdlib `Clone`, `Debug`, etc.
-pub use sassi_macros::Cacheable;
+pub use sassi_macros::{Cacheable, trait_impl};
+
+/// Implementation details used by sassi's proc macros.
+///
+/// This module is not part of the stable public API. Macro expansion
+/// paths are routed through it so generated code does not depend on
+/// private module layout.
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::sassi::trait_registry::register_trait_impl_raw;
+}
 
 /// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for
 /// runtime diagnostics and for producing `__sassi_v` envelope tags
