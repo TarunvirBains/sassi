@@ -1,4 +1,4 @@
-//! Task 8 — `PunnuMetrics` observability hook.
+//! `PunnuMetrics` observability hook.
 //!
 //! Spec §3.5.1 — sassi commits to firing `record_*` callbacks on every
 //! event of interest; consumers wire to whatever metrics layer they

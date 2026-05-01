@@ -1,4 +1,4 @@
-//! Task 8 — `PunnuConfig::namespace` plumbing + validation.
+//! `PunnuConfig::namespace` plumbing + validation.
 //!
 //! Spec §3.5: namespace governs L2 backend cache-key prefixes.
 //! L1 storage is per-Punnu-instance and unaffected by namespace —
@@ -6,8 +6,9 @@
 //! accidentally affecting L1 semantics, and that builder-time
 //! validation rejects degenerate values (empty string).
 //!
-//! The L2-side namespace effect (Redis backend key prefixing) is
-//! exercised by the redis backend tests in Cluster D, Task 13.
+//! The L2-side namespace effect (Redis backend key prefixing) will
+//! be exercised by the future redis backend integration tests; this
+//! file pins the L1 contract today.
 
 #![cfg(feature = "runtime-tokio")]
 

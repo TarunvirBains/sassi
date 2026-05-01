@@ -1,4 +1,4 @@
-//! Task 10 — `DefaultExecutor` smoke test on the tokio runtime.
+//! `DefaultExecutor` smoke test on the tokio runtime.
 //!
 //! `PunnuExecutor` is `pub(crate)` in v0.1; this test exercises it
 //! indirectly through the public surface. The interesting end-to-end
@@ -7,9 +7,8 @@
 //! narrower: pin a smoke test that the default executor's
 //! `spawn` + `sleep` primitives work on tokio with reasonable
 //! precision, so a regression in either primitive (or in the trait
-//! routing through `executor.sleep` introduced in Task 10) gets
-//! caught here rather than masked by a TTL test that has many other
-//! moving parts.
+//! routing through `executor.sleep`) gets caught here rather than
+//! masked by a TTL test that has many other moving parts.
 //!
 //! `start_paused = false` so we read real wall-clock time — this is a
 //! sleep-precision check, which is meaningful only against the

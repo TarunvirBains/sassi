@@ -141,7 +141,7 @@ jobs:
           key: ${{ runner.os }}-cargo-redis-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-redis-
 
-      # sassi-cache-redis lands in Task 13; until then this job is a
+      # sassi-cache-redis is a future companion crate; until it lands this job is a
       # no-op. Detect via `cargo metadata` rather than gating on a
       # path filter so re-adding the crate later requires no workflow
       # edit.

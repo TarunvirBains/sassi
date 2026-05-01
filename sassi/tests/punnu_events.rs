@@ -1,4 +1,4 @@
-//! Task 5 — `Punnu<T>` event stream coverage.
+//! `Punnu<T>` event stream coverage.
 //!
 //! Exercises the four event-related contracts:
 //!
@@ -10,8 +10,8 @@
 //!   `RecvError::Lagged` rather than crashing the producer (spec §3.5
 //!   lossy-by-design contract)
 //!
-//! Implementation lives in Task 4 (`pool.rs`); this file is the
-//! observability test surface.
+//! Implementation lives in `pool.rs`; this file is the observability
+//! test surface.
 
 use sassi::{
     Cacheable, EventReason, Field, InvalidationReason, OnConflict, Punnu, PunnuConfig, PunnuEvent,

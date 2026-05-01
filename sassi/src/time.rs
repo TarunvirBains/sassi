@@ -39,8 +39,17 @@
 //! we can promote to a newtype then; today the alias is the smaller,
 //! more honest choice.
 
+/// Cross-target monotonic clock instant. See module-level docs.
+///
+/// Native (`not(target_arch = "wasm32")`): [`tokio::time::Instant`] —
+/// honours `tokio::time::pause()` / `advance()` for deterministic
+/// test clocks.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) type Instant = tokio::time::Instant;
+pub type Instant = tokio::time::Instant;
 
+/// Cross-target monotonic clock instant. See module-level docs.
+///
+/// `wasm32-unknown-unknown`: [`web_time::Instant`] — wraps the
+/// browser's `Performance.now()` API.
 #[cfg(target_arch = "wasm32")]
-pub(crate) type Instant = web_time::Instant;
+pub type Instant = web_time::Instant;

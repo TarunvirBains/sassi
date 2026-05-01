@@ -1,4 +1,4 @@
-//! Task 7 — `Punnu::get_or_fetch` happy path + miss + error variants.
+//! `Punnu::get_or_fetch` happy path + miss + error variants.
 //!
 //! Spec §3.5 describes the lazy-fetch-on-miss pattern: on L1 hit,
 //! the fetcher is not invoked; on miss, the fetcher's `Some(value)`

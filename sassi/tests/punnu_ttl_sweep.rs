@@ -1,4 +1,4 @@
-//! Task 6 — TTL background-sweep path.
+//! TTL background-sweep path.
 //!
 //! Spec §6.2.5: when [`PunnuConfig::ttl_sweep_interval`] is `Some`,
 //! a background task scans the L1 every interval tick, removes
@@ -70,8 +70,8 @@ impl Cacheable for E {
 /// `_test_sweep_initialised()` returns a `Notify` that the sweep
 /// fires on first poll, *before* the first sleep registers. Awaiting
 /// `notified()` here guarantees the first sleep is anchored at the
-/// test's current virtual time. Replaces the yield-count heuristic
-/// from Cluster A; closes
+/// test's current virtual time. Replaces the previous yield-count
+/// heuristic; closes
 /// <https://github.com/TarunvirBains/sassi/issues/4>.
 async fn prime_sweep<T: Cacheable>(p: &Punnu<T>) {
     let notify = p

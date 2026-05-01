@@ -121,8 +121,8 @@ impl<T> Clone for Entry<T> {
 /// first poll, *before* the first sleep. Tests can `await` that
 /// signal before calling `tokio::time::advance(...)` — the sleep is
 /// guaranteed to be registered against the test's virtual clock at
-/// that point. Replaces the `tokio::task::yield_now` heuristic from
-/// Cluster A; closes <https://github.com/TarunvirBains/sassi/issues/4>.
+/// that point. Replaces the previous `tokio::task::yield_now`
+/// heuristic; closes <https://github.com/TarunvirBains/sassi/issues/4>.
 ///
 /// # Cross-target spawn
 ///

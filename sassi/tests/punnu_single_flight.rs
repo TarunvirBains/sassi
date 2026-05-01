@@ -1,4 +1,4 @@
-//! Task 7 — single-flight cancellation contract (spec §3.5.1).
+//! single-flight cancellation contract (spec §3.5.1).
 //!
 //! Four owner-loss cases must all behave deterministically:
 //!
@@ -360,4 +360,75 @@ async fn coalesced_awaiters_fire_insert_event_exactly_once() {
     // direct hit (no fetcher invocation, no further events).
     let cached = p.get(&1).expect("entry cached after fetch");
     assert_eq!(cached.name, "fetched");
+}
+
+/// Proof of the BLOCK-M2 fix: expired-conflict during a fetch must
+/// not leave the cache empty.
+///
+/// Pre-fix scenario: with `OnConflict::Reject`, an existing entry's
+/// TTL elapses during a `get_or_fetch`. The on_fetched closure
+/// called `insert_arc_into_l1` which saw the still-present (expired
+/// but not yet popped) entry and returned `Conflict`. The fall-back
+/// `punnu.get(&id)` then ran the lazy-expiry path, popped the
+/// expired entry, and returned `None`. `unwrap_or(arc)` returned the
+/// freshly-fetched value to the caller — but it was never inserted.
+/// Subsequent `get(&id)` calls would miss, violating
+/// `get_or_fetch`'s documented post-condition.
+///
+/// The fix (`insert_arc_or_existing`) treats expired entries as
+/// absent and inserts the freshly-fetched value atomically under
+/// one L1 lock. `OnConflict::Reject` does not apply on this path.
+#[tokio::test(start_paused = true)]
+async fn expired_existing_entry_does_not_block_single_flight_insert() {
+    use sassi::{OnConflict, PunnuConfig};
+
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            on_conflict: OnConflict::Reject,
+            default_ttl: Some(Duration::from_secs(1)),
+            ..Default::default()
+        })
+        .build();
+
+    // Original entry with 1s TTL.
+    p.insert(E {
+        id: 1,
+        name: "original".into(),
+    })
+    .await
+    .unwrap();
+
+    // Advance past the TTL — the entry is expired but not yet
+    // lazily popped (no `get` has been called).
+    tokio::time::advance(Duration::from_secs(2)).await;
+
+    // Trigger a get_or_fetch. The fetcher returns Some(new_value).
+    // Pre-fix: on_fetched hits Conflict because the expired entry
+    // is still in the LRU map; lazy `get` pops it; `unwrap_or(arc)`
+    // returns the never-inserted fresh value. Post-fix:
+    // insert_arc_or_existing treats the expired entry as absent and
+    // inserts the fresh value atomically.
+    let result = p
+        .get_or_fetch(&1, |id| async move {
+            Ok::<_, FetchError>(Some(E {
+                id,
+                name: "fresh".into(),
+            }))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        result.name, "fresh",
+        "get_or_fetch returns the freshly-fetched value to the caller"
+    );
+
+    // Headline assertion: the freshly-fetched value is in L1.
+    // Subsequent get must hit, not miss. Pre-fix, it would miss
+    // (the value was never inserted under the Conflict-then-get path).
+    let cached = p
+        .get(&1)
+        .expect("subsequent get must hit; pre-fix it would miss");
+    assert_eq!(cached.name, "fresh");
 }

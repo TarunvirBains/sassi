@@ -44,7 +44,7 @@ pub mod error;
 pub(crate) mod executor;
 pub mod predicate;
 pub mod punnu;
-pub(crate) mod time;
+mod time;
 
 pub use cacheable::{Cacheable, Field};
 pub use error::{BackendError, FetchError, InsertError};
@@ -53,6 +53,7 @@ pub use punnu::{
     BackendFailureMode, CacheTier, EventReason, InvalidationReason, OnConflict, Punnu,
     PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, TenantKey,
 };
+pub use time::Instant;
 
 // Derive macro re-export. The trait and the derive share the name
 // `Cacheable` (different namespaces — type namespace for the trait,

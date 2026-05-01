@@ -79,8 +79,8 @@ impl<T: Cacheable> Clone for Punnu<T> {
 /// Internal shared state — held behind `Arc` so `Punnu<T>` is cheaply
 /// cloneable.
 ///
-/// `pub(crate)` so the sweep task (Task 6) and the scope handle (Task
-/// 11) can observe state directly without going through `Punnu<T>`.
+/// `pub(crate)` so the sweep task and the (future) scope handle can
+/// observe state directly without going through `Punnu<T>`.
 pub(crate) struct PunnuInner<T: Cacheable> {
     /// L1 identity map. See module-level docs for the lock choice
     /// rationale.
@@ -504,12 +504,16 @@ impl<T: Cacheable> Punnu<T> {
         //
         // `on_fetched` returns the canonical `Arc<T>`: the freshly-
         // fetched one on the success path, or the already-cached
-        // value when `OnConflict::Reject` collides with an in-place
-        // entry (some other writer beat us to it during the fetch).
-        // The cache acts as if the user's intent — "ensure the cache
-        // has something at this id" — were satisfied either way.
+        // value when a non-expired entry beat us to the slot during
+        // the fetch. The atomic `insert_arc_or_existing` handles
+        // both the "fresh insert" and "existing entry, return it"
+        // cases under one L1 write lock — no expired-conflict race.
+        // `OnConflict` policy does not apply on this path:
+        // `get_or_fetch`'s contract is "ensure the cache has
+        // SOMETHING at this id, return it," not "follow the
+        // configured insert policy on a fresh fetch."
         let inner_weak = Arc::downgrade(&self.inner);
-        let on_fetched = move |id: T::Id, arc: Arc<T>| {
+        let on_fetched = move |_id: T::Id, arc: Arc<T>| {
             let inner_weak = inner_weak.clone();
             async move {
                 // If the Punnu was dropped during the fetch, just
@@ -519,22 +523,7 @@ impl<T: Cacheable> Punnu<T> {
                 let Some(inner) = inner_weak.upgrade() else {
                     return arc;
                 };
-                let punnu = Punnu { inner };
-                match punnu.insert_arc_into_l1(arc.clone()).await {
-                    Ok(()) => arc,
-                    Err(InsertError::Conflict) => {
-                        // Someone else inserted at this id while we
-                        // were fetching. The cache already has
-                        // something for the user. Return it.
-                        punnu.get(&id).unwrap_or(arc)
-                    }
-                    // `Serialization` and `BackendFailed` are
-                    // unreachable in v0.1 (no backend wired yet);
-                    // when Cluster D lands `CacheBackend`, surface
-                    // those errors back as `FetchError::Insert(...)`.
-                    // For now keep the fetched Arc.
-                    Err(_other) => arc,
-                }
+                Punnu { inner }.insert_arc_or_existing(arc).await
             }
         };
         let result = self
@@ -647,10 +636,95 @@ impl<T: Cacheable> Punnu<T> {
     /// `pub(crate)` because consumers should use `insert` (which
     /// handles boxing); this is the internal escape hatch for the
     /// single-flight path.
-    pub(crate) async fn insert_arc_into_l1(&self, arc: Arc<T>) -> Result<(), InsertError> {
+    /// Single-flight insert variant: insert `arc` into L1 if the slot
+    /// is empty *or holds an expired entry*; otherwise return the
+    /// already-cached non-expired `Arc<T>`. Atomic under one L1 write
+    /// lock — no expired-conflict race window.
+    ///
+    /// Used by [`Punnu::get_or_fetch`]'s `on_fetched` callback.
+    /// Resolves the BLOCK-M2 corner case where the consumer's
+    /// `OnConflict::Reject` policy collides with an entry that is
+    /// expired but not yet lazily popped: the standard `insert` path
+    /// would reject; this method treats expired entries as "absent"
+    /// and inserts the freshly-fetched value, satisfying
+    /// `get_or_fetch`'s documented post-condition that a subsequent
+    /// `get` hits.
+    ///
+    /// Returns the canonical `Arc<T>` — the freshly-inserted one if
+    /// the slot was empty/expired, the existing one if a non-expired
+    /// entry was present.
+    ///
+    /// `OnConflict` policy does not apply here. The behaviour is
+    /// always "insert if absent or expired; else return existing" —
+    /// `get_or_fetch`'s contract is "ensure the cache has SOMETHING
+    /// at this id, return it," not "follow the configured insert
+    /// policy."
+    pub(crate) async fn insert_arc_or_existing(&self, arc: Arc<T>) -> Arc<T> {
+        let id = arc.id();
         let ttl = self.inner.config.default_ttl;
-        self.insert_arc_internal(arc, ttl).await?;
-        Ok(())
+        let now = self.inner.executor.now();
+        let expires_at = ttl.map(|d| now + d);
+        let entry = Entry::with_expiry(arc.clone(), expires_at);
+
+        // Decision happens under a single write lock so the "is
+        // there a non-expired entry?" check + insert-if-not race-
+        // free. Return value is the canonical `Arc<T>` — the existing
+        // one if non-expired, the inserted one otherwise.
+        enum InsertOrExistingOutcome<T: Cacheable> {
+            ReturnedExisting(Arc<T>),
+            Inserted {
+                lru_evicted: Option<T::Id>,
+                post_len: usize,
+            },
+        }
+
+        let outcome = {
+            let mut map = self.inner.map.write().expect(
+                "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
+            );
+            match map.peek(&id) {
+                Some(existing) if !existing.is_expired_at(now) => {
+                    InsertOrExistingOutcome::ReturnedExisting(existing.value.clone())
+                }
+                _ => {
+                    // Slot empty OR existing entry is expired. Push the
+                    // fresh entry — `LruCache::push` replaces the
+                    // expired entry in place (or evicts a different
+                    // entry if at capacity).
+                    let pushed = map.push(id.clone(), entry);
+                    let post_len = map.len();
+                    let lru_evicted =
+                        pushed.and_then(|(k, _v)| if k != id { Some(k) } else { None });
+                    InsertOrExistingOutcome::Inserted {
+                        lru_evicted,
+                        post_len,
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            InsertOrExistingOutcome::ReturnedExisting(existing) => existing,
+            InsertOrExistingOutcome::Inserted {
+                lru_evicted,
+                post_len,
+            } => {
+                // Emit events outside the lock.
+                if let Some(evicted_id) = lru_evicted {
+                    let _ = self.inner.events.send(PunnuEvent::Invalidate {
+                        id: evicted_id,
+                        reason: EventReason::LruEvict,
+                    });
+                    self.metrics_record_eviction(EventReason::LruEvict);
+                }
+                let _ = self
+                    .inner
+                    .events
+                    .send(PunnuEvent::Insert { value: arc.clone() });
+                self.metrics_record_lru_size(post_len);
+                arc
+            }
+        }
     }
 
     /// Number of entries currently in the L1.
@@ -691,10 +765,9 @@ impl<T: Cacheable> Punnu<T> {
         &self.inner.config
     }
 
-    // `scope()` (the predicate-driven query handle) lands in Task 11
-    // alongside the `MemQ<T>` extension algebra. Until then, callers
-    // compose with `Punnu::get` / iteration over `events()`. See
-    // `docs/superpowers/plans/2026-05-01-sassi-v0.1.0.md` Task 11.
+    // `scope()` (the predicate-driven query handle) is a future
+    // extension that pairs with the `MemQ<T>` algebra. Until then,
+    // callers compose with `Punnu::get` / iteration over `events()`.
 
     /// Test-only readiness handshake — resolves once the background
     /// TTL sweep task has been polled the first time and is parked on

@@ -1,4 +1,4 @@
-//! Task 7 — `Punnu::get_or_fetch_many` batch path.
+//! `Punnu::get_or_fetch_many` batch path.
 //!
 //! Spec §3.5: split ids into hits + misses, send one batch fetch
 //! for the missing set, merge with hits. Per-id single-flight on

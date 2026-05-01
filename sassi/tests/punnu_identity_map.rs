@@ -1,4 +1,4 @@
-//! Task 4 — `Punnu<T>` identity-map basics: insert, get, invalidate,
+//! `Punnu<T>` identity-map basics: insert, get, invalidate,
 //! LRU eviction.
 //!
 //! Each test hand-writes the [`sassi::Cacheable`] impl rather than
