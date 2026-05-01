@@ -176,7 +176,7 @@ pub(crate) fn spawn_sweep<T: Cacheable>(weak: Weak<PunnuInner<T>>, interval: std
             for id in expired_ids {
                 let _ = inner.events.send(PunnuEvent::Invalidate {
                     id,
-                    reason: EventReason::TtlExpired(crate::punnu::events::Internal::new()),
+                    reason: EventReason::TtlExpired,
                 });
             }
         }

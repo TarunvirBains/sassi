@@ -70,7 +70,7 @@ async fn ttl_expires_lazily_on_get() {
     match rx.try_recv().expect("expected TtlExpired event") {
         PunnuEvent::Invalidate {
             id: 1,
-            reason: EventReason::TtlExpired(_),
+            reason: EventReason::TtlExpired { .. },
         } => {}
         other => panic!("expected TtlExpired for id=1, got {other:?}"),
     }
@@ -157,7 +157,7 @@ async fn lazy_expiry_event_fires_at_most_once_for_a_given_entry() {
         if matches!(
             ev,
             PunnuEvent::Invalidate {
-                reason: EventReason::TtlExpired(_),
+                reason: EventReason::TtlExpired { .. },
                 ..
             }
         ) {
@@ -224,7 +224,7 @@ async fn lazy_expiry_under_concurrent_gets_emits_one_event() {
         if matches!(
             ev,
             PunnuEvent::Invalidate {
-                reason: EventReason::TtlExpired(_),
+                reason: EventReason::TtlExpired { .. },
                 ..
             }
         ) {

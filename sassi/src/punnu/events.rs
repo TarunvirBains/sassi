@@ -162,26 +162,6 @@ pub enum InvalidationReason {
     OnDelete,
 }
 
-/// Sealed marker for [`EventReason`]'s system-internal variants.
-///
-/// Held as the payload of [`EventReason::LruEvict`] /
-/// [`EventReason::TtlExpired`] / [`EventReason::BackendInvalidation`].
-/// The struct itself is `pub` so external code can pattern-match on the
-/// containing variants (`EventReason::LruEvict(_)` requires the field
-/// type to be visible). Construction is sealed because the inner `()`
-/// is a private positional field — `Internal(())` requires a private
-/// field, which external code can't write. Use [`Internal::new`]
-/// (`pub(crate)`) inside sassi.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Internal(());
-
-impl Internal {
-    /// Internal constructor — sassi-only.
-    pub(crate) const fn new() -> Self {
-        Self(())
-    }
-}
-
 /// Full invalidation taxonomy emitted on [`PunnuEvent::Invalidate`].
 ///
 /// Includes both the public reasons callers can pass to
@@ -193,12 +173,15 @@ impl Internal {
 /// [`InvalidationReason`] subset is reachable through the public
 /// `invalidate` call path.
 ///
-/// The internal variants carry a `pub(crate) Internal` marker as their
-/// payload: external code can pattern-match (`EventReason::LruEvict(_)`)
-/// but cannot construct (`EventReason::LruEvict(...)` requires a value
-/// of an unnameable type). Combined with the `#[non_exhaustive]` enum
-/// marker, this means subscribers see internal reasons but never
-/// synthesise them.
+/// The system-internal variants are individually marked
+/// `#[non_exhaustive]`. Per the Rust reference, this prevents external
+/// crates from constructing them via the unit syntax — sassi can
+/// still write `EventReason::LruEvict` internally, but external code
+/// cannot. Pattern-matching from outside requires the `{ .. }` rest
+/// pattern (e.g. `EventReason::LruEvict { .. }`), which keeps the
+/// invariant enforceable: external code can observe internal reasons
+/// but never synthesise them, even by token reuse or bit-pattern
+/// transmutation (no payload exists to forge).
 ///
 /// The variants are stable wire-level identifiers — distributed
 /// backends fan invalidations across processes by reason, so adding a
@@ -228,16 +211,19 @@ pub enum EventReason {
     /// from [`EventReason::TtlExpired`] for metrics: an LRU-driven
     /// eviction often indicates an undersized `lru_size`, while a
     /// TTL-driven eviction indicates the configured freshness window.
-    /// Not reachable via [`crate::punnu::Punnu::invalidate`]; cannot
-    /// be constructed externally (the `Internal` marker is `pub(crate)`).
-    LruEvict(Internal),
+    /// Not reachable via [`crate::punnu::Punnu::invalidate`]; sealed
+    /// against external construction by the per-variant
+    /// `#[non_exhaustive]` marker.
+    #[non_exhaustive]
+    LruEvict,
 
     /// System-internal: the entry's TTL elapsed. Either a lazy check
     /// on `get` observed expiry, or the optional background sweep
     /// task removed the entry mid-tick. See spec §6.2.5 for the TTL
     /// contract. Not reachable via [`crate::punnu::Punnu::invalidate`];
-    /// cannot be constructed externally.
-    TtlExpired(Internal),
+    /// sealed against external construction.
+    #[non_exhaustive]
+    TtlExpired,
 
     /// System-internal: a distributed cache backend (Redis pub/sub,
     /// Postgres LISTEN/NOTIFY, …) pushed an invalidation that the
@@ -245,9 +231,10 @@ pub enum EventReason {
     /// `CacheBackend::invalidation_stream` consumer in Cluster D,
     /// Task 13; pinned now so subscribers can pattern-match against
     /// it from v0.1.0-alpha.0 onward. Not reachable via
-    /// [`crate::punnu::Punnu::invalidate`]; cannot be constructed
-    /// externally.
-    BackendInvalidation(Internal),
+    /// [`crate::punnu::Punnu::invalidate`]; sealed against external
+    /// construction.
+    #[non_exhaustive]
+    BackendInvalidation,
 }
 
 impl From<InvalidationReason> for EventReason {

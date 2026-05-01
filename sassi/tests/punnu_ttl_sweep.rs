@@ -154,7 +154,7 @@ async fn sweep_emits_ttl_expired_event() {
             ev,
             PunnuEvent::Invalidate {
                 id: 7,
-                reason: EventReason::TtlExpired(_),
+                reason: EventReason::TtlExpired { .. },
             }
         ) {
             saw_ttl = true;

@@ -225,7 +225,7 @@ impl<T: Cacheable> Punnu<T> {
         {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: evicted_id,
-                reason: EventReason::LruEvict(crate::punnu::events::Internal::new()),
+                reason: EventReason::LruEvict,
             });
         }
 
@@ -302,7 +302,7 @@ impl<T: Cacheable> Punnu<T> {
         if expired {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: id.clone(),
-                reason: EventReason::TtlExpired(crate::punnu::events::Internal::new()),
+                reason: EventReason::TtlExpired,
             });
         }
         None
