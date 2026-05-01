@@ -28,9 +28,12 @@ use crate::error::InsertError;
 use crate::punnu::config::{OnConflict, PunnuConfig};
 use crate::punnu::events::{InvalidationReason, PunnuEvent};
 use crate::punnu::ttl::Entry;
+#[cfg(feature = "runtime-tokio")]
+use crate::punnu::ttl::spawn_sweep;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
 /// Typed in-memory pool — the cache primitive. See module-level docs
@@ -46,17 +49,16 @@ use tokio::sync::broadcast;
 /// # Lifecycle
 ///
 /// 1. Construct via [`Punnu::builder`].
-/// 2. [`Punnu::insert`] entries (or via [`Punnu::insert_with_ttl`] in
-///    a later task — pinned in the trait now for forward
-///    compatibility; the method ships in the TTL task).
-/// 3. [`Punnu::get`] entries by id (synchronous).
+/// 2. [`Punnu::insert`] (uses [`PunnuConfig::default_ttl`]) or
+///    [`Punnu::insert_with_ttl`] (per-entry TTL override) entries.
+/// 3. [`Punnu::get`] entries by id (synchronous; lazy TTL check).
 /// 4. [`Punnu::invalidate`] entries explicitly, or let LRU / TTL
 ///    pressure evict them.
 /// 5. Subscribe to [`Punnu::events`] for an observability stream.
 ///
-/// Drop the last `Punnu<T>` clone to release the inner state — any
-/// background sweep task (Task 6) checks the strong count via
-/// `Arc::downgrade` and exits cleanly.
+/// Drop the last `Punnu<T>` clone to release the inner state — the
+/// optional background TTL sweep task uses `Arc::downgrade` and
+/// exits cleanly when the strong count reaches zero.
 pub struct Punnu<T: Cacheable> {
     inner: Arc<PunnuInner<T>>,
 }
@@ -139,16 +141,43 @@ impl<T: Cacheable> Punnu<T> {
     ///   configured and the id already exists.
     /// - [`InsertError::BackendFailed`] / [`InsertError::Serialization`]
     ///   become reachable when L2 backends land in a later task.
+    ///
+    /// # TTL
+    ///
+    /// Uses [`PunnuConfig::default_ttl`] when set, otherwise the entry
+    /// has no expiry deadline. Per-entry overrides go through
+    /// [`Punnu::insert_with_ttl`].
     pub async fn insert(&self, value: T) -> Result<Arc<T>, InsertError> {
+        let ttl = self.inner.config.default_ttl;
         let arc = Arc::new(value);
-        self.insert_arc_internal(arc).await
+        self.insert_arc_internal(arc, ttl).await
     }
 
-    /// Internal insert — shared by `insert` (and, in Task 6,
-    /// `insert_with_ttl`).
-    async fn insert_arc_internal(&self, arc: Arc<T>) -> Result<Arc<T>, InsertError> {
+    /// Insert with an explicit TTL — overrides
+    /// [`PunnuConfig::default_ttl`] for this entry. Pass any large
+    /// duration (e.g., `Duration::MAX`) to effectively disable TTL
+    /// for this entry without touching the pool's default.
+    ///
+    /// All other semantics match [`Punnu::insert`] — identity-map,
+    /// `OnConflict` policy, LRU pressure, event emission. The `ttl`
+    /// is added to `Instant::now()` at the moment of insert; clock
+    /// adjustments after insert do not change the deadline.
+    pub async fn insert_with_ttl(&self, value: T, ttl: Duration) -> Result<Arc<T>, InsertError> {
+        let arc = Arc::new(value);
+        self.insert_arc_internal(arc, Some(ttl)).await
+    }
+
+    /// Internal insert — shared by `insert` and `insert_with_ttl`.
+    /// `ttl` is the absolute TTL applied to this entry (`None` means
+    /// no expiry).
+    async fn insert_arc_internal(
+        &self,
+        arc: Arc<T>,
+        ttl: Option<Duration>,
+    ) -> Result<Arc<T>, InsertError> {
         let id = arc.id();
-        let entry = Entry::new(arc.clone());
+        let expires_at = ttl.map(|d| Instant::now() + d);
+        let entry = Entry::with_expiry(arc.clone(), expires_at);
 
         // Locking + push are pure in-memory work — no awaits while
         // holding the lock.
@@ -212,7 +241,8 @@ impl<T: Cacheable> Punnu<T> {
     }
 
     /// Synchronous L1 lookup. Returns `Some(Arc<T>)` if the id is
-    /// cached, `None` if it isn't.
+    /// cached and unexpired; `None` if it isn't cached **or** the
+    /// entry's TTL has elapsed.
     ///
     /// On hit, refreshes the entry's LRU recency. (`LruCache::get`
     /// takes `&mut self` precisely because it updates the recency
@@ -220,16 +250,56 @@ impl<T: Cacheable> Punnu<T> {
     /// though it's read-shaped at the API level. See module-level
     /// docs.)
     ///
-    /// TTL-aware lazy expiry wires up in a later task; for now an
-    /// expired entry is still served (the storage layer carries
-    /// `expires_at` from day one, but the check itself lands with
-    /// the TTL behaviour).
+    /// # TTL semantics (lazy expiry path)
+    ///
+    /// If the entry exists but `expires_at <= Instant::now()`:
+    ///
+    /// 1. The entry is removed from L1.
+    /// 2. A [`PunnuEvent::Invalidate`] with reason
+    ///    [`InvalidationReason::TtlExpired`] is emitted.
+    /// 3. `None` is returned.
+    ///
+    /// The expiry check + removal happen under the same write lock
+    /// so concurrent `get`s observe a consistent state — at most one
+    /// `TtlExpired` event fires for a given expired entry, even
+    /// under contention.
     pub fn get(&self, id: &T::Id) -> Option<Arc<T>> {
-        let mut map =
-            self.inner.map.write().expect(
+        // Fast path: peek first to avoid the write lock when the id
+        // is missing entirely. `peek` does not touch recency, so the
+        // lookup-on-hit path still needs the write lock — but a miss
+        // is the common cold-cache case, so the read-only peek is
+        // worth the branch.
+        let expired = {
+            let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
             );
-        map.get(id).map(|entry| entry.value.clone())
+            // Peek first to make the expiry decision *without*
+            // touching recency. If the peeked entry is fresh, fall
+            // through to `get` (which touches recency) and return
+            // the value. If it's expired, pop it under the same
+            // lock — that's the race-safe spot to decide who fires
+            // `TtlExpired`.
+            let peeked = map.peek(id)?;
+            if peeked.is_expired() {
+                map.pop(id);
+                true
+            } else {
+                // `get` is guaranteed to find the entry — we just
+                // peeked it under the same write lock.
+                let entry = map
+                    .get(id)
+                    .expect("entry present (just peeked under same lock)");
+                return Some(entry.value.clone());
+            }
+        };
+
+        if expired {
+            let _ = self.inner.events.send(PunnuEvent::Invalidate {
+                id: id.clone(),
+                reason: InvalidationReason::TtlExpired,
+            });
+        }
+        None
     }
 
     /// Drop a single entry by id. No-op if the id is not cached.
@@ -354,6 +424,16 @@ impl<T: Cacheable> PunnuBuilder<T> {
 
     /// Finalize the builder.
     ///
+    /// If [`PunnuConfig::ttl_sweep_interval`] is `Some`, spawns a
+    /// background tokio task that scans the L1 every interval tick
+    /// for TTL-expired entries (gated behind the `runtime-tokio`
+    /// feature; WASM consumers wait on the executor abstraction
+    /// landing in a later task). The sweep task uses
+    /// [`std::sync::Weak`] to detect drop of every `Punnu<T>` clone
+    /// — when the strong count of `PunnuInner<T>` falls to zero,
+    /// the upgrade fails, and the loop exits cleanly. No explicit
+    /// shutdown handle.
+    ///
     /// # Panics
     ///
     /// Panics if `config.lru_size == 0` — a zero-capacity LRU is a
@@ -366,15 +446,40 @@ impl<T: Cacheable> PunnuBuilder<T> {
                  a zero-capacity LRU evicts every insert immediately"
             )
         });
+        let sweep_interval = self.config.ttl_sweep_interval;
         let (events, _) = broadcast::channel(self.config.event_channel_capacity);
-        Punnu {
-            inner: Arc::new(PunnuInner {
-                map: RwLock::new(LruCache::new(cap)),
-                events,
-                config: self.config,
-            }),
-        }
+        let inner = Arc::new(PunnuInner {
+            map: RwLock::new(LruCache::new(cap)),
+            events,
+            config: self.config,
+        });
+
+        // Spawn the sweep before constructing the public handle so
+        // the weak ref is captured against the same `Arc` we hand
+        // back. With `runtime-tokio` off, the call site is a no-op.
+        spawn_sweep_if_configured(&inner, sweep_interval);
+
+        Punnu { inner }
     }
+}
+
+/// Spawn the TTL-sweep task when both the feature is enabled and the
+/// config requested a sweep interval. Pulled out of `build()` so the
+/// `cfg` gate is a single statement instead of branching the body.
+#[cfg(feature = "runtime-tokio")]
+fn spawn_sweep_if_configured<T: Cacheable>(inner: &Arc<PunnuInner<T>>, interval: Option<Duration>) {
+    if let Some(interval) = interval {
+        spawn_sweep(Arc::downgrade(inner), interval);
+    }
+}
+
+/// No-op when the `runtime-tokio` feature is off — the sweep cannot
+/// run without a runtime. Lazy expiry on `get` still works.
+#[cfg(not(feature = "runtime-tokio"))]
+fn spawn_sweep_if_configured<T: Cacheable>(
+    _inner: &Arc<PunnuInner<T>>,
+    _interval: Option<Duration>,
+) {
 }
 
 impl<T: Cacheable> Default for PunnuBuilder<T> {
