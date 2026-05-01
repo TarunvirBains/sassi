@@ -10,8 +10,7 @@
 //! Each method also captures the operand value into the constructed
 //! [`FieldPredicate`], type-erased as `Arc<dyn Any + Send + Sync>`,
 //! so downstream walkers (SQL emitters, debug formatters) can
-//! downcast and inspect. Layout per op is documented on
-//! [`LookupOp`](crate::predicate::LookupOp).
+//! downcast and inspect. Layout per op is documented on [`LookupOp`].
 //!
 //! Case-insensitive string ops use `str::eq_ignore_ascii_case` and
 //! `to_lowercase()` rather than a regex engine — djogi's "no Rust

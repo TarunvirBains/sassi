@@ -12,8 +12,8 @@
 //!    op kind.
 //! 3. The **operand value(s)** (`value`) — type-erased as
 //!    `Arc<dyn Any + Send + Sync>`; downstream walkers downcast via
-//!    [`std::any::Any::downcast_ref`] to inspect. Layout depends on
-//!    `op` (see [`LookupOp`] documentation).
+//!    `Any::downcast_ref` to inspect. Layout depends on `op` (see
+//!    [`LookupOp`] documentation).
 //!
 //! Plus a pre-built evaluation closure (`eval`) for the fast-path
 //! in-memory walk — captured at construction so `evaluate` never has
@@ -89,8 +89,9 @@ pub enum LookupOp {
 ///
 /// All fields are private. Use [`field_name`](Self::field_name),
 /// [`op`](Self::op), [`value`](Self::value), and
-/// [`value_as`](Self::value_as) to access; use
-/// [`evaluate`](Self::evaluate) to apply.
+/// [`value_as`](Self::value_as) to access. Internal evaluation is
+/// driven by `BasicPredicate::evaluate` walking the enclosing predicate
+/// tree; consumers do not call into `FieldPredicate` directly.
 pub struct FieldPredicate<T> {
     field_name: &'static str,
     op: LookupOp,
