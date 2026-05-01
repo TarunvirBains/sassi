@@ -495,18 +495,53 @@ impl<T: Cacheable> Punnu<T> {
         // emit the histogram point.
         let start = self.inner.executor.now();
 
-        // Single-flight coalescing on miss. The registry returns
-        // `Arc<T>` when the fetcher returned `Some`; we then insert
-        // into L1 so the next `get` is a hit.
-        let result = self.inner.in_flight.get_or_fetch(id, fetcher).await?;
-
-        if let Some(arc) = &result {
-            // Insert through the standard path so `OnConflict`,
-            // events, and metrics fire as if the consumer had called
-            // `insert` directly. `insert_arc_into_l1` avoids cloning
-            // the inner value.
-            self.insert_arc_into_l1(arc.clone()).await?;
-        }
+        // Single-flight coalescing on miss. The L1 insert runs
+        // **inside** the shared future body via the `on_fetched`
+        // callback — exactly once per fetch, regardless of how many
+        // peers attached. Without this, every coalesced peer would
+        // re-run `insert_arc_into_l1` after the await, multiplying
+        // events / TTL deadlines / OnConflict evaluations.
+        //
+        // `on_fetched` returns the canonical `Arc<T>`: the freshly-
+        // fetched one on the success path, or the already-cached
+        // value when `OnConflict::Reject` collides with an in-place
+        // entry (some other writer beat us to it during the fetch).
+        // The cache acts as if the user's intent — "ensure the cache
+        // has something at this id" — were satisfied either way.
+        let inner_weak = Arc::downgrade(&self.inner);
+        let on_fetched = move |id: T::Id, arc: Arc<T>| {
+            let inner_weak = inner_weak.clone();
+            async move {
+                // If the Punnu was dropped during the fetch, just
+                // return the freshly-fetched Arc — it'll never reach
+                // L1, but the originating caller still sees their
+                // value.
+                let Some(inner) = inner_weak.upgrade() else {
+                    return arc;
+                };
+                let punnu = Punnu { inner };
+                match punnu.insert_arc_into_l1(arc.clone()).await {
+                    Ok(()) => arc,
+                    Err(InsertError::Conflict) => {
+                        // Someone else inserted at this id while we
+                        // were fetching. The cache already has
+                        // something for the user. Return it.
+                        punnu.get(&id).unwrap_or(arc)
+                    }
+                    // `Serialization` and `BackendFailed` are
+                    // unreachable in v0.1 (no backend wired yet);
+                    // when Cluster D lands `CacheBackend`, surface
+                    // those errors back as `FetchError::Insert(...)`.
+                    // For now keep the fetched Arc.
+                    Err(_other) => arc,
+                }
+            }
+        };
+        let result = self
+            .inner
+            .in_flight
+            .get_or_fetch(id, fetcher, on_fetched)
+            .await?;
 
         let elapsed = self.inner.executor.now() - start;
         self.metrics_record_fetch_latency(elapsed);
@@ -829,6 +864,24 @@ impl<T: Cacheable> PunnuBuilder<T> {
                 "PunnuConfig::ttl_sweep_interval must be greater than Duration::ZERO; \
                  use None to disable the background sweep"
             );
+            // Without a runtime feature, we have no spawn primitive
+            // for the sweep task. Silently no-op'ing the user's opt-in
+            // would mean expired entries never evict and the sweep's
+            // promised events / metrics never fire — the spec would
+            // be lying to the consumer. Fail loudly at build time
+            // with a clear remediation pointer.
+            #[cfg(not(any(feature = "runtime-tokio", feature = "runtime-wasm")))]
+            {
+                let _ = d;
+                panic!(
+                    "PunnuConfig::ttl_sweep_interval requires either the `runtime-tokio` \
+                     or `runtime-wasm` feature. Without a runtime, sassi has no spawn \
+                     primitive to drive the sweep task and silently discarding the \
+                     opt-in would lie about TTL behavior. Either enable a runtime \
+                     feature or set `ttl_sweep_interval` to `None` for lazy-only \
+                     TTL expiry on `get`."
+                );
+            }
         }
         assert!(
             self.config.event_channel_capacity > 0,

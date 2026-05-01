@@ -76,9 +76,8 @@ jobs:
 
       # Builds sassi against `wasm32-unknown-unknown` with the
       # `runtime-wasm` feature so any regression in the cfg-gated
-      # executor / time / TTL paths fails CI. Cluster B, Task 10 wired
-      # the feature; this job pins the contract. Per-test wasm
-      # execution (wasm-bindgen-test) is deferred to Task 18.
+      # executor / time / TTL paths fails CI. Per-test wasm execution
+      # (wasm-bindgen-test) is deferred to a future CI matrix expansion.
       - name: Build sassi for wasm32
         run: cargo build -p sassi --target wasm32-unknown-unknown --no-default-features --features "serde,runtime-wasm"
 

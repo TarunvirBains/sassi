@@ -18,8 +18,9 @@
 //! 2. **All awaiters drop simultaneously.** The fetch future is
 //!    dropped; cancellation propagates through whatever the fetcher
 //!    was awaiting (cancellation-safe primitives —
-//!    `tokio_postgres::Client::query` is). Subsequent calls retry
-//!    from cold.
+//!    `tokio_postgres::Client::query` is). The [`SlotGuard`] inside
+//!    the future runs its `Drop` impl, which removes the registry
+//!    entry. Subsequent calls retry from cold against an empty slot.
 //! 3. **Fetcher panics.** [`Shared::poll`] propagates the panic to
 //!    *every* awaiter. Each peer sees a
 //!    [`crate::error::FetchError::FetcherPanic`]. Sassi wraps the
@@ -32,22 +33,36 @@
 //!    at the call site (case 4 surfaces as case 1 from the registry's
 //!    perspective).
 //!
+//! # Side-effect ordering — single L1 insert per fetch
+//!
+//! When a fetcher returns `Some(value)`, the L1 insert runs **inside**
+//! the shared future body — exactly once per fetch — via the
+//! `on_fetched` callback the caller supplies. Coalesced peers then
+//! receive the canonical `Arc<T>` from the same Shared output; they
+//! do not re-run the insert (which would otherwise multiply events,
+//! TTL deadlines, and `OnConflict` policy evaluations across N peers).
+//!
 //! # Implementation
 //!
-//! The registry is a [`dashmap::DashMap<T::Id, Weak<Shared<...>>>`].
+//! The registry is an [`Arc<dashmap::DashMap<T::Id, Weak<Shared<...>>>>`].
 //! Each caller holds a strong [`Arc<Shared<...>>`]; the DashMap holds
 //! only a [`Weak`] reference. When all strong handles drop (case 2),
 //! the Weak dangles and the underlying fetch future is dropped — real
-//! cancellation, not just registry cleanup. A new caller for the same
-//! id observes the dead Weak (`upgrade()` returns `None`) and starts
-//! a fresh fetch. The dead entry is replaced atomically under the
-//! [`dashmap::mapref::entry::Entry`] API.
+//! cancellation, not just registry cleanup.
 //!
 //! Storing `Weak` rather than `Shared` directly is the key invariant —
 //! it's what makes case 2 actually drop the fetch future. If the
 //! DashMap held a `Shared` clone, that clone would be a strong
 //! reference on the future and case 2 would degrade to "fetch runs to
 //! completion with no observers, registry leaks until next call".
+//!
+//! Registry entries are cleaned up via [`SlotGuard`] — held inside the
+//! Shared future body and run on `Drop` (whether triggered by
+//! completion or all-awaiters cancellation). The guard uses
+//! [`DashMap::remove_if`] with [`Weak::ptr_eq`] so it only removes the
+//! entry when the registered Weak still points at our specific future
+//! — a fresh fetch (case 2 → new caller) that has already replaced the
+//! slot is left alone.
 
 use crate::cacheable::Cacheable;
 use crate::error::FetchError;
@@ -182,51 +197,103 @@ type StrongFetch<T> = Arc<SharedFetchFuture<T>>;
 /// fetch was abandoned and a new caller should register fresh.
 type WeakFetch<T> = Weak<SharedFetchFuture<T>>;
 
+/// Drop guard that removes the registry entry when the wrapped Shared
+/// future is dropped (whether via completion or all-awaiters
+/// cancellation). Held *inside* the boxed future so its lifetime is
+/// pegged to the future's; when the future drops, the guard runs.
+///
+/// The race-safety guarantee comes from [`DashMap::remove_if`]: the
+/// removal is conditional on the entry's `Weak` still pointing at our
+/// specific future. A fresh fetch (case 2 → new caller) that has
+/// already replaced the slot has a different `Weak` and is left
+/// alone.
+struct SlotGuard<T: Cacheable> {
+    pending: Arc<DashMap<T::Id, WeakFetch<T>>>,
+    id: T::Id,
+    self_weak: WeakFetch<T>,
+}
+
+impl<T: Cacheable> Drop for SlotGuard<T> {
+    fn drop(&mut self) {
+        // `remove_if` runs the predicate under the shard's write
+        // lock; the entry is removed iff the current Weak `ptr_eq`s
+        // ours. No TOCTOU window between check and remove.
+        self.pending.remove_if(&self.id, |_k, current_weak| {
+            Weak::ptr_eq(current_weak, &self.self_weak)
+        });
+    }
+}
+
 /// In-flight fetch registry.
 ///
 /// `pub(crate)` — wired through [`crate::punnu::pool::PunnuInner`] so
 /// `Punnu::get_or_fetch` can route through it without exposing the
 /// registry shape to consumers.
 pub(crate) struct InFlightRegistry<T: Cacheable> {
-    pending: DashMap<T::Id, WeakFetch<T>>,
+    pending: Arc<DashMap<T::Id, WeakFetch<T>>>,
 }
 
 impl<T: Cacheable> InFlightRegistry<T> {
     /// Empty registry. Constructed once per `PunnuInner<T>`.
     pub(crate) fn new() -> Self {
         Self {
-            pending: DashMap::new(),
+            pending: Arc::new(DashMap::new()),
         }
     }
 
     /// Run `fetcher` exactly once across concurrent calls for the same
-    /// `id`. Subsequent in-flight callers share the same Shared
-    /// future and observe the same result.
+    /// `id`, then run `on_fetched` exactly once on the resulting
+    /// `Arc<T>` to install it into L1. Subsequent in-flight callers
+    /// share the same Shared future and observe the same canonical
+    /// result; they do **not** re-run the insert (which would
+    /// otherwise multiply events / TTL deadlines / OnConflict
+    /// evaluations across N peers).
+    ///
+    /// `on_fetched` returns the canonical `Arc<T>` — usually the same
+    /// `Arc<T>` it received, but consumers may swap it for the
+    /// already-cached value when handling `OnConflict::Reject`
+    /// conflicts.
     ///
     /// Cancellation contract is documented at the module level.
-    pub(crate) async fn get_or_fetch<F, Fut>(&self, id: &T::Id, fetcher: F) -> FetchOutput<T>
+    pub(crate) async fn get_or_fetch<F, Fut, OnFetched, OnFetchedFut>(
+        &self,
+        id: &T::Id,
+        fetcher: F,
+        on_fetched: OnFetched,
+    ) -> FetchOutput<T>
     where
         F: FnOnce(T::Id) -> Fut + Send + 'static,
         Fut: Future<Output = Result<Option<T>, FetchError>> + Send + 'static,
+        OnFetched: FnOnce(T::Id, Arc<T>) -> OnFetchedFut + Send + 'static,
+        OnFetchedFut: Future<Output = Arc<T>> + Send + 'static,
     {
         // Atomic registration via the entry API: probe + insert under
         // a single shard lock so two concurrent callers can't both
         // think they're the originator. Re-asserting the lookup under
-        // the entry API closes the M1 read-then-mutate race window.
+        // the entry API closes the read-then-mutate race window.
         let strong: StrongFetch<T> = match self.pending.entry(id.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut e) => match e.get().upgrade() {
                 Some(strong) => strong,
                 None => {
                     // Stale entry — the previous fetch was abandoned
-                    // (case 2: all awaiters dropped). Replace it with
-                    // a fresh fetch under the same shard lock.
-                    let strong = build_fetch::<T, _, _>(id.clone(), fetcher);
+                    // (case 2: all awaiters dropped, but the SlotGuard
+                    // hasn't run yet OR ran but a concurrent caller
+                    // re-inserted between our `entry()` and the guard's
+                    // `remove_if`). Replace it with a fresh fetch
+                    // under the same shard lock.
+                    let strong = build_fetch::<T, _, _, _, _>(
+                        id.clone(),
+                        fetcher,
+                        on_fetched,
+                        &self.pending,
+                    );
                     e.insert(Arc::downgrade(&strong));
                     strong
                 }
             },
             dashmap::mapref::entry::Entry::Vacant(e) => {
-                let strong = build_fetch::<T, _, _>(id.clone(), fetcher);
+                let strong =
+                    build_fetch::<T, _, _, _, _>(id.clone(), fetcher, on_fetched, &self.pending);
                 e.insert(Arc::downgrade(&strong));
                 strong
             }
@@ -234,11 +301,12 @@ impl<T: Cacheable> InFlightRegistry<T> {
 
         // Clone the inner Shared so we can `.await` it. `Shared` is
         // itself ref-counted; this is cheap. The strong `Arc` we
-        // hold (and `_strong_holder` below) keeps the underlying
-        // fetch future alive until either (a) it completes or (b)
-        // every awaiter drops — at which point the strong count of
-        // the `Arc` reaches zero and the inner Shared is dropped,
-        // dropping the fetch future. Real cancellation, no
+        // hold (`_strong_holder` below) keeps the underlying fetch
+        // future alive until either (a) it completes or (b) every
+        // awaiter drops — at which point the strong count of the
+        // `Arc` reaches zero, the inner Shared is dropped, the boxed
+        // future is dropped, and the SlotGuard inside it runs Drop
+        // and clears the registry entry. Real cancellation, no
         // background-task leak.
         let shared = (*strong).clone();
         let _strong_holder = strong;
@@ -248,44 +316,84 @@ impl<T: Cacheable> InFlightRegistry<T> {
     }
 }
 
-/// Build a fresh fetch future for the given id + fetcher closure,
-/// wrap it in [`Shared`], and return the `Arc<Shared<...>>` strong
-/// handle. The caller stores `Arc::downgrade(...)` in the registry
-/// and holds the strong handle for its own awaiter.
-fn build_fetch<T, F, Fut>(id: T::Id, fetcher: F) -> StrongFetch<T>
+/// Build a fresh fetch future for the given id + fetcher closure +
+/// on_fetched callback, wrap it in [`Shared`], and return the
+/// `Arc<Shared<...>>` strong handle.
+///
+/// Uses [`Arc::new_cyclic`] so the [`SlotGuard`] inside the future
+/// body can capture its own `Weak<SharedFetchFuture<T>>` for the
+/// race-safe `remove_if`. The cyclic construction is sound because
+/// the closure is sync (Shared::new is sync; the async work is inside
+/// the boxed future, polled later).
+fn build_fetch<T, F, Fut, OnFetched, OnFetchedFut>(
+    id: T::Id,
+    fetcher: F,
+    on_fetched: OnFetched,
+    pending: &Arc<DashMap<T::Id, WeakFetch<T>>>,
+) -> StrongFetch<T>
 where
     T: Cacheable,
     F: FnOnce(T::Id) -> Fut + Send + 'static,
     Fut: Future<Output = Result<Option<T>, FetchError>> + Send + 'static,
+    OnFetched: FnOnce(T::Id, Arc<T>) -> OnFetchedFut + Send + 'static,
+    OnFetchedFut: Future<Output = Arc<T>> + Send + 'static,
 {
+    let pending = pending.clone();
     let type_name = std::any::type_name::<T>();
-    // `AssertUnwindSafe` + `catch_unwind` translate a panicking
-    // fetcher into a structured `FetcherPanic` variant rather than
-    // poisoning the Shared future. `Shared` already broadcasts
-    // panics, but the broadcast surfaces as a `BroadcastedPanic` the
-    // consumer can't pattern-match on; sassi promises a structured
-    // error type. `AssertUnwindSafe` is sound because the fetcher's
-    // borrow does not escape this future — any state the fetcher
-    // mutated before panicking is owned by it (the FnOnce closure)
-    // and is dropped along with the unwound stack.
-    let inner: Pin<Box<dyn Future<Output = SharedOutput<T>> + Send>> = Box::pin(async move {
-        let result = AssertUnwindSafe(async move { fetcher(id).await })
-            .catch_unwind()
-            .await;
-        match result {
-            Ok(Ok(opt)) => Ok(opt.map(Arc::new)),
-            Ok(Err(e)) => Err(into_clone(e)),
-            Err(panic_payload) => {
-                let message = if let Some(s) = panic_payload.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
-                    (*s).to_string()
-                } else {
-                    String::new()
-                };
-                Err(FetchErrorClone::FetcherPanic { type_name, message })
+    let id_for_guard = id.clone();
+    let id_for_fetch = id.clone();
+    let id_for_on_fetched = id;
+    let pending_for_guard = pending;
+
+    Arc::new_cyclic(move |self_weak: &WeakFetch<T>| {
+        let self_weak_for_guard = self_weak.clone();
+        // `AssertUnwindSafe` + `catch_unwind` translate a panicking
+        // fetcher into a structured `FetcherPanic` variant rather than
+        // poisoning the Shared future. `Shared` already broadcasts
+        // panics, but the broadcast surfaces as a `BroadcastedPanic` the
+        // consumer can't pattern-match on; sassi promises a structured
+        // error type. `AssertUnwindSafe` is sound because the fetcher's
+        // borrow does not escape this future — any state the fetcher
+        // mutated before panicking is owned by it (the FnOnce closure)
+        // and is dropped along with the unwound stack.
+        let inner: Pin<Box<dyn Future<Output = SharedOutput<T>> + Send>> = Box::pin(async move {
+            // Held for the whole future body. Drops on completion OR
+            // on all-awaiters cancellation; either way, the registry
+            // slot is cleared.
+            let _slot_guard = SlotGuard {
+                pending: pending_for_guard,
+                id: id_for_guard,
+                self_weak: self_weak_for_guard,
+            };
+
+            let result = AssertUnwindSafe(async move { fetcher(id_for_fetch).await })
+                .catch_unwind()
+                .await;
+            match result {
+                Ok(Ok(Some(value))) => {
+                    let arc = Arc::new(value);
+                    // Run the L1 insert exactly once, here, before
+                    // any awaiter receives the canonical Arc. The
+                    // callback returns the canonical value (the same
+                    // Arc on success, or the already-cached Arc on
+                    // OnConflict::Reject collision).
+                    let canonical = on_fetched(id_for_on_fetched, arc).await;
+                    Ok(Some(canonical))
+                }
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(e)) => Err(into_clone(e)),
+                Err(panic_payload) => {
+                    let message = if let Some(s) = panic_payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                        (*s).to_string()
+                    } else {
+                        String::new()
+                    };
+                    Err(FetchErrorClone::FetcherPanic { type_name, message })
+                }
             }
-        }
-    });
-    Arc::new(inner.shared())
+        });
+        inner.shared()
+    })
 }

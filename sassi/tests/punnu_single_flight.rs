@@ -280,3 +280,84 @@ async fn fetcher_panic_broadcasts_to_all_concurrent_peers() {
         }
     }
 }
+
+/// Proof of the BLOCK-M1 fix: the L1 insert (and its `PunnuEvent::Insert`
+/// emission, TTL deadline construction, and `OnConflict` policy
+/// evaluation) must fire **exactly once** per fetch — not once per
+/// coalesced peer.
+///
+/// Before this fix, every awaiter ran `Punnu::insert_arc_into_l1`
+/// after the shared future resolved, so 5 coalesced peers fired 5
+/// Insert events for one fetched value. Worse, with
+/// `OnConflict::Reject`, peers 2..5 would have seen `Conflict`
+/// despite a successful shared fetch.
+///
+/// The fix moves the insert *inside* the shared future body via the
+/// `on_fetched` callback. Coalesced peers receive the canonical
+/// `Arc<T>` from the same Shared output without re-running the
+/// insert.
+#[tokio::test]
+async fn coalesced_awaiters_fire_insert_event_exactly_once() {
+    use sassi::PunnuEvent;
+
+    let p = Punnu::<E>::builder().build();
+    let mut events = p.events();
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let p_clone = p.clone();
+        let counter = counter.clone();
+        handles.push(tokio::spawn(async move {
+            p_clone
+                .get_or_fetch(&1, move |id| {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        // Sleep so the peers have time to attach.
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok::<_, FetchError>(Some(E {
+                            id,
+                            name: "fetched".into(),
+                        }))
+                    }
+                })
+                .await
+        }));
+    }
+
+    for h in handles {
+        let result = h.await.unwrap().unwrap();
+        assert!(result.is_some(), "all peers see the canonical value");
+    }
+
+    // Fetcher invoked exactly once (single-flight) — already covered by
+    // `n_concurrent_get_or_fetch_calls_invoke_fetcher_once` above; we
+    // assert it again here for clarity.
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "fetcher invoked exactly once across coalesced peers"
+    );
+
+    // The headline assertion: exactly one Insert event for id=1.
+    // Without the M1 fix, this would fire 5 times.
+    let mut insert_count = 0;
+    while let Ok(ev) = events.try_recv() {
+        if let PunnuEvent::Insert { value } = ev
+            && value.id == 1
+        {
+            insert_count += 1;
+        }
+    }
+    assert_eq!(
+        insert_count, 1,
+        "5 coalesced get_or_fetch calls must fire exactly one Insert event \
+         (not one per peer); proof of BLOCK-M1 fix"
+    );
+
+    // After the fetch, the cache has the value — subsequent get is a
+    // direct hit (no fetcher invocation, no further events).
+    let cached = p.get(&1).expect("entry cached after fetch");
+    assert_eq!(cached.name, "fetched");
+}
