@@ -24,22 +24,22 @@
 //! so a sync lock under an async runtime is safe.
 
 use crate::cacheable::Cacheable;
-use crate::error::InsertError;
-use crate::punnu::config::{OnConflict, PunnuConfig};
+use crate::error::{FetchError, InsertError};
+use crate::executor::{DefaultExecutor, PunnuExecutor};
+use crate::punnu::config::{CacheTier, OnConflict, PunnuConfig};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
+use crate::punnu::single_flight::InFlightRegistry;
 use crate::punnu::ttl::Entry;
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
 use crate::punnu::ttl::spawn_sweep;
 use lru::LruCache;
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+use tokio::sync::Notify;
 use tokio::sync::broadcast;
-// `tokio::time::Instant` is a drop-in for `std::time::Instant` that
-// honours `tokio::time::pause()` / `advance()` in tests. See the same
-// rationale in `crate::punnu::ttl`. Production behaviour is unchanged
-// — both types read the system monotonic clock outside of `pause()`.
-use tokio::time::Instant;
 
 /// Typed in-memory pool — the cache primitive. See module-level docs
 /// for concurrency and identity-map contract.
@@ -79,8 +79,8 @@ impl<T: Cacheable> Clone for Punnu<T> {
 /// Internal shared state — held behind `Arc` so `Punnu<T>` is cheaply
 /// cloneable.
 ///
-/// `pub(crate)` so the sweep task (Task 6) and the scope handle (Task
-/// 11) can observe state directly without going through `Punnu<T>`.
+/// `pub(crate)` so the sweep task and the (future) scope handle can
+/// observe state directly without going through `Punnu<T>`.
 pub(crate) struct PunnuInner<T: Cacheable> {
     /// L1 identity map. See module-level docs for the lock choice
     /// rationale.
@@ -93,6 +93,31 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// Configuration captured at build time. Held by reference via
     /// [`Punnu::config`]; not mutated after construction.
     pub(crate) config: PunnuConfig,
+
+    /// Runtime primitives — `spawn`, `sleep`, `now`. Held as
+    /// `Arc<dyn PunnuExecutor>` so v0.2's
+    /// [`crate::punnu::PunnuConfig::executor`] field plugs in without
+    /// any internal refactor; v0.1 always populates this with
+    /// `Arc<DefaultExecutor>`. See spec §3.11 / §3.11.1.
+    pub(crate) executor: Arc<dyn PunnuExecutor>,
+
+    /// Readiness signal fired on the sweep task's first poll, *before*
+    /// the first sleep. Tests `await` this before
+    /// `tokio::time::advance(...)` to guarantee the sleep is
+    /// registered against the test's virtual clock. `None` when no
+    /// sweep is configured (the field is still allocated to keep the
+    /// struct shape stable; `pub(crate)` so the test-helper accessor
+    /// on `Punnu<T>` can reach it). Closes
+    /// <https://github.com/TarunvirBains/sassi/issues/4>.
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+    pub(crate) sweep_initialised: Option<Arc<Notify>>,
+
+    /// Single-flight in-flight fetch registry — deduplicates
+    /// concurrent [`Punnu::get_or_fetch`] callers for the same id so
+    /// the consumer's fetcher closure runs exactly once per cold
+    /// fetch. See [`crate::punnu::single_flight`] for the cancellation
+    /// contract.
+    pub(crate) in_flight: InFlightRegistry<T>,
 }
 
 impl<T: Cacheable> Punnu<T> {
@@ -182,12 +207,12 @@ impl<T: Cacheable> Punnu<T> {
         ttl: Option<Duration>,
     ) -> Result<Arc<T>, InsertError> {
         let id = arc.id();
-        let expires_at = ttl.map(|d| Instant::now() + d);
+        let expires_at = ttl.map(|d| self.inner.executor.now() + d);
         let entry = Entry::with_expiry(arc.clone(), expires_at);
 
         // Locking + push are pure in-memory work — no awaits while
         // holding the lock.
-        let outcome = {
+        let (outcome, post_len) = {
             let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
             );
@@ -207,10 +232,14 @@ impl<T: Cacheable> Punnu<T> {
             // eviction (k != inserted id). We disambiguate by
             // comparing keys.
             let pushed = map.push(id.clone(), entry);
-            InsertOutcome {
-                existing,
-                replaced_or_evicted: pushed,
-            }
+            let post_len = map.len();
+            (
+                InsertOutcome {
+                    existing,
+                    replaced_or_evicted: pushed,
+                },
+                post_len,
+            )
         };
 
         // Drop the lock before emitting events — broadcast `send`
@@ -227,6 +256,7 @@ impl<T: Cacheable> Punnu<T> {
                 id: evicted_id,
                 reason: EventReason::LruEvict,
             });
+            self.metrics_record_eviction(EventReason::LruEvict);
         }
 
         // Then emit the insert / update event, choosing the variant
@@ -242,6 +272,12 @@ impl<T: Cacheable> Punnu<T> {
             _ => PunnuEvent::Insert { value: arc.clone() },
         };
         let _ = self.inner.events.send(event);
+
+        // Sample the LRU size after every insert. Spec §3.5.1 calls
+        // this an opportunistic gauge — emit on a meaningful change
+        // (post-insert, post-invalidate) rather than streaming on
+        // every read.
+        self.metrics_record_lru_size(post_len);
 
         Ok(arc)
     }
@@ -270,12 +306,22 @@ impl<T: Cacheable> Punnu<T> {
     /// `TtlExpired` event fires for a given expired entry, even
     /// under contention.
     pub fn get(&self, id: &T::Id) -> Option<Arc<T>> {
-        // Fast path: peek first to avoid the write lock when the id
-        // is missing entirely. `peek` does not touch recency, so the
-        // lookup-on-hit path still needs the write lock — but a miss
-        // is the common cold-cache case, so the read-only peek is
-        // worth the branch.
-        let expired = {
+        // Three terminal outcomes — the locked block decides which:
+        // - hit: return Some(arc), record_hit
+        // - miss (id absent entirely): return None, record_miss
+        // - expired: pop, emit TtlExpired event, record_miss + record_eviction
+        enum GetOutcome<T> {
+            Hit(Arc<T>),
+            Miss,
+            Expired,
+        }
+
+        let outcome = {
+            // Sample `now` once before taking the write lock so the
+            // decision is consistent across the peek + pop without
+            // re-reading the clock under the lock. `now` is a cheap
+            // monotonic read regardless of executor.
+            let now = self.inner.executor.now();
             let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
             );
@@ -285,27 +331,49 @@ impl<T: Cacheable> Punnu<T> {
             // the value. If it's expired, pop it under the same
             // lock — that's the race-safe spot to decide who fires
             // `TtlExpired`.
-            let peeked = map.peek(id)?;
-            if peeked.is_expired() {
-                map.pop(id);
-                true
-            } else {
-                // `get` is guaranteed to find the entry — we just
-                // peeked it under the same write lock.
-                let entry = map
-                    .get(id)
-                    .expect("entry present (just peeked under same lock)");
-                return Some(entry.value.clone());
+            match map.peek(id) {
+                None => GetOutcome::Miss,
+                Some(peeked) => {
+                    if peeked.is_expired_at(now) {
+                        map.pop(id);
+                        GetOutcome::Expired
+                    } else {
+                        // `get` is guaranteed to find the entry — we
+                        // just peeked it under the same write lock.
+                        let entry = map
+                            .get(id)
+                            .expect("entry present (just peeked under same lock)");
+                        GetOutcome::Hit(entry.value.clone())
+                    }
+                }
             }
         };
 
-        if expired {
-            let _ = self.inner.events.send(PunnuEvent::Invalidate {
-                id: id.clone(),
-                reason: EventReason::TtlExpired,
-            });
+        match outcome {
+            GetOutcome::Hit(arc) => {
+                self.metrics_record_hit(CacheTier::L1);
+                Some(arc)
+            }
+            GetOutcome::Miss => {
+                self.metrics_record_miss();
+                None
+            }
+            GetOutcome::Expired => {
+                let _ = self.inner.events.send(PunnuEvent::Invalidate {
+                    id: id.clone(),
+                    reason: EventReason::TtlExpired,
+                });
+                // TTL-driven expiry counts as both an eviction (entry
+                // left the cache) and a miss (the get returned None).
+                // Dashboards typically split eviction by reason, so we
+                // emit both — eviction with TtlExpired and the miss
+                // counter. Aligns with spec §3.5.1's "metrics
+                // dashboards typically split by every reason".
+                self.metrics_record_eviction(EventReason::TtlExpired);
+                self.metrics_record_miss();
+                None
+            }
         }
-        None
     }
 
     /// Drop a single entry by id. No-op if the id is not cached.
@@ -337,17 +405,325 @@ impl<T: Cacheable> Punnu<T> {
     /// would defeat the public-vs-internal split that motivates the
     /// two enums.
     pub(crate) async fn invalidate_internal(&self, id: &T::Id, reason: EventReason) {
-        let removed = {
+        let (removed, post_len) = {
             let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
             );
-            map.pop(id).is_some()
+            let removed = map.pop(id).is_some();
+            (removed, map.len())
         };
         if removed {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: id.clone(),
                 reason,
             });
+            self.metrics_record_eviction(reason);
+            self.metrics_record_lru_size(post_len);
+        }
+    }
+
+    /// Get-or-fetch convenience for the lazy-fetch-on-miss pattern.
+    ///
+    /// On L1 hit, returns the cached `Arc<T>` immediately (no fetcher
+    /// invocation). On miss, calls `fetcher`; if it returns
+    /// `Some(value)`, inserts the value into L1 (so a subsequent
+    /// `get` is a hit) and returns `Some(arc)`. If the fetcher
+    /// returns `None`, the cache is left untouched and `None` is
+    /// returned — distinct from "fetch failed".
+    ///
+    /// # Single-flight coalescing (spec §3.5.1)
+    ///
+    /// Concurrent `get_or_fetch` calls for the same `id` deduplicate:
+    /// exactly one fetcher runs per cold fetch, even when N callers
+    /// race. Subsequent in-flight callers `await` the same
+    /// [`futures::future::Shared`] future. On completion the registry
+    /// slot is cleared and the result lands in L1.
+    ///
+    /// # Cancellation contract
+    ///
+    /// Four owner-loss cases, all deterministic:
+    ///
+    /// 1. **Originating caller drops, peers polling.** The fetch
+    ///    stays alive while ≥1 peer awaits.
+    /// 2. **All awaiters drop simultaneously.** Fetch is cancelled;
+    ///    registry slot is cleared. Subsequent calls retry from cold.
+    /// 3. **Fetcher panics.** Every awaiter receives
+    ///    [`crate::error::FetchError::FetcherPanic`]. The registry
+    ///    slot is cleared.
+    /// 4. **Caller-imposed deadline.** Punnu does not impose one.
+    ///    Wrap the call in `tokio::time::timeout(...)` for case 4 —
+    ///    that surfaces as case 1 from the registry's perspective.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use sassi::Punnu;
+    /// # struct User { id: i64 }
+    /// # impl sassi::Cacheable for User {
+    /// #     type Id = i64;
+    /// #     type Fields = UserFields;
+    /// #     fn id(&self) -> i64 { self.id }
+    /// #     fn fields() -> UserFields { UserFields }
+    /// # }
+    /// # #[derive(Default)] struct UserFields;
+    /// # async fn run(p: Punnu<User>) -> Result<(), sassi::FetchError> {
+    /// let user = p.get_or_fetch(&42, |id| async move {
+    ///     // Pretend this is a database call.
+    ///     Ok::<_, sassi::FetchError>(Some(User { id }))
+    /// }).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_or_fetch<F, Fut>(
+        &self,
+        id: &T::Id,
+        fetcher: F,
+    ) -> Result<Option<Arc<T>>, FetchError>
+    where
+        F: FnOnce(T::Id) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<Option<T>, FetchError>> + Send + 'static,
+    {
+        // L1 fast path — also runs the lazy TTL check via `get`.
+        if let Some(arc) = self.get(id) {
+            return Ok(Some(arc));
+        }
+
+        // Time the fetch path end-to-end (registry attach + fetcher
+        // run + L1 insert) so the latency includes coalescing
+        // overhead. Spec §3.5.1: `record_fetch_latency` fires for
+        // every `get_or_fetch` invocation that hits the slow path
+        // (L1 miss). Hits don't pay fetch latency, so they don't
+        // emit the histogram point.
+        let start = self.inner.executor.now();
+
+        // Single-flight coalescing on miss. The L1 insert runs
+        // **inside** the shared future body via the `on_fetched`
+        // callback — exactly once per fetch, regardless of how many
+        // peers attached. Without this, every coalesced peer would
+        // re-run `insert_arc_into_l1` after the await, multiplying
+        // events / TTL deadlines / OnConflict evaluations.
+        //
+        // `on_fetched` returns the canonical `Arc<T>`: the freshly-
+        // fetched one on the success path, or the already-cached
+        // value when a non-expired entry beat us to the slot during
+        // the fetch. The atomic `insert_arc_or_existing` handles
+        // both the "fresh insert" and "existing entry, return it"
+        // cases under one L1 write lock — no expired-conflict race.
+        // `OnConflict` policy does not apply on this path:
+        // `get_or_fetch`'s contract is "ensure the cache has
+        // SOMETHING at this id, return it," not "follow the
+        // configured insert policy on a fresh fetch."
+        let inner_weak = Arc::downgrade(&self.inner);
+        let on_fetched = move |_id: T::Id, arc: Arc<T>| {
+            let inner_weak = inner_weak.clone();
+            async move {
+                // If the Punnu was dropped during the fetch, just
+                // return the freshly-fetched Arc — it'll never reach
+                // L1, but the originating caller still sees their
+                // value.
+                let Some(inner) = inner_weak.upgrade() else {
+                    return arc;
+                };
+                Punnu { inner }.insert_arc_or_existing(arc).await
+            }
+        };
+        let result = self
+            .inner
+            .in_flight
+            .get_or_fetch(id, fetcher, on_fetched)
+            .await?;
+
+        let elapsed = self.inner.executor.now() - start;
+        self.metrics_record_fetch_latency(elapsed);
+
+        Ok(result)
+    }
+
+    /// Batch get-or-fetch. Splits `ids` into "already cached"
+    /// (returned immediately) and "missing" (passed to
+    /// `batch_fetcher` as a single call). Avoids N round-trips when
+    /// the consumer naturally has a list of ids to resolve.
+    ///
+    /// # Single-flight semantics (v0.1)
+    ///
+    /// Within a single batch call, missing ids are deduplicated
+    /// before the batch fetcher is invoked (input may contain dupes).
+    /// Across concurrent batch calls, batch-level deduplication is
+    /// **not** implemented in v0.1 — two concurrent
+    /// `get_or_fetch_many(&[1, 2, 3])` calls invoke the batch fetcher
+    /// twice for the same set. Per-id single-flight coalescing across
+    /// concurrent *individual* `get_or_fetch` calls still applies as
+    /// usual; only the batch path skips the cross-batch dedup.
+    ///
+    /// Tracked as a v0.2 enhancement.
+    ///
+    /// # Result ordering
+    ///
+    /// The returned `Vec<Arc<T>>` does **not** preserve the input
+    /// `ids` order. Hits come first (in the order they were found
+    /// in L1), then fetched entries (in the order the batch fetcher
+    /// returned them). Consumers needing positional lookup should
+    /// build a `HashMap<T::Id, Arc<T>>` from the result.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use sassi::Punnu;
+    /// # struct User { id: i64 }
+    /// # impl sassi::Cacheable for User {
+    /// #     type Id = i64;
+    /// #     type Fields = UserFields;
+    /// #     fn id(&self) -> i64 { self.id }
+    /// #     fn fields() -> UserFields { UserFields }
+    /// # }
+    /// # #[derive(Default)] struct UserFields;
+    /// # async fn run(p: Punnu<User>) -> Result<(), sassi::FetchError> {
+    /// let users = p.get_or_fetch_many(&[1, 2, 3, 4, 5], |missing| async move {
+    ///     // Pretend this is one batched DB call.
+    ///     Ok::<_, sassi::FetchError>(missing.into_iter().map(|id| User { id }).collect())
+    /// }).await?;
+    /// # let _ = users; Ok(()) }
+    /// ```
+    pub async fn get_or_fetch_many<F, Fut>(
+        &self,
+        ids: &[T::Id],
+        batch_fetcher: F,
+    ) -> Result<Vec<Arc<T>>, FetchError>
+    where
+        F: FnOnce(Vec<T::Id>) -> Fut + Send,
+        Fut: Future<Output = Result<Vec<T>, FetchError>> + Send,
+    {
+        // Split cached vs missing. We dedup the `missing` list so the
+        // batch fetcher isn't asked for the same id twice within one
+        // call (consumers may pass dupes; batch backends rarely
+        // dedupe themselves).
+        let mut hits = Vec::new();
+        let mut missing: Vec<T::Id> = Vec::new();
+        let mut seen_missing: std::collections::HashSet<T::Id> = std::collections::HashSet::new();
+        for id in ids {
+            if let Some(arc) = self.get(id) {
+                hits.push(arc);
+            } else if seen_missing.insert(id.clone()) {
+                missing.push(id.clone());
+            }
+        }
+
+        if missing.is_empty() {
+            return Ok(hits);
+        }
+
+        // One batch fetch covers every missing id. Cross-batch
+        // dedup is documented as a v0.2 enhancement above.
+        let fetched = batch_fetcher(missing).await?;
+        let mut fetched_arcs = Vec::with_capacity(fetched.len());
+        for value in fetched {
+            // Route through the public `insert` path so OnConflict,
+            // event emission, and (later) metrics fire as if the
+            // consumer had inserted manually.
+            let arc = self.insert(value).await?;
+            fetched_arcs.push(arc);
+        }
+        hits.extend(fetched_arcs);
+        Ok(hits)
+    }
+
+    /// Insert a pre-built `Arc<T>` into L1 without cloning the
+    /// inner value. Used by [`Punnu::get_or_fetch`] after a
+    /// single-flight fetch — the fetcher returns `T`, single-flight
+    /// wraps it in an `Arc<T>` for cheap multi-awaiter sharing, and
+    /// this method threads the arc into L1 with the same OnConflict
+    /// + event-emission semantics as [`Punnu::insert`].
+    ///
+    /// `pub(crate)` because consumers should use `insert` (which
+    /// handles boxing); this is the internal escape hatch for the
+    /// single-flight path.
+    /// Single-flight insert variant: insert `arc` into L1 if the slot
+    /// is empty *or holds an expired entry*; otherwise return the
+    /// already-cached non-expired `Arc<T>`. Atomic under one L1 write
+    /// lock — no expired-conflict race window.
+    ///
+    /// Used by [`Punnu::get_or_fetch`]'s `on_fetched` callback.
+    /// Resolves the BLOCK-M2 corner case where the consumer's
+    /// `OnConflict::Reject` policy collides with an entry that is
+    /// expired but not yet lazily popped: the standard `insert` path
+    /// would reject; this method treats expired entries as "absent"
+    /// and inserts the freshly-fetched value, satisfying
+    /// `get_or_fetch`'s documented post-condition that a subsequent
+    /// `get` hits.
+    ///
+    /// Returns the canonical `Arc<T>` — the freshly-inserted one if
+    /// the slot was empty/expired, the existing one if a non-expired
+    /// entry was present.
+    ///
+    /// `OnConflict` policy does not apply here. The behaviour is
+    /// always "insert if absent or expired; else return existing" —
+    /// `get_or_fetch`'s contract is "ensure the cache has SOMETHING
+    /// at this id, return it," not "follow the configured insert
+    /// policy."
+    pub(crate) async fn insert_arc_or_existing(&self, arc: Arc<T>) -> Arc<T> {
+        let id = arc.id();
+        let ttl = self.inner.config.default_ttl;
+        let now = self.inner.executor.now();
+        let expires_at = ttl.map(|d| now + d);
+        let entry = Entry::with_expiry(arc.clone(), expires_at);
+
+        // Decision happens under a single write lock so the "is
+        // there a non-expired entry?" check + insert-if-not race-
+        // free. Return value is the canonical `Arc<T>` — the existing
+        // one if non-expired, the inserted one otherwise.
+        enum InsertOrExistingOutcome<T: Cacheable> {
+            ReturnedExisting(Arc<T>),
+            Inserted {
+                lru_evicted: Option<T::Id>,
+                post_len: usize,
+            },
+        }
+
+        let outcome = {
+            let mut map = self.inner.map.write().expect(
+                "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
+            );
+            match map.peek(&id) {
+                Some(existing) if !existing.is_expired_at(now) => {
+                    InsertOrExistingOutcome::ReturnedExisting(existing.value.clone())
+                }
+                _ => {
+                    // Slot empty OR existing entry is expired. Push the
+                    // fresh entry — `LruCache::push` replaces the
+                    // expired entry in place (or evicts a different
+                    // entry if at capacity).
+                    let pushed = map.push(id.clone(), entry);
+                    let post_len = map.len();
+                    let lru_evicted =
+                        pushed.and_then(|(k, _v)| if k != id { Some(k) } else { None });
+                    InsertOrExistingOutcome::Inserted {
+                        lru_evicted,
+                        post_len,
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            InsertOrExistingOutcome::ReturnedExisting(existing) => existing,
+            InsertOrExistingOutcome::Inserted {
+                lru_evicted,
+                post_len,
+            } => {
+                // Emit events outside the lock.
+                if let Some(evicted_id) = lru_evicted {
+                    let _ = self.inner.events.send(PunnuEvent::Invalidate {
+                        id: evicted_id,
+                        reason: EventReason::LruEvict,
+                    });
+                    self.metrics_record_eviction(EventReason::LruEvict);
+                }
+                let _ = self
+                    .inner
+                    .events
+                    .send(PunnuEvent::Insert { value: arc.clone() });
+                self.metrics_record_lru_size(post_len);
+                arc
+            }
         }
     }
 
@@ -389,10 +765,75 @@ impl<T: Cacheable> Punnu<T> {
         &self.inner.config
     }
 
-    // `scope()` (the predicate-driven query handle) lands in Task 11
-    // alongside the `MemQ<T>` extension algebra. Until then, callers
-    // compose with `Punnu::get` / iteration over `events()`. See
-    // `docs/superpowers/plans/2026-05-01-sassi-v0.1.0.md` Task 11.
+    // `scope()` (the predicate-driven query handle) is a future
+    // extension that pairs with the `MemQ<T>` algebra. Until then,
+    // callers compose with `Punnu::get` / iteration over `events()`.
+
+    /// Test-only readiness handshake — resolves once the background
+    /// TTL sweep task has been polled the first time and is parked on
+    /// its initial `executor.sleep(interval)`. Tests `await` this
+    /// before calling `tokio::time::advance(...)` so the sleep is
+    /// guaranteed to be registered against the test's virtual clock.
+    ///
+    /// Returns `None` when no sweep was configured
+    /// (`PunnuConfig::ttl_sweep_interval == None`) — the readiness
+    /// signal only exists when there's a sweep to be ready about.
+    ///
+    /// `#[doc(hidden)]` because this is a test-helper escape hatch,
+    /// not part of the v0.1 public surface. Tests in this crate
+    /// import it; downstream code shouldn't.
+    /// Closes <https://github.com/TarunvirBains/sassi/issues/4>.
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+    #[doc(hidden)]
+    pub fn _test_sweep_initialised(&self) -> Option<Arc<Notify>> {
+        self.inner.sweep_initialised.clone()
+    }
+
+    // ---------------------------------------------------------------
+    // Metrics helpers — internal `record_*` shims that no-op when
+    // `PunnuConfig::metrics` is `None`. Wired from the call sites
+    // above (`get`, `insert_arc_internal`, `invalidate_internal`,
+    // `get_or_fetch`). The shim pattern:
+    //   - returns `()` so call sites can `.metrics_record_*()` on
+    //     `&self` with no error handling.
+    //   - reads `type_name` once via `std::any::type_name::<T>()`
+    //     (zero runtime cost; resolved at compile time per generic
+    //     instantiation). Spec §3.5.1 documents that `type_name` is
+    //     a metrics label, not a stable cross-version protocol id —
+    //     wire-format keys use a different identifier.
+    //   - the `if let Some(m) = ...` guard ensures the no-op path
+    //     compiles to a single null-check at the call site.
+    // ---------------------------------------------------------------
+
+    fn metrics_record_hit(&self, tier: CacheTier) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_hit(std::any::type_name::<T>(), tier);
+        }
+    }
+
+    fn metrics_record_miss(&self) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_miss(std::any::type_name::<T>());
+        }
+    }
+
+    fn metrics_record_eviction(&self, reason: EventReason) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_eviction(std::any::type_name::<T>(), reason);
+        }
+    }
+
+    fn metrics_record_lru_size(&self, size: usize) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_lru_size(std::any::type_name::<T>(), size);
+        }
+    }
+
+    fn metrics_record_fetch_latency(&self, duration: Duration) {
+        if let Some(m) = &self.inner.config.metrics {
+            m.record_fetch_latency(std::any::type_name::<T>(), duration);
+        }
+    }
 }
 
 /// Outcome of an `LruCache::push` pass — captured under the lock and
@@ -474,11 +915,15 @@ impl<T: Cacheable> PunnuBuilder<T> {
     /// - `config.lru_size == 0` — a zero-capacity LRU evicts every
     ///   insert immediately, which is a programmer error.
     /// - `config.ttl_sweep_interval == Some(Duration::ZERO)` — would
-    ///   reach `tokio::time::interval(0)` and panic at runtime. Use
-    ///   `None` to disable the sweep.
+    ///   reach the executor's `sleep(0)` in a tight loop. Use `None`
+    ///   to disable the sweep.
     /// - `config.event_channel_capacity == 0` — would reach
     ///   `broadcast::channel(0)` and panic at runtime. The minimum
     ///   sensible value is `1`.
+    /// - `config.namespace == Some(String::new())` — an empty string
+    ///   would silently prefix L2 backend keys with a leading
+    ///   separator and could collide with un-namespaced deployments.
+    ///   Use `None` to disable namespacing.
     pub fn build(self) -> Punnu<T> {
         let cap = NonZeroUsize::new(self.config.lru_size).unwrap_or_else(|| {
             panic!(
@@ -492,24 +937,65 @@ impl<T: Cacheable> PunnuBuilder<T> {
                 "PunnuConfig::ttl_sweep_interval must be greater than Duration::ZERO; \
                  use None to disable the background sweep"
             );
+            // Without a runtime feature, we have no spawn primitive
+            // for the sweep task. Silently no-op'ing the user's opt-in
+            // would mean expired entries never evict and the sweep's
+            // promised events / metrics never fire — the spec would
+            // be lying to the consumer. Fail loudly at build time
+            // with a clear remediation pointer.
+            #[cfg(not(any(feature = "runtime-tokio", feature = "runtime-wasm")))]
+            {
+                let _ = d;
+                panic!(
+                    "PunnuConfig::ttl_sweep_interval requires either the `runtime-tokio` \
+                     or `runtime-wasm` feature. Without a runtime, sassi has no spawn \
+                     primitive to drive the sweep task and silently discarding the \
+                     opt-in would lie about TTL behavior. Either enable a runtime \
+                     feature or set `ttl_sweep_interval` to `None` for lazy-only \
+                     TTL expiry on `get`."
+                );
+            }
         }
         assert!(
             self.config.event_channel_capacity > 0,
             "PunnuConfig::event_channel_capacity must be greater than 0; \
              the broadcast channel rejects a zero capacity"
         );
+        if let Some(ns) = &self.config.namespace {
+            assert!(
+                !ns.is_empty(),
+                "PunnuConfig::namespace must be non-empty when set; \
+                 use None to disable namespacing. An empty string would silently \
+                 prefix L2 backend keys with a leading separator and could collide \
+                 with un-namespaced deployments."
+            );
+        }
         let sweep_interval = self.config.ttl_sweep_interval;
         let (events, _) = broadcast::channel(self.config.event_channel_capacity);
+        let executor: Arc<dyn PunnuExecutor> = Arc::new(DefaultExecutor);
+
+        #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+        let sweep_initialised = sweep_interval.map(|_| Arc::new(Notify::new()));
+
         let inner = Arc::new(PunnuInner {
             map: RwLock::new(LruCache::new(cap)),
             events,
             config: self.config,
+            executor,
+            #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+            sweep_initialised: sweep_initialised.clone(),
+            in_flight: InFlightRegistry::new(),
         });
 
         // Spawn the sweep before constructing the public handle so
         // the weak ref is captured against the same `Arc` we hand
         // back. With `runtime-tokio` off, the call site is a no-op.
-        spawn_sweep_if_configured(&inner, sweep_interval);
+        #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+        spawn_sweep_if_configured(&inner, sweep_interval, sweep_initialised);
+        #[cfg(not(any(feature = "runtime-tokio", feature = "runtime-wasm")))]
+        {
+            let _ = sweep_interval; // avoid unused warning
+        }
 
         Punnu { inner }
     }
@@ -518,20 +1004,20 @@ impl<T: Cacheable> PunnuBuilder<T> {
 /// Spawn the TTL-sweep task when both the feature is enabled and the
 /// config requested a sweep interval. Pulled out of `build()` so the
 /// `cfg` gate is a single statement instead of branching the body.
-#[cfg(feature = "runtime-tokio")]
-fn spawn_sweep_if_configured<T: Cacheable>(inner: &Arc<PunnuInner<T>>, interval: Option<Duration>) {
-    if let Some(interval) = interval {
-        spawn_sweep(Arc::downgrade(inner), interval);
-    }
-}
-
-/// No-op when the `runtime-tokio` feature is off — the sweep cannot
-/// run without a runtime. Lazy expiry on `get` still works.
-#[cfg(not(feature = "runtime-tokio"))]
+///
+/// `sweep_initialised` is the readiness handshake the sweep fires on
+/// first poll; tests await it before advancing virtual time. `Some`
+/// iff `interval` is `Some` (1:1 invariant established at the call
+/// site in [`PunnuBuilder::build`]).
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
 fn spawn_sweep_if_configured<T: Cacheable>(
-    _inner: &Arc<PunnuInner<T>>,
-    _interval: Option<Duration>,
+    inner: &Arc<PunnuInner<T>>,
+    interval: Option<Duration>,
+    sweep_initialised: Option<Arc<Notify>>,
 ) {
+    if let (Some(interval), Some(notify)) = (interval, sweep_initialised) {
+        spawn_sweep(Arc::downgrade(inner), interval, notify);
+    }
 }
 
 impl<T: Cacheable> Default for PunnuBuilder<T> {

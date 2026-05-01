@@ -1,4 +1,4 @@
-//! Task 6 — TTL lazy-expiry path.
+//! TTL lazy-expiry path.
 //!
 //! Spec §6.2.5: when an entry's `expires_at` deadline has passed,
 //! `Punnu::get` returns `None`, removes the entry from L1, and emits

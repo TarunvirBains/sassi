@@ -1,5 +1,5 @@
 //! [`Cacheable`] trait + [`Field`] accessor — the identity contract for
-//! entries stored in a `Punnu` (lands in Cluster A).
+//! entries stored in a `Punnu`.
 //!
 //! A `Cacheable` type names its identity column (`Self::Id`), declares
 //! a generated companion struct of [`Field`] accessors (`Self::Fields`),
@@ -21,7 +21,7 @@
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-/// Identity contract for entries stored in a `Punnu` (lands in Cluster A).
+/// Identity contract for entries stored in a `Punnu`.
 ///
 /// Caches the **canonical shape** of `T`. Visage projections (auth-aware
 /// views of a model) get their own independent `Punnu<VisageT>` instance
