@@ -1,6 +1,6 @@
 # sassi
 
-**Sassi** is a typed in-memory pool with composable predicate algebra and cross-runtime trait queries — designed for cross-runtime use (backend or Dioxus frontend) without coupling to a particular ORM, web framework, or storage layer. WASM target support tracking in [issue #3](https://github.com/TarunvirBains/sassi/issues/3) (lands via Cluster B Task 10's `PunnuExecutor` abstraction); see Status below.
+**Sassi** is a typed in-memory pool with composable predicate algebra and cross-runtime trait queries — designed for cross-runtime use (backend or Dioxus frontend) without coupling to a particular ORM, web framework, or storage layer. The `runtime-wasm` feature compiles sassi clean against `wasm32-unknown-unknown`; per-test wasm execution and full-CI matrix expansion track [issue #3](https://github.com/TarunvirBains/sassi/issues/3) (see Status below).
 
 ## What it gives you
 
@@ -14,7 +14,7 @@
 
 **Pre-v0.1.0 alpha.** This repository is currently a skeleton; implementation lands per the design spec under `docs/superpowers/specs/` (local-only). v0.1.0 ships in lockstep with the [djogi](https://github.com/TarunvirBains/djogi) framework's v0.1.0 cut.
 
-- **WASM target** — deferred per [issue #3](https://github.com/TarunvirBains/sassi/issues/3); supported in v0.1.0 via Cluster B Task 10's `PunnuExecutor` abstraction (with Task 18 closing the CI matrix). The `runtime-wasm` feature flag is declared today as a forward-compatibility hook; no code is gated behind it yet.
+- **WASM target** — sassi compiles clean for `wasm32-unknown-unknown` under the `runtime-wasm` feature; the `wasm-target` CI job pins the contract. Per-test wasm execution (`wasm-bindgen-test` runner) and the full multi-target CI matrix track [issue #3](https://github.com/TarunvirBains/sassi/issues/3).
 
 ## Workspace layout
 

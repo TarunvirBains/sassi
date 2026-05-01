@@ -365,22 +365,43 @@ async fn coalesced_awaiters_fire_insert_event_exactly_once() {
 /// Proof of the BLOCK-M2 fix: expired-conflict during a fetch must
 /// not leave the cache empty.
 ///
-/// Pre-fix scenario: with `OnConflict::Reject`, an existing entry's
-/// TTL elapses during a `get_or_fetch`. The on_fetched closure
-/// called `insert_arc_into_l1` which saw the still-present (expired
-/// but not yet popped) entry and returned `Conflict`. The fall-back
-/// `punnu.get(&id)` then ran the lazy-expiry path, popped the
-/// expired entry, and returned `None`. `unwrap_or(arc)` returned the
-/// freshly-fetched value to the caller — but it was never inserted.
-/// Subsequent `get(&id)` calls would miss, violating
-/// `get_or_fetch`'s documented post-condition.
+/// Multi-actor scenario the M2 BLOCK actually requires:
 ///
-/// The fix (`insert_arc_or_existing`) treats expired entries as
-/// absent and inserts the freshly-fetched value atomically under
-/// one L1 lock. `OnConflict::Reject` does not apply on this path.
+/// 1. Punnu configured with `OnConflict::Reject` + `default_ttl = 1s`.
+/// 2. Actor A starts a `get_or_fetch` for id=1. Initial `get(1)` is a
+///    miss (cache empty), so A registers an in-flight fetch and the
+///    fetcher closure runs. The fetcher awaits a Notify so the test
+///    can interleave Actor B's work before on_fetched fires.
+/// 3. Actor B independently `insert`s id=1 with the Punnu's default
+///    TTL (1s). The entry is now in L1.
+/// 4. Time advances past 1s. Actor B's entry is expired *but not
+///    popped* — no `get` has been called against id=1 since the
+///    insert.
+/// 5. The test signals A's fetcher to complete; A's on_fetched runs
+///    against an L1 that has Actor B's expired entry.
+///
+/// Pre-fix code path: on_fetched calls `insert_arc_into_l1`. Under
+/// `OnConflict::Reject`, the expired-but-present entry triggers
+/// `Conflict`. The fall-back `punnu.get(&id)` then lazy-pops the
+/// expired entry, returns `None`, and `unwrap_or(arc)` returns A's
+/// never-inserted value. L1 is now empty (B was popped, A was never
+/// inserted). Subsequent `get(1)` misses — violation of
+/// `get_or_fetch`'s post-condition.
+///
+/// Post-fix code path: on_fetched calls `insert_arc_or_existing`,
+/// which peeks under the L1 write lock, sees the expired entry,
+/// treats it as absent, and atomically replaces it with A's value.
+/// Subsequent `get(1)` hits with A's value.
+///
+/// The yield-and-Notify orchestration is what makes the test
+/// genuinely exercise on_fetched's expired-conflict path. A
+/// single-actor test (the previous version) gets short-circuited by
+/// `get_or_fetch`'s initial `get` which lazy-pops before on_fetched
+/// runs — the M2 race window doesn't open.
 #[tokio::test(start_paused = true)]
-async fn expired_existing_entry_does_not_block_single_flight_insert() {
+async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
     use sassi::{OnConflict, PunnuConfig};
+    use tokio::sync::Notify;
 
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
@@ -390,45 +411,59 @@ async fn expired_existing_entry_does_not_block_single_flight_insert() {
         })
         .build();
 
-    // Original entry with 1s TTL.
+    // Step 2: Actor A starts get_or_fetch with a fetcher that awaits
+    // a Notify. Cache is empty → initial get(1) misses → registers
+    // in-flight fetch → fetcher runs → fetcher parks on Notify.
+    let go = Arc::new(Notify::new());
+    let go_for_fetch = go.clone();
+    let p_for_fetch = p.clone();
+    let actor_a = tokio::spawn(async move {
+        p_for_fetch
+            .get_or_fetch(&1, move |id| {
+                let go = go_for_fetch.clone();
+                async move {
+                    go.notified().await;
+                    Ok::<_, FetchError>(Some(E {
+                        id,
+                        name: "actor_a".into(),
+                    }))
+                }
+            })
+            .await
+    });
+
+    // Yield so Actor A registers the in-flight fetch + parks on the
+    // Notify before Actor B runs.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+
+    // Step 3: Actor B inserts at id=1 with default 1s TTL.
     p.insert(E {
         id: 1,
-        name: "original".into(),
+        name: "actor_b".into(),
     })
     .await
     .unwrap();
 
-    // Advance past the TTL — the entry is expired but not yet
-    // lazily popped (no `get` has been called).
+    // Step 4: advance past TTL. Actor B's entry is expired but not
+    // popped (no get since insert).
     tokio::time::advance(Duration::from_secs(2)).await;
 
-    // Trigger a get_or_fetch. The fetcher returns Some(new_value).
-    // Pre-fix: on_fetched hits Conflict because the expired entry
-    // is still in the LRU map; lazy `get` pops it; `unwrap_or(arc)`
-    // returns the never-inserted fresh value. Post-fix:
-    // insert_arc_or_existing treats the expired entry as absent and
-    // inserts the fresh value atomically.
-    let result = p
-        .get_or_fetch(&1, |id| async move {
-            Ok::<_, FetchError>(Some(E {
-                id,
-                name: "fresh".into(),
-            }))
-        })
-        .await
-        .unwrap()
-        .unwrap();
+    // Step 5: wake Actor A's fetcher. on_fetched runs against an L1
+    // with Actor B's expired entry.
+    go.notify_one();
 
-    assert_eq!(
-        result.name, "fresh",
-        "get_or_fetch returns the freshly-fetched value to the caller"
-    );
+    let result = actor_a.await.unwrap().unwrap().unwrap();
 
-    // Headline assertion: the freshly-fetched value is in L1.
-    // Subsequent get must hit, not miss. Pre-fix, it would miss
-    // (the value was never inserted under the Conflict-then-get path).
+    // Actor A always gets its value (this is true pre- and post-fix —
+    // the bug was about L1 state, not return value).
+    assert_eq!(result.name, "actor_a");
+
+    // Headline assertion: subsequent get must hit. Pre-fix this would
+    // miss (B was lazy-popped, A was never inserted). Post-fix, the
+    // atomic insert_arc_or_existing replaced B with A.
     let cached = p
         .get(&1)
-        .expect("subsequent get must hit; pre-fix it would miss");
-    assert_eq!(cached.name, "fresh");
+        .expect("subsequent get must hit; pre-fix L1 was empty after expired-conflict");
+    assert_eq!(cached.name, "actor_a");
 }

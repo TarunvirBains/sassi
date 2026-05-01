@@ -17,7 +17,7 @@ rust-version.workspace = true
 # `runtime-tokio` enables the optional background TTL sweep task and is
 # the typical setup for native consumers; tests rely on it via
 # `#[tokio::test]`. `runtime-wasm` is the WASM-target counterpart and
-# selects the gloo-timers-based executor (Cluster B, Task 10).
+# selects the gloo-timers-based executor.
 #
 # Selecting `runtime-wasm` only makes sense when building for
 # `wasm32-unknown-unknown` — the deps it pulls in
