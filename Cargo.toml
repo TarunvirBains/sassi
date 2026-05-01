@@ -38,6 +38,20 @@ tracing = "0.1"
 # Async-trait — until trait async stabilizes for object-safe traits
 async-trait = "0.1"
 
+# Cross-target monotonic clock. On native, `web_time::Instant` is a
+# re-export of `std::time::Instant`; on `wasm32-unknown-unknown`, it
+# wraps `Performance.now()`. Used by sassi only on wasm — native
+# builds keep `tokio::time::Instant` so tests retain
+# `tokio::time::pause()` / `advance(...)` determinism. Workspace dep
+# so the wasm-side feature pulls a single, vetted version.
+web-time = "1"
+
+# WASM-only spawn + sleep primitives. Pulled in by the `runtime-wasm`
+# feature on the sassi crate; the workspace declares the version so
+# the choice is auditable in one place.
+wasm-bindgen-futures = "0.4"
+gloo-timers = { version = "0.4", features = ["futures"] }
+
 # Macro substrate
 proc-macro2 = "1"
 quote = "1"

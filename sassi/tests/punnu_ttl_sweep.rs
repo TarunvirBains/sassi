@@ -56,40 +56,33 @@ impl Cacheable for E {
 }
 
 /// Anchor the background sweep task's interval timer at the current
-/// virtual time.
+/// virtual time — deterministic version using the readiness handshake
+/// fired by `spawn_sweep` on its first poll.
 ///
 /// `tokio::spawn(...)` queues the sweep's future but doesn't poll it
 /// until the runtime yields; on a `current_thread` runtime under
 /// `#[tokio::test(start_paused = true)]`, that means the sweep's
-/// `tokio::time::interval` is constructed only after the test code
-/// yields. If we `advance` before the sweep has been polled, the
-/// interval anchors at the *advanced* time and the sweep wakes one
-/// interval *after* the advance — the test then sees no removal.
+/// initial sleep is registered only after the sweep is polled. If we
+/// `advance` before that happens, the sleep anchors at the *advanced*
+/// time and the sweep wakes one interval *after* the advance — the
+/// test then sees no removal.
 ///
-/// Calling `prime_sweep` after `Punnu::builder().build()` and any
-/// inserts forces the sweep to be polled at least once: it creates
-/// its interval, awaits the immediate first tick (the sweep skips
-/// it), and parks on the second tick. Subsequent `advance` calls
-/// will then fire the registered timer.
-///
-/// **Heuristic, not a guarantee.** Tokio does not formally guarantee
-/// scheduling order after [`tokio::task::yield_now`]; two yields
-/// cover the common case (current_thread runtime + paused clock +
-/// spawn-then-tick sequence) but a future scheduler change could
-/// make this flake. A `tokio::sync::Notify`-based handshake from
-/// the sweep task to the test would be deterministic; tracked for
-/// the v0.2 testing-helper refactor in
-/// <https://github.com/TarunvirBains/sassi/issues/4>. For v0.1.0,
-/// these tests have been stable across CI runs and the heuristic
-/// is acceptable.
-async fn prime_sweep() {
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
+/// `_test_sweep_initialised()` returns a `Notify` that the sweep
+/// fires on first poll, *before* the first sleep registers. Awaiting
+/// `notified()` here guarantees the first sleep is anchored at the
+/// test's current virtual time. Replaces the yield-count heuristic
+/// from Cluster A; closes
+/// <https://github.com/TarunvirBains/sassi/issues/4>.
+async fn prime_sweep<T: Cacheable>(p: &Punnu<T>) {
+    let notify = p
+        ._test_sweep_initialised()
+        .expect("test invoked prime_sweep but no ttl_sweep_interval was configured");
+    notify.notified().await;
 }
 
 /// Yield enough times for the background sweep loop to process its
 /// pending wake-ups after a `tokio::time::advance`. The sweep task's
-/// `tick.tick().await` is a wakeup point on the paused clock; one
+/// `executor.sleep(...)` is a wakeup point on the paused clock; one
 /// yield per tick we want to process is sufficient because the sweep
 /// does no awaits between ticks (it acquires the L1 lock
 /// synchronously, drains, releases).
@@ -115,7 +108,7 @@ async fn sweep_removes_expired_without_get() {
     assert_eq!(p.len(), 1);
 
     // Pin the sweep's interval timer at virtual t=0 before advancing.
-    prime_sweep().await;
+    prime_sweep(&p).await;
 
     // Advance past TTL and several sweep ticks. The sweep skips the
     // first immediate tick (see `spawn_sweep`), so we need a couple
@@ -142,7 +135,7 @@ async fn sweep_emits_ttl_expired_event() {
     let mut rx = p.events();
     p.insert(E { id: 7 }).await.unwrap();
 
-    prime_sweep().await;
+    prime_sweep(&p).await;
     tokio::time::advance(Duration::from_secs(10)).await;
     drive_sweep_ticks(4).await;
 
@@ -177,7 +170,7 @@ async fn sweep_does_not_remove_unexpired_entries() {
     p.insert(E { id: 1 }).await.unwrap();
 
     // Several sweep ticks pass without the TTL elapsing.
-    prime_sweep().await;
+    prime_sweep(&p).await;
     tokio::time::advance(Duration::from_secs(5)).await;
     drive_sweep_ticks(6).await;
     assert_eq!(p.len(), 1, "unexpired entry must survive the sweep");
@@ -201,7 +194,7 @@ async fn sweep_handles_mixed_expired_and_fresh() {
         .await
         .unwrap();
 
-    prime_sweep().await;
+    prime_sweep(&p).await;
     tokio::time::advance(Duration::from_secs(10)).await;
     drive_sweep_ticks(4).await;
 
@@ -252,7 +245,7 @@ async fn sweep_removes_on_configured_tick_boundary() {
         .build();
     p.insert(E { id: 1 }).await.unwrap();
 
-    prime_sweep().await;
+    prime_sweep(&p).await;
 
     // Just past the first sweep tick — entry not yet expired.
     tokio::time::advance(Duration::from_millis(1500)).await;

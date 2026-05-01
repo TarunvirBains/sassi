@@ -25,21 +25,19 @@
 
 use crate::cacheable::Cacheable;
 use crate::error::InsertError;
+use crate::executor::{DefaultExecutor, PunnuExecutor};
 use crate::punnu::config::{OnConflict, PunnuConfig};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::ttl::Entry;
-#[cfg(feature = "runtime-tokio")]
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
 use crate::punnu::ttl::spawn_sweep;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+use tokio::sync::Notify;
 use tokio::sync::broadcast;
-// `tokio::time::Instant` is a drop-in for `std::time::Instant` that
-// honours `tokio::time::pause()` / `advance()` in tests. See the same
-// rationale in `crate::punnu::ttl`. Production behaviour is unchanged
-// — both types read the system monotonic clock outside of `pause()`.
-use tokio::time::Instant;
 
 /// Typed in-memory pool — the cache primitive. See module-level docs
 /// for concurrency and identity-map contract.
@@ -93,6 +91,24 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// Configuration captured at build time. Held by reference via
     /// [`Punnu::config`]; not mutated after construction.
     pub(crate) config: PunnuConfig,
+
+    /// Runtime primitives — `spawn`, `sleep`, `now`. Held as
+    /// `Arc<dyn PunnuExecutor>` so v0.2's
+    /// [`crate::punnu::PunnuConfig::executor`] field plugs in without
+    /// any internal refactor; v0.1 always populates this with
+    /// `Arc<DefaultExecutor>`. See spec §3.11 / §3.11.1.
+    pub(crate) executor: Arc<dyn PunnuExecutor>,
+
+    /// Readiness signal fired on the sweep task's first poll, *before*
+    /// the first sleep. Tests `await` this before
+    /// `tokio::time::advance(...)` to guarantee the sleep is
+    /// registered against the test's virtual clock. `None` when no
+    /// sweep is configured (the field is still allocated to keep the
+    /// struct shape stable; `pub(crate)` so the test-helper accessor
+    /// on `Punnu<T>` can reach it). Closes
+    /// <https://github.com/TarunvirBains/sassi/issues/4>.
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+    pub(crate) sweep_initialised: Option<Arc<Notify>>,
 }
 
 impl<T: Cacheable> Punnu<T> {
@@ -182,7 +198,7 @@ impl<T: Cacheable> Punnu<T> {
         ttl: Option<Duration>,
     ) -> Result<Arc<T>, InsertError> {
         let id = arc.id();
-        let expires_at = ttl.map(|d| Instant::now() + d);
+        let expires_at = ttl.map(|d| self.inner.executor.now() + d);
         let entry = Entry::with_expiry(arc.clone(), expires_at);
 
         // Locking + push are pure in-memory work — no awaits while
@@ -276,6 +292,11 @@ impl<T: Cacheable> Punnu<T> {
         // is the common cold-cache case, so the read-only peek is
         // worth the branch.
         let expired = {
+            // Sample `now` once before taking the write lock so the
+            // decision is consistent across the peek + pop without
+            // re-reading the clock under the lock. `now` is a cheap
+            // monotonic read regardless of executor.
+            let now = self.inner.executor.now();
             let mut map = self.inner.map.write().expect(
                 "Punnu L1 lock poisoned — a previous panic left it in an inconsistent state",
             );
@@ -286,7 +307,7 @@ impl<T: Cacheable> Punnu<T> {
             // lock — that's the race-safe spot to decide who fires
             // `TtlExpired`.
             let peeked = map.peek(id)?;
-            if peeked.is_expired() {
+            if peeked.is_expired_at(now) {
                 map.pop(id);
                 true
             } else {
@@ -393,6 +414,26 @@ impl<T: Cacheable> Punnu<T> {
     // alongside the `MemQ<T>` extension algebra. Until then, callers
     // compose with `Punnu::get` / iteration over `events()`. See
     // `docs/superpowers/plans/2026-05-01-sassi-v0.1.0.md` Task 11.
+
+    /// Test-only readiness handshake — resolves once the background
+    /// TTL sweep task has been polled the first time and is parked on
+    /// its initial `executor.sleep(interval)`. Tests `await` this
+    /// before calling `tokio::time::advance(...)` so the sleep is
+    /// guaranteed to be registered against the test's virtual clock.
+    ///
+    /// Returns `None` when no sweep was configured
+    /// (`PunnuConfig::ttl_sweep_interval == None`) — the readiness
+    /// signal only exists when there's a sweep to be ready about.
+    ///
+    /// `#[doc(hidden)]` because this is a test-helper escape hatch,
+    /// not part of the v0.1 public surface. Tests in this crate
+    /// import it; downstream code shouldn't.
+    /// Closes <https://github.com/TarunvirBains/sassi/issues/4>.
+    #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+    #[doc(hidden)]
+    pub fn _test_sweep_initialised(&self) -> Option<Arc<Notify>> {
+        self.inner.sweep_initialised.clone()
+    }
 }
 
 /// Outcome of an `LruCache::push` pass — captured under the lock and
@@ -500,16 +541,29 @@ impl<T: Cacheable> PunnuBuilder<T> {
         );
         let sweep_interval = self.config.ttl_sweep_interval;
         let (events, _) = broadcast::channel(self.config.event_channel_capacity);
+        let executor: Arc<dyn PunnuExecutor> = Arc::new(DefaultExecutor);
+
+        #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+        let sweep_initialised = sweep_interval.map(|_| Arc::new(Notify::new()));
+
         let inner = Arc::new(PunnuInner {
             map: RwLock::new(LruCache::new(cap)),
             events,
             config: self.config,
+            executor,
+            #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+            sweep_initialised: sweep_initialised.clone(),
         });
 
         // Spawn the sweep before constructing the public handle so
         // the weak ref is captured against the same `Arc` we hand
         // back. With `runtime-tokio` off, the call site is a no-op.
-        spawn_sweep_if_configured(&inner, sweep_interval);
+        #[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+        spawn_sweep_if_configured(&inner, sweep_interval, sweep_initialised);
+        #[cfg(not(any(feature = "runtime-tokio", feature = "runtime-wasm")))]
+        {
+            let _ = sweep_interval; // avoid unused warning
+        }
 
         Punnu { inner }
     }
@@ -518,20 +572,20 @@ impl<T: Cacheable> PunnuBuilder<T> {
 /// Spawn the TTL-sweep task when both the feature is enabled and the
 /// config requested a sweep interval. Pulled out of `build()` so the
 /// `cfg` gate is a single statement instead of branching the body.
-#[cfg(feature = "runtime-tokio")]
-fn spawn_sweep_if_configured<T: Cacheable>(inner: &Arc<PunnuInner<T>>, interval: Option<Duration>) {
-    if let Some(interval) = interval {
-        spawn_sweep(Arc::downgrade(inner), interval);
-    }
-}
-
-/// No-op when the `runtime-tokio` feature is off — the sweep cannot
-/// run without a runtime. Lazy expiry on `get` still works.
-#[cfg(not(feature = "runtime-tokio"))]
+///
+/// `sweep_initialised` is the readiness handshake the sweep fires on
+/// first poll; tests await it before advancing virtual time. `Some`
+/// iff `interval` is `Some` (1:1 invariant established at the call
+/// site in [`PunnuBuilder::build`]).
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
 fn spawn_sweep_if_configured<T: Cacheable>(
-    _inner: &Arc<PunnuInner<T>>,
-    _interval: Option<Duration>,
+    inner: &Arc<PunnuInner<T>>,
+    interval: Option<Duration>,
+    sweep_initialised: Option<Arc<Notify>>,
 ) {
+    if let (Some(interval), Some(notify)) = (interval, sweep_initialised) {
+        spawn_sweep(Arc::downgrade(inner), interval, notify);
+    }
 }
 
 impl<T: Cacheable> Default for PunnuBuilder<T> {

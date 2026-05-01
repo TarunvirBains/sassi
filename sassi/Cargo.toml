@@ -17,18 +17,18 @@ rust-version.workspace = true
 # `runtime-tokio` enables the optional background TTL sweep task and is
 # the typical setup for native consumers; tests rely on it via
 # `#[tokio::test]`. `runtime-wasm` is the WASM-target counterpart and
-# selects the gloo-timers-based executor.
+# selects the gloo-timers-based executor (Cluster B, Task 10).
 #
-# `runtime-wasm` is reserved for Cluster B, Task 10 (`PunnuExecutor`
-# abstraction) — the flag is declared today so consumers see the full
-# feature shape, but no code is gated behind it yet. WASM target
-# verification is tracked at
-# https://github.com/TarunvirBains/sassi/issues/3 (also covers Task 18
-# CI matrix work).
+# Selecting `runtime-wasm` only makes sense when building for
+# `wasm32-unknown-unknown` — the deps it pulls in
+# (`wasm-bindgen-futures`, `gloo-timers`) build cleanly on native too,
+# so the feature flag can be enabled on native builds without breakage,
+# but the executor's `spawn` / `sleep` paths only fire under
+# `target_arch = "wasm32"`. Native + `runtime-wasm` is therefore inert.
 default = ["serde", "runtime-tokio"]
 serde = ["dep:serde", "dep:serde_json"]
 runtime-tokio = []
-runtime-wasm = []
+runtime-wasm = ["dep:wasm-bindgen-futures", "dep:gloo-timers"]
 
 [dependencies]
 # `tokio` is unconditional — the broadcast channel that backs Punnu's
@@ -45,6 +45,18 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 sassi-macros = { path = "../sassi-macros", version = "0.1.0-alpha.0" }
+# `web-time` is a drop-in for `std::time::Instant` that works on
+# `wasm32-unknown-unknown`. Used only on wasm — native builds keep
+# `tokio::time::Instant` so tests retain `tokio::time::pause()` /
+# `advance(...)` determinism. The dep is unconditional because feature
+# resolution is per-package (not per-target); the actual usage is
+# gated `#[cfg(target_arch = "wasm32")]` in the source.
+web-time = { workspace = true }
+# Optional WASM-only spawn / sleep deps. Activated by `runtime-wasm`.
+# Declared as `optional = true` so the default native build doesn't
+# pull them in.
+wasm-bindgen-futures = { workspace = true, optional = true }
+gloo-timers = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-util` enables `tokio::time::pause` / `advance` and the
