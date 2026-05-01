@@ -71,9 +71,18 @@ impl Cacheable for E {
 /// its interval, awaits the immediate first tick (the sweep skips
 /// it), and parks on the second tick. Subsequent `advance` calls
 /// will then fire the registered timer.
+///
+/// **Heuristic, not a guarantee.** Tokio does not formally guarantee
+/// scheduling order after [`tokio::task::yield_now`]; two yields
+/// cover the common case (current_thread runtime + paused clock +
+/// spawn-then-tick sequence) but a future scheduler change could
+/// make this flake. A `tokio::sync::Notify`-based handshake from
+/// the sweep task to the test would be deterministic; tracked for
+/// the v0.2 testing-helper refactor in
+/// <https://github.com/TarunvirBains/sassi/issues/4>. For v0.1.0,
+/// these tests have been stable across CI runs and the heuristic
+/// is acceptable.
 async fn prime_sweep() {
-    // Two yields cover both the spawn point and the immediate first
-    // tick the sweep awaits-and-discards. Cheap, deterministic.
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
 }
@@ -145,7 +154,7 @@ async fn sweep_emits_ttl_expired_event() {
             ev,
             PunnuEvent::Invalidate {
                 id: 7,
-                reason: EventReason::TtlExpired,
+                reason: EventReason::TtlExpired(_),
             }
         ) {
             saw_ttl = true;
@@ -220,6 +229,48 @@ async fn sweep_terminates_when_punnu_dropped() {
     tokio::time::advance(Duration::from_secs(5)).await;
     drive_sweep_ticks(4).await;
     // No assertion — the test is the absence of a hang or panic.
+}
+
+#[tokio::test(start_paused = true)]
+async fn sweep_removes_on_configured_tick_boundary() {
+    // Cadence test — confirms removal happens on a sweep tick, not
+    // before. With ttl_sweep_interval = 1s and default_ttl = 2s:
+    // - At t=0: insert.
+    // - Advance to t=1.5s (past first tick at t=1s, before TTL at t=2s):
+    //   sweep ticks but entry is still fresh — nothing removed.
+    // - Advance to t=2.5s (past TTL): entry is now expired but the
+    //   sweep tick at t=2s already passed. The sweep at t=3s observes
+    //   expiry and removes. Until then, len() == 1 (lazy path
+    //   uninvoked since we don't call get).
+    // - Drive ticks; verify removal.
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            default_ttl: Some(Duration::from_secs(2)),
+            ttl_sweep_interval: Some(Duration::from_secs(1)),
+            ..Default::default()
+        })
+        .build();
+    p.insert(E { id: 1 }).await.unwrap();
+
+    prime_sweep().await;
+
+    // Just past the first sweep tick — entry not yet expired.
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    drive_sweep_ticks(2).await;
+    assert_eq!(
+        p.len(),
+        1,
+        "sweep at t=1s ran but entry (TTL 2s) is still fresh"
+    );
+
+    // Cross the TTL deadline AND the next sweep tick.
+    tokio::time::advance(Duration::from_millis(1500)).await;
+    drive_sweep_ticks(2).await;
+    assert_eq!(
+        p.len(),
+        0,
+        "sweep at t=3s should have removed expired entry"
+    );
 }
 
 #[tokio::test(start_paused = true)]

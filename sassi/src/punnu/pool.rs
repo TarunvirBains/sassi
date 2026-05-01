@@ -37,7 +37,8 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 // `tokio::time::Instant` is a drop-in for `std::time::Instant` that
 // honours `tokio::time::pause()` / `advance()` in tests. See the same
-// rationale in `crate::punnu::ttl`. Production behaviour is unchanged.
+// rationale in `crate::punnu::ttl`. Production behaviour is unchanged
+// — both types read the system monotonic clock outside of `pause()`.
 use tokio::time::Instant;
 
 /// Typed in-memory pool — the cache primitive. See module-level docs
@@ -224,7 +225,7 @@ impl<T: Cacheable> Punnu<T> {
         {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: evicted_id,
-                reason: EventReason::LruEvict,
+                reason: EventReason::LruEvict(crate::punnu::events::Internal::new()),
             });
         }
 
@@ -301,7 +302,7 @@ impl<T: Cacheable> Punnu<T> {
         if expired {
             let _ = self.inner.events.send(PunnuEvent::Invalidate {
                 id: id.clone(),
-                reason: EventReason::TtlExpired,
+                reason: EventReason::TtlExpired(crate::punnu::events::Internal::new()),
             });
         }
         None

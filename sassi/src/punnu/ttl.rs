@@ -53,8 +53,9 @@ use std::sync::Arc;
 use std::sync::Weak;
 // `tokio::time::Instant` is a drop-in for `std::time::Instant` that
 // honours `tokio::time::pause()` / `advance()` in tests. Production
-// behaviour is identical (wall-clock semantics); test code that opts
-// into `#[tokio::test(start_paused = true)]` gets deterministic
+// behaviour is identical — both types read the system monotonic clock
+// outside of `pause()`; test code that opts into
+// `#[tokio::test(start_paused = true)]` gets deterministic
 // virtual-time control over sassi's TTL bookkeeping. Tokio's `time`
 // feature is unconditionally enabled in the workspace, so this import
 // works for both `runtime-tokio` and the no-default-features build.
@@ -175,7 +176,7 @@ pub(crate) fn spawn_sweep<T: Cacheable>(weak: Weak<PunnuInner<T>>, interval: std
             for id in expired_ids {
                 let _ = inner.events.send(PunnuEvent::Invalidate {
                     id,
-                    reason: EventReason::TtlExpired,
+                    reason: EventReason::TtlExpired(crate::punnu::events::Internal::new()),
                 });
             }
         }

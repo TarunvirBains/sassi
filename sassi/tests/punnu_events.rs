@@ -163,7 +163,7 @@ async fn lru_evict_fires_invalidate_event() {
         match ev {
             PunnuEvent::Invalidate {
                 id: 1,
-                reason: EventReason::LruEvict,
+                reason: EventReason::LruEvict(_),
             } => saw_evict = true,
             PunnuEvent::Insert { value } if value.id == 1 => saw_insert_1 = true,
             PunnuEvent::Insert { value } if value.id == 2 => saw_insert_2 = true,
@@ -196,7 +196,7 @@ async fn lru_evict_event_orders_before_insert_event_for_new_entry() {
         matches!(
             first,
             PunnuEvent::Invalidate {
-                reason: EventReason::LruEvict,
+                reason: EventReason::LruEvict(_),
                 ..
             }
         ),
