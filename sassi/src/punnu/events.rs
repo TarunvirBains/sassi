@@ -179,9 +179,11 @@ pub enum InvalidationReason {
 /// still write `EventReason::LruEvict` internally, but external code
 /// cannot. Pattern-matching from outside requires the `{ .. }` rest
 /// pattern (e.g. `EventReason::LruEvict { .. }`), which keeps the
-/// invariant enforceable: external code can observe internal reasons
-/// but never synthesise them, even by token reuse or bit-pattern
-/// transmutation (no payload exists to forge).
+/// invariant enforceable through Rust's safe surface: external code
+/// can observe internal reasons but has no safe construction path to
+/// synthesise them. (Arbitrary downstream `unsafe` can transmute its
+/// way around any privacy boundary in Rust; this seal is a safe-code
+/// guarantee, not a hard impossibility.)
 ///
 /// The variants are stable wire-level identifiers — distributed
 /// backends fan invalidations across processes by reason, so adding a
