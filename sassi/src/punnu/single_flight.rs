@@ -115,6 +115,11 @@ pub(crate) enum FetchErrorClone {
         /// Best-effort panic message.
         message: String,
     },
+    /// Round-trip of `FetchError::IdentityMismatch`.
+    IdentityMismatch {
+        /// `std::any::type_name::<T>()`.
+        type_name: &'static str,
+    },
     /// Render of `FetchError::Custom` — `Display` output round-trips,
     /// type identity is lost.
     CustomRendered(String),
@@ -140,6 +145,9 @@ impl From<FetchErrorClone> for FetchError {
             FetchErrorClone::Serialization(s) => FetchError::Serialization(s),
             FetchErrorClone::FetcherPanic { type_name, message } => {
                 FetchError::FetcherPanic { type_name, message }
+            }
+            FetchErrorClone::IdentityMismatch { type_name } => {
+                FetchError::IdentityMismatch { type_name }
             }
             FetchErrorClone::CustomRendered(s) => FetchError::Custom(Box::new(RenderedError(s))),
             FetchErrorClone::InsertRendered(s) => {
@@ -176,6 +184,9 @@ fn into_clone(err: FetchError) -> FetchErrorClone {
         FetchError::Serialization(s) => FetchErrorClone::Serialization(s),
         FetchError::FetcherPanic { type_name, message } => {
             FetchErrorClone::FetcherPanic { type_name, message }
+        }
+        FetchError::IdentityMismatch { type_name } => {
+            FetchErrorClone::IdentityMismatch { type_name }
         }
         FetchError::Custom(e) => FetchErrorClone::CustomRendered(format!("{e}")),
         FetchError::Insert(e) => FetchErrorClone::InsertRendered(format!("{e}")),
@@ -371,6 +382,9 @@ where
                 .await;
             match result {
                 Ok(Ok(Some(value))) => {
+                    if value.id() != id_for_on_fetched {
+                        return Err(FetchErrorClone::IdentityMismatch { type_name });
+                    }
                     let arc = Arc::new(value);
                     // Run the L1 insert exactly once, here, before
                     // any awaiter receives the canonical Arc. The

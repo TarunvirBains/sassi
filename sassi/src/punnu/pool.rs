@@ -346,6 +346,18 @@ impl<T: Cacheable> Punnu<T> {
     /// returns `None`, the cache is left untouched and `None` is
     /// returned — distinct from "fetch failed".
     ///
+    /// # Canonical identity contract
+    ///
+    /// `get_or_fetch` is an identity fetch helper, not a query-result
+    /// membership helper. The fetcher must resolve the requested
+    /// canonical id. If it returns `Some(value)` where `value.id()`
+    /// does not equal the requested id, Sassi returns
+    /// [`FetchError::IdentityMismatch`] and does not cache the value.
+    /// Auth-filtered, paginated, tenant-filtered, or query-specific
+    /// fetchers should use a tenant-scoped `Punnu`, a distinct
+    /// wrapper type, a deliberately tenant-qualified id type, or the
+    /// refresh/subscription APIs that carry explicit query state.
+    ///
     /// # Single-flight coalescing (spec §3.5.1)
     ///
     /// Concurrent `get_or_fetch` calls for the same `id` deduplicate:
@@ -480,6 +492,19 @@ impl<T: Cacheable> Punnu<T> {
     /// returned them). Consumers needing positional lookup should
     /// build a `HashMap<T::Id, Arc<T>>` from the result.
     ///
+    /// # Canonical identity contract
+    ///
+    /// `get_or_fetch_many` is a batch canonical-id fetch helper. The
+    /// batch fetcher may return any subset of the requested missing
+    /// ids, but every returned `T::id()` must be in that missing-id
+    /// set. If the fetcher returns an unsolicited id, Sassi returns
+    /// [`FetchError::IdentityMismatch`] before mutating L1. Duplicate
+    /// returned ids are deduplicated deterministically before insert.
+    /// Do not use this API to encode query/page/filter membership;
+    /// use a tenant-scoped `Punnu`, a distinct wrapper type, a
+    /// deliberately tenant-qualified id type, or the refresh APIs that
+    /// carry explicit query state.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -529,15 +554,27 @@ impl<T: Cacheable> Punnu<T> {
 
         // One batch fetch covers every missing id. Cross-batch
         // dedup is documented as a v0.2 enhancement above.
+        let missing_set = seen_missing;
         let fetched = batch_fetcher(missing).await?;
-        let mut fetched_arcs = Vec::with_capacity(fetched.len());
+        let mut deduped_fetched = Vec::with_capacity(fetched.len());
+        let mut seen_returned: std::collections::HashSet<T::Id> = std::collections::HashSet::new();
         for value in fetched {
-            // Route through the public `insert` path so OnConflict,
-            // event emission, and (later) metrics fire as if the
-            // consumer had inserted manually.
-            let arc = self.insert(value).await?;
-            fetched_arcs.push(arc);
+            let id = value.id();
+            if !missing_set.contains(&id) {
+                return Err(FetchError::IdentityMismatch {
+                    type_name: std::any::type_name::<T>(),
+                });
+            }
+            if seen_returned.insert(id) {
+                deduped_fetched.push(value);
+            }
         }
+
+        if deduped_fetched.is_empty() {
+            return Ok(hits);
+        }
+
+        let fetched_arcs = self.insert_many_for_fetch(deduped_fetched)?;
         hits.extend(fetched_arcs);
         Ok(hits)
     }
@@ -583,6 +620,20 @@ impl<T: Cacheable> Punnu<T> {
         self.with_write_coordinator(|state| {
             self.prepare_insert_or_existing(state, arc, expires_at, epoch)
         })
+    }
+
+    fn insert_many_for_fetch(&self, values: Vec<T>) -> Result<Vec<Arc<T>>, InsertError> {
+        let prepared_values = values
+            .into_iter()
+            .map(|value| {
+                let ttl = self.inner.config.default_ttl;
+                let expires_at = self.expiry_deadline(ttl);
+                let epoch = self.next_access_epoch();
+                (Arc::new(value), expires_at, epoch)
+            })
+            .collect::<Vec<_>>();
+
+        self.with_write_coordinator(|state| self.prepare_insert_many(state, prepared_values))
     }
 
     /// Number of entries currently in the L1.
@@ -773,6 +824,47 @@ impl<T: Cacheable> Punnu<T> {
         events.push(write_event);
 
         PreparedWrite::new(state, events, Ok(value))
+    }
+
+    fn prepare_insert_many(
+        &self,
+        mut state: L1State<T>,
+        values: Vec<(Arc<T>, Option<Instant>, u64)>,
+    ) -> PreparedWrite<T, Result<Vec<Arc<T>>, InsertError>> {
+        let original_state = state.clone();
+        let mut events = Vec::new();
+        let mut inserted = Vec::with_capacity(values.len());
+
+        for (value, expires_at, epoch) in values {
+            let id = value.id();
+            let now = self.inner.executor.now();
+            Self::remove_expired_entry(&mut state, &id, now);
+
+            let existing = state.get(&id).cloned();
+            if existing.is_some() && matches!(self.inner.config.on_conflict, OnConflict::Reject) {
+                return PreparedWrite::new(original_state, Vec::new(), Err(InsertError::Conflict));
+            }
+
+            let entry = Arc::new(Entry::new(value.clone(), expires_at, epoch));
+            state.insert_entry(id.clone(), entry);
+
+            let write_event = match (existing, self.inner.config.on_conflict) {
+                (Some(old), OnConflict::Update) => PunnuEvent::Update {
+                    old: old.value.clone(),
+                    new: value.clone(),
+                },
+                _ => PunnuEvent::Insert {
+                    value: value.clone(),
+                },
+            };
+
+            self.remove_expired_entries_for_capacity(&mut state, now);
+            self.evict_to_capacity(&mut state, &mut events, Some(&id));
+            events.push(write_event);
+            inserted.push(value);
+        }
+
+        PreparedWrite::new(state, events, Ok(inserted))
     }
 
     fn prepare_insert_or_existing(

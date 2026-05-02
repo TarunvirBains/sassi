@@ -134,3 +134,44 @@ fn pool_returns_the_registered_arc_for_a_type() {
     let retrieved = sassi.pool::<Foo>().expect("Foo pool should be registered");
     assert!(Arc::ptr_eq(&retrieved, &foos));
 }
+
+#[test]
+fn re_registering_same_type_replaces_previous_pool() {
+    let mut sassi = Sassi::new();
+    let first = Arc::new(Punnu::<Foo>::builder().build());
+    let second = Arc::new(Punnu::<Foo>::builder().build());
+
+    block_on(async {
+        first
+            .insert(Foo {
+                id: 1,
+                name: "old".to_owned(),
+            })
+            .await
+            .unwrap();
+        second
+            .insert(Foo {
+                id: 2,
+                name: "new".to_owned(),
+            })
+            .await
+            .unwrap();
+    });
+
+    sassi.register::<Foo>(first.clone());
+    sassi.register::<Foo>(second.clone());
+
+    let retrieved = sassi.pool::<Foo>().expect("Foo pool should be registered");
+    assert!(Arc::ptr_eq(&retrieved, &second));
+
+    let names = sassi
+        .all_impl::<dyn Nameable>()
+        .iter()
+        .map(|item| item.name().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec!["new"],
+        "Sassi owns one pool per concrete T; re-registration replaces, not isolates tenants"
+    );
+}

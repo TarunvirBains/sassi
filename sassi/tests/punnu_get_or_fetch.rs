@@ -166,3 +166,31 @@ async fn fetcher_custom_error_propagates() {
         other => panic!("expected Custom error, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn get_or_fetch_rejects_mismatched_fetch_id() {
+    let p = Punnu::<E>::builder().build();
+
+    let result = p
+        .get_or_fetch(&1, |_id| async {
+            Ok::<_, FetchError>(Some(E {
+                id: 2,
+                name: "wrong".into(),
+            }))
+        })
+        .await;
+
+    match result {
+        Err(FetchError::IdentityMismatch { type_name }) => {
+            assert!(
+                type_name.contains("E"),
+                "type_name should include the cached type's name; got {type_name}"
+            );
+        }
+        other => panic!("expected IdentityMismatch error, got {other:?}"),
+    }
+
+    assert!(p.get(&1).is_none(), "requested id must not be cached");
+    assert!(p.get(&2).is_none(), "returned wrong id must not be cached");
+    assert_eq!(p.len(), 0);
+}

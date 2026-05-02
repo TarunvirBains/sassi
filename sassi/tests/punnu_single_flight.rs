@@ -484,3 +484,50 @@ async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
         .expect("subsequent get must hit; pre-fix L1 was empty after expired-conflict");
     assert_eq!(cached.name, "actor_a");
 }
+
+#[tokio::test]
+async fn single_flight_mismatched_fetch_id_broadcasts_error_to_all_waiters() {
+    let p = Punnu::<E>::builder().build();
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let p = p.clone();
+        let counter = counter.clone();
+        handles.push(tokio::spawn(async move {
+            p.get_or_fetch(&1, move |_id| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok::<_, FetchError>(Some(E {
+                        id: 2,
+                        name: "wrong".into(),
+                    }))
+                }
+            })
+            .await
+        }));
+    }
+
+    for h in handles {
+        match h.await.unwrap() {
+            Err(FetchError::IdentityMismatch { type_name }) => {
+                assert!(
+                    type_name.contains("E"),
+                    "type_name should include the cached type's name; got {type_name}"
+                );
+            }
+            other => panic!("expected IdentityMismatch on every peer, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "fetcher should still coalesce to one origin call"
+    );
+    assert!(p.get(&1).is_none(), "requested id must not be cached");
+    assert!(p.get(&2).is_none(), "returned wrong id must not be cached");
+    assert_eq!(p.len(), 0);
+}

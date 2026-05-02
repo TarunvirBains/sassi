@@ -6,9 +6,12 @@
 
 #![cfg(feature = "runtime-tokio")]
 
-use sassi::{Cacheable, FetchError, Field, Punnu};
+use sassi::{
+    Cacheable, FetchError, Field, InsertError, OnConflict, Punnu, PunnuConfig, PunnuEvent,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::broadcast::error::TryRecvError;
 
 #[derive(Debug, Clone)]
 struct E {
@@ -159,4 +162,118 @@ async fn empty_input_returns_empty_without_fetcher() {
 
     assert!(result.is_empty());
     assert_eq!(counter.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn get_or_fetch_many_rejects_unrequested_fetch_id_without_partial_insert() {
+    let p = Punnu::<E>::builder().build();
+
+    let result = p
+        .get_or_fetch_many(&[1, 2], |_missing| async {
+            Ok::<_, FetchError>(vec![E { id: 1 }, E { id: 999 }])
+        })
+        .await;
+
+    match result {
+        Err(FetchError::IdentityMismatch { type_name }) => {
+            assert!(
+                type_name.contains("E"),
+                "type_name should include the cached type's name; got {type_name}"
+            );
+        }
+        other => panic!("expected IdentityMismatch error, got {other:?}"),
+    }
+
+    assert!(
+        p.get(&1).is_none(),
+        "valid fetched id must not be partially inserted"
+    );
+    assert!(p.get(&2).is_none(), "missing requested id remains absent");
+    assert!(p.get(&999).is_none(), "unrequested id must not be cached");
+    assert_eq!(p.len(), 0);
+}
+
+#[tokio::test]
+async fn get_or_fetch_many_dedupes_duplicate_returned_ids() {
+    let p = Punnu::<E>::builder().build();
+    let mut rx = p.events();
+
+    let result = p
+        .get_or_fetch_many(&[1], |_missing| async {
+            Ok::<_, FetchError>(vec![E { id: 1 }, E { id: 1 }])
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.len(),
+        1,
+        "duplicate fetched ids should produce one returned Arc"
+    );
+    assert_eq!(result[0].id, 1);
+    assert_eq!(p.len(), 1);
+    assert!(p.get(&1).is_some());
+
+    match rx.try_recv().expect("expected one insert event") {
+        PunnuEvent::Insert { value } => assert_eq!(value.id, 1),
+        other => panic!("expected Insert event, got {other:?}"),
+    }
+    assert!(
+        matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+        "duplicate returned ids must not emit duplicate insert events"
+    );
+}
+
+#[tokio::test]
+async fn get_or_fetch_many_conflict_does_not_partially_insert() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            on_conflict: OnConflict::Reject,
+            ..Default::default()
+        })
+        .build();
+    let mut rx = p.events();
+    let p_for_fetcher = p.clone();
+
+    let result = p
+        .get_or_fetch_many(&[1, 2], move |_missing| async move {
+            p_for_fetcher
+                .insert(E { id: 2 })
+                .await
+                .expect("competing writer should win id 2 while batch fetch awaits");
+            Ok::<_, FetchError>(vec![E { id: 1 }, E { id: 2 }])
+        })
+        .await;
+
+    assert!(
+        matches!(result, Err(FetchError::Insert(InsertError::Conflict))),
+        "Reject conflict should surface as a fetch insert error; got {result:?}"
+    );
+    assert!(
+        p.get(&1).is_none(),
+        "batch must not partially publish id 1 before failing on id 2"
+    );
+    assert!(
+        p.get(&2).is_some(),
+        "the competing writer's value should remain resident"
+    );
+    assert_eq!(p.len(), 1);
+
+    let mut saw_id_1_insert = false;
+    let mut saw_id_2_insert = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            PunnuEvent::Insert { value } if value.id == 1 => saw_id_1_insert = true,
+            PunnuEvent::Insert { value } if value.id == 2 => saw_id_2_insert = true,
+            other => panic!("unexpected event after failed batch insert: {other:?}"),
+        }
+    }
+    assert!(
+        !saw_id_1_insert,
+        "failed batch must not emit an insert event for a rolled-back id"
+    );
+    assert!(
+        saw_id_2_insert,
+        "the competing writer should still have emitted its own insert"
+    );
 }

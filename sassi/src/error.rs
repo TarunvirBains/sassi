@@ -7,6 +7,8 @@
 //!
 //! Variants present today:
 //! - [`InsertError`] — surfaced from [`crate::punnu::Punnu::insert`] and friends.
+//! - [`FetchError`] — surfaced from [`crate::punnu::Punnu::get_or_fetch`]
+//!   and batch fetch helpers.
 //! - [`BackendError`] — surfaced from the [`CacheBackend`](crate) trait
 //!   (full trait lands in a later task; the variants are pinned now so
 //!   error types that compose with it are stable from v0.1.0-alpha.0
@@ -97,6 +99,16 @@ pub enum FetchError {
         /// panic's `Box<dyn Any>`); empty when the payload isn't a
         /// `String` / `&'static str`.
         message: String,
+    },
+
+    /// The fetcher returned a value whose [`crate::Cacheable::id`]
+    /// did not match the requested canonical id. Carries only the
+    /// cached type name so this error remains available for all
+    /// `Cacheable` ids; it does not require `T::Id: Debug`.
+    #[error("fetcher returned a value whose id did not match the requested id for {type_name}")]
+    IdentityMismatch {
+        /// `std::any::type_name::<T>()` of the cached type.
+        type_name: &'static str,
     },
 
     /// The consumer's fetcher returned a custom error. Boxed so the
