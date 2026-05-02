@@ -8,9 +8,11 @@
 
 pub mod config;
 pub mod events;
+pub(crate) mod eviction;
 pub mod pool;
 pub mod scope;
 pub(crate) mod single_flight;
+pub(crate) mod state;
 pub mod tenant;
 pub(crate) mod ttl;
 

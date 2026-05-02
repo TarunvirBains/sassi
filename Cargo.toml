@@ -31,6 +31,9 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Cache primitives
 lru = "0.12"
 dashmap = "6"
+arc-swap = "1"
+im = "15"
+fastrand = "2"
 
 # Logging — standard tracing surface
 tracing = "0.1"
@@ -65,3 +68,6 @@ syn = { version = "2", features = ["full"] }
 # rejected by macro expansion. Has documented support for
 # `wasm32-unknown-unknown`.
 inventory = "0.3"
+
+# Property testing
+proptest = "1"
