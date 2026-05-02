@@ -327,3 +327,41 @@ async fn get_or_fetch_many_capacity_pressure_emits_only_final_resident_inserts()
         "insert events must describe only values retained in the committed snapshot"
     );
 }
+
+#[tokio::test]
+async fn get_or_fetch_many_lru_event_orders_before_final_insert() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            lru_size: 1,
+            ..Default::default()
+        })
+        .build();
+    p.insert(E { id: 1 }).await.unwrap();
+    let mut rx = p.events();
+
+    let result = p
+        .get_or_fetch_many(&[2], |missing| async move {
+            Ok::<_, FetchError>(missing.into_iter().map(|id| E { id }).collect())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].id, 2);
+    let first = rx.try_recv().expect("first event");
+    let second = rx.try_recv().expect("second event");
+    assert!(
+        matches!(
+            first,
+            PunnuEvent::Invalidate {
+                id: 1,
+                reason: EventReason::LruEvict { .. },
+            }
+        ),
+        "first event must be the LRU eviction; got {first:?}"
+    );
+    assert!(
+        matches!(second, PunnuEvent::Insert { ref value } if value.id == 2),
+        "second event must be the final insert; got {second:?}"
+    );
+}

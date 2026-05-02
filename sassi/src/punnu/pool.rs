@@ -883,6 +883,7 @@ impl<T: Cacheable> Punnu<T> {
 
         self.remove_expired_entries_for_capacity(&mut state, now);
         let lru_victims = self.evict_ids_to_capacity(&mut state, None);
+        events.extend(Self::visible_lru_events(&original_state, lru_victims, now));
 
         for (id, value, old) in &accepted {
             if state.get(id).is_none() {
@@ -897,18 +898,6 @@ impl<T: Cacheable> Punnu<T> {
                     value: value.clone(),
                 },
             });
-        }
-
-        for id in lru_victims {
-            let was_visible = original_state
-                .get(&id)
-                .is_some_and(|entry| !entry.is_expired_at(now));
-            if was_visible {
-                events.push(PunnuEvent::Invalidate {
-                    id,
-                    reason: EventReason::LruEvict,
-                });
-            }
         }
 
         let inserted = accepted
@@ -1026,7 +1015,11 @@ impl<T: Cacheable> Punnu<T> {
 
         self.remove_expired_entries_for_capacity(&mut state, now);
         let lru_victims = self.evict_ids_to_capacity(&mut state, None);
+        let lru_events = Self::visible_lru_events(&original_state, lru_victims, now);
+        stats.lru_evictions = lru_events.len();
 
+        events.extend(tombstone_events);
+        events.extend(lru_events);
         for (id, old) in accepted_items {
             let Some(final_entry) = state.get(&id) else {
                 continue;
@@ -1037,21 +1030,6 @@ impl<T: Cacheable> Punnu<T> {
                 (Some(old), OnConflict::Update) => PunnuEvent::Update { old, new: value },
                 _ => PunnuEvent::Insert { value },
             });
-        }
-
-        events.extend(tombstone_events);
-
-        for id in lru_victims {
-            let was_visible = original_state
-                .get(&id)
-                .is_some_and(|entry| !entry.is_expired_at(now));
-            if was_visible {
-                stats.lru_evictions += 1;
-                events.push(PunnuEvent::Invalidate {
-                    id,
-                    reason: EventReason::LruEvict,
-                });
-            }
         }
 
         PreparedWrite::new(state, events, stats)
@@ -1111,6 +1089,25 @@ impl<T: Cacheable> Punnu<T> {
             victim_ids.push(victim_id);
         }
         victim_ids
+    }
+
+    fn visible_lru_events(
+        original_state: &L1State<T>,
+        victim_ids: Vec<T::Id>,
+        now: Instant,
+    ) -> Vec<PunnuEvent<T>> {
+        victim_ids
+            .into_iter()
+            .filter(|id| {
+                original_state
+                    .get(id)
+                    .is_some_and(|entry| !entry.is_expired_at(now))
+            })
+            .map(|id| PunnuEvent::Invalidate {
+                id,
+                reason: EventReason::LruEvict,
+            })
+            .collect()
     }
 
     fn choose_eviction_victim(

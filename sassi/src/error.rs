@@ -116,12 +116,14 @@ pub enum FetchError {
     #[error("fetcher error: {0}")]
     Custom(Box<dyn std::error::Error + Send + Sync>),
 
-    /// L1 insert failed after the fetcher returned a value — surfaces
-    /// when [`crate::punnu::OnConflict::Reject`] is configured and a
-    /// concurrent insert raced ahead, or when an L2 write-through
-    /// fails under [`crate::punnu::BackendFailureMode::Error`]. Lifts
-    /// [`InsertError`] into the fetch error space so
-    /// `Punnu::get_or_fetch` can return a single error type.
+    /// L1 insert failed after a fetcher returned a value. Today this is
+    /// reachable from the batch fetch path when
+    /// [`crate::punnu::OnConflict::Reject`] is configured and a
+    /// concurrent insert raced ahead. The single-id
+    /// [`crate::punnu::Punnu::get_or_fetch`] path uses
+    /// `insert_arc_or_existing` and returns the already-cached value
+    /// instead of surfacing a conflict. L2 write-through can also lift
+    /// [`InsertError`] into the fetch error space once backends land.
     #[error("L1 insert failed during fetch: {0}")]
     Insert(#[from] InsertError),
 }

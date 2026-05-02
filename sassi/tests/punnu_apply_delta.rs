@@ -464,6 +464,52 @@ async fn apply_delta_reports_lru_evictions_after_delta() {
 }
 
 #[tokio::test]
+async fn apply_delta_lru_event_orders_before_final_insert() {
+    let p = Punnu::<Item>::builder()
+        .config(PunnuConfig {
+            lru_size: 1,
+            ..Default::default()
+        })
+        .build();
+    p.insert(Item {
+        id: 1,
+        group: "a",
+        name: "old",
+    })
+    .await
+    .unwrap();
+    let mut rx = p.events();
+
+    let stats = p.apply_delta(delta(
+        vec![Item {
+            id: 2,
+            group: "a",
+            name: "new",
+        }],
+        [],
+    ));
+
+    assert_eq!(stats.applied_items, 1);
+    assert_eq!(stats.lru_evictions, 1);
+    let first = rx.try_recv().expect("first event");
+    let second = rx.try_recv().expect("second event");
+    assert!(
+        matches!(
+            first,
+            PunnuEvent::Invalidate {
+                id: 1,
+                reason: EventReason::LruEvict { .. },
+            }
+        ),
+        "first event must be the LRU eviction; got {first:?}"
+    );
+    assert!(
+        matches!(second, PunnuEvent::Insert { ref value } if value.id == 2),
+        "second event must be the final insert; got {second:?}"
+    );
+}
+
+#[tokio::test]
 async fn apply_delta_reports_only_final_insert_events_when_delta_exceeds_capacity() {
     let p = Punnu::<Item>::builder()
         .config(PunnuConfig {
