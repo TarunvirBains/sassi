@@ -51,8 +51,8 @@ pub use cacheable::{Cacheable, Field};
 pub use error::{BackendError, FetchError, InsertError};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp, MemQ};
 pub use punnu::{
-    BackendFailureMode, CacheTier, EventReason, InvalidationReason, OnConflict, Punnu,
-    PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, PunnuScope, TenantKey,
+    BackendFailureMode, CacheTier, DeltaApplyStats, DeltaResult, EventReason, InvalidationReason,
+    OnConflict, Punnu, PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, PunnuScope, TenantKey,
 };
 pub use sassi::Sassi;
 pub use time::Instant;

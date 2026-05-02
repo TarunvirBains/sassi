@@ -7,6 +7,7 @@
 //! per-process invariants, and §6 for the invalidation contract.
 
 pub mod config;
+pub mod delta;
 pub mod events;
 pub(crate) mod eviction;
 pub mod pool;
@@ -18,6 +19,7 @@ pub(crate) mod ttl;
 pub(crate) mod write;
 
 pub use config::{BackendFailureMode, CacheTier, OnConflict, PunnuConfig, PunnuMetrics};
+pub use delta::{DeltaApplyStats, DeltaResult};
 pub use events::{EventReason, InvalidationReason, PunnuEvent};
 pub use pool::{Punnu, PunnuBuilder};
 pub use scope::PunnuScope;

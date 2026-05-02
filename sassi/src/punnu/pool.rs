@@ -16,6 +16,7 @@ use crate::error::{FetchError, InsertError};
 use crate::executor::{DefaultExecutor, PunnuExecutor};
 use crate::predicate::MemQ;
 use crate::punnu::config::{CacheTier, OnConflict, PunnuConfig, record_metric_safely};
+use crate::punnu::delta::{DeltaApplyStats, DeltaResult};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::eviction::choose_sampled_lru_victim;
 use crate::punnu::scope::PunnuScope;
@@ -29,6 +30,7 @@ use crate::punnu::ttl::spawn_sweep;
 use crate::punnu::write::PreparedWrite;
 use crate::time::Instant;
 use arc_swap::ArcSwap;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -335,6 +337,34 @@ impl<T: Cacheable> Punnu<T> {
     pub(crate) async fn invalidate_internal(&self, id: &T::Id, reason: EventReason) {
         let id = id.clone();
         self.with_write_coordinator(|state| self.prepare_invalidate(state, &id, reason));
+    }
+
+    /// Atomically apply a delta-sync batch to the L1 identity map.
+    ///
+    /// `items` are upserted by canonical id and `tombstones` are true
+    /// deletes against the whole resident identity map. Absence from
+    /// `items` never deletes a resident entry; use a tombstone for
+    /// source-of-truth deletes. When the same id appears in both
+    /// collections, the tombstone wins and the item is skipped before
+    /// conflict checks, event emission, or `applied_items` accounting.
+    ///
+    /// The delta is prepared from one snapshot and published with one
+    /// atomic snapshot store. Events are emitted only after the new
+    /// snapshot is visible, using the same commit path as inserts and
+    /// invalidations.
+    ///
+    /// Duplicate item ids within one delta are coalesced before conflict
+    /// checks; the last item wins unless its id is tombstoned. Under
+    /// [`OnConflict::Reject`], only the live entry from the pre-delta
+    /// snapshot is considered a conflict, so duplicate ids inside the
+    /// same delta do not reject each other. `applied_items` and
+    /// insert/update events describe values that survive into the final
+    /// published snapshot after sampled-LRU pressure. `lru_evictions`
+    /// counts previously visible resident ids removed by sampled-LRU;
+    /// transient delta candidates dropped before publication are not
+    /// observable and are not counted.
+    pub fn apply_delta(&self, delta: DeltaResult<T>) -> DeltaApplyStats {
+        self.with_write_coordinator(|state| self.prepare_apply_delta(state, delta))
     }
 
     /// Get-or-fetch convenience for the lazy-fetch-on-miss pattern.
@@ -755,10 +785,11 @@ impl<T: Cacheable> Punnu<T> {
             let current = self.inner.l1.load_full();
             let prepared = prepare((*current).clone());
             #[cfg(debug_assertions)]
-            prepared.state.assert_invariants();
-            let post_len = prepared.state.len();
-            self.inner.l1.store(Arc::new(prepared.state));
-            (prepared.events, prepared.result, post_len)
+            prepared.state().assert_invariants();
+            let post_len = prepared.state().len();
+            let (state, events, result) = prepared.into_parts();
+            self.inner.l1.store(Arc::new(state));
+            (events, result, post_len)
         };
 
         #[cfg(test)]
@@ -919,6 +950,89 @@ impl<T: Cacheable> Punnu<T> {
         PreparedWrite::new(state, events, removed)
     }
 
+    fn prepare_apply_delta(
+        &self,
+        mut state: L1State<T>,
+        delta: DeltaResult<T>,
+    ) -> PreparedWrite<T, DeltaApplyStats> {
+        let now = self.inner.executor.now();
+        let original_state = state.clone();
+        let mut events = Vec::new();
+        let mut stats = DeltaApplyStats::default();
+        let DeltaResult { items, tombstones } = delta;
+        let mut normalized_items = BTreeMap::new();
+
+        for value in items {
+            let id = value.id();
+            if !tombstones.contains(&id) {
+                normalized_items.insert(id, value);
+            }
+        }
+
+        let mut accepted_items = BTreeMap::new();
+
+        for (id, value) in normalized_items {
+            Self::remove_expired_entry(&mut state, &id, now);
+
+            let existing = state.get(&id).cloned();
+            if existing.is_some() && matches!(self.inner.config.on_conflict, OnConflict::Reject) {
+                continue;
+            }
+
+            let value = Arc::new(value);
+            let expires_at = self.expiry_deadline(self.inner.config.default_ttl);
+            let epoch = self.next_access_epoch();
+            state.insert_entry(
+                id.clone(),
+                Arc::new(Entry::new(value.clone(), expires_at, epoch)),
+            );
+            accepted_items.insert(id, existing.map(|entry| entry.value.clone()));
+        }
+
+        let mut tombstone_events = Vec::new();
+        for id in tombstones {
+            if state.remove_entry(&id).is_some() {
+                stats.tombstones_evicted += 1;
+                tombstone_events.push(PunnuEvent::Invalidate {
+                    id,
+                    reason: EventReason::OnDelete,
+                });
+            }
+        }
+
+        self.remove_expired_entries_for_capacity(&mut state, now);
+        let lru_victims = self.evict_ids_to_capacity(&mut state, None);
+
+        for (id, old) in accepted_items {
+            let Some(final_entry) = state.get(&id) else {
+                continue;
+            };
+            let value = final_entry.value.clone();
+            stats.applied_items += 1;
+            events.push(match (old, self.inner.config.on_conflict) {
+                (Some(old), OnConflict::Update) => PunnuEvent::Update { old, new: value },
+                _ => PunnuEvent::Insert { value },
+            });
+        }
+
+        events.extend(tombstone_events);
+
+        for id in lru_victims {
+            let was_visible = original_state
+                .get(&id)
+                .is_some_and(|entry| !entry.is_expired_at(now));
+            if was_visible {
+                stats.lru_evictions += 1;
+                events.push(PunnuEvent::Invalidate {
+                    id,
+                    reason: EventReason::LruEvict,
+                });
+            }
+        }
+
+        PreparedWrite::new(state, events, stats)
+    }
+
     fn remove_expired_entry(state: &mut L1State<T>, id: &T::Id, now: Instant) -> bool {
         let expired = state.get(id).is_some_and(|entry| entry.is_expired_at(now));
         if expired {
@@ -949,17 +1063,30 @@ impl<T: Cacheable> Punnu<T> {
         state: &mut L1State<T>,
         events: &mut Vec<PunnuEvent<T>>,
         protected_id: Option<&T::Id>,
-    ) {
+    ) -> usize {
+        let victim_ids = self.evict_ids_to_capacity(state, protected_id);
+        let evictions = victim_ids.len();
+        events.extend(victim_ids.into_iter().map(|id| PunnuEvent::Invalidate {
+            id,
+            reason: EventReason::LruEvict,
+        }));
+        evictions
+    }
+
+    fn evict_ids_to_capacity(
+        &self,
+        state: &mut L1State<T>,
+        protected_id: Option<&T::Id>,
+    ) -> Vec<T::Id> {
+        let mut victim_ids = Vec::new();
         while state.len() > self.inner.config.lru_size {
             let Some(victim_id) = self.choose_eviction_victim(state, protected_id) else {
                 break;
             };
             state.remove_entry(&victim_id);
-            events.push(PunnuEvent::Invalidate {
-                id: victim_id,
-                reason: EventReason::LruEvict,
-            });
+            victim_ids.push(victim_id);
         }
+        victim_ids
     }
 
     fn choose_eviction_victim(
