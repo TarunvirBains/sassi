@@ -8,13 +8,15 @@
 //!   `expires_at <= now`; if expired, returns `None` without cleanup
 //!   or events. Cost: one comparison per `get`.
 //! - **Background sweep.** Active iff
-//!   [`crate::punnu::PunnuConfig::ttl_sweep_interval`] is `Some`. Walks
-//!   the L1 every interval tick, removes anything already expired,
-//!   emits `TtlExpired` for each. Bounded O(n) per tick where n is
-//!   the entry count; the sweep takes the write coordinator briefly. Off
-//!   by default — only worth running when the access pattern leaves
-//!   long-tail expired entries lingering in storage and the metrics
-//!   layer or downstream subscribers rely on prompt removal.
+//!   [`crate::punnu::PunnuConfig::ttl_sweep_interval`] is `Some`.
+//!   Walks the current L1 snapshot every interval tick to collect
+//!   expired candidate ids, then rechecks those candidates under the
+//!   write coordinator before publishing removals and emitting
+//!   `TtlExpired` for each actually removed entry. Bounded O(n) per
+//!   tick where n is the entry count. Off by default — only worth
+//!   running when the access pattern leaves long-tail expired entries
+//!   lingering in storage and the metrics layer or downstream
+//!   subscribers rely on prompt removal.
 //!
 //! Interaction with other invalidation paths is documented in the
 //! spec; the short version: sweep emits `TtlExpired`, while lazy reads
@@ -26,16 +28,6 @@
     all(feature = "runtime-wasm", target_arch = "wasm32"),
 ))]
 use crate::cacheable::Cacheable;
-#[cfg(any(
-    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
-    all(feature = "runtime-wasm", target_arch = "wasm32"),
-))]
-use crate::punnu::config::record_metric_safely;
-#[cfg(any(
-    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
-    all(feature = "runtime-wasm", target_arch = "wasm32"),
-))]
-use crate::punnu::events::{EventReason, PunnuEvent};
 #[cfg(any(
     all(feature = "runtime-tokio", not(target_arch = "wasm32")),
     all(feature = "runtime-wasm", target_arch = "wasm32"),
@@ -124,64 +116,34 @@ pub(crate) fn spawn_sweep<T: Cacheable>(
             // dropped, the inner is gone and we exit cleanly.
             let Some(inner) = weak.upgrade() else { break };
 
-            // Publish the sweep as one ordered commit. `commit_coord`
-            // covers snapshot publish plus event/metric side effects,
-            // so a later writer cannot emit ahead of this sweep.
-            let _commit_guard = match inner.commit_coord.lock() {
-                Ok(guard) => guard,
-                Err(_) => break,
-            };
-            let (expired_ids, post_len): (Vec<T::Id>, usize) = {
-                let _guard = match inner.write_coord.lock() {
-                    Ok(guard) => guard,
-                    Err(_) => break,
-                };
-                let now = inner.executor.now();
-                let mut state = (*inner.l1.load_full()).clone();
-                let mut expired_ids = Vec::new();
-                for (id, entry) in state.entries.iter() {
-                    if entry.is_expired_at(now) {
-                        expired_ids.push(id.clone());
-                    }
-                }
-                if expired_ids.is_empty() {
-                    (expired_ids, state.len())
-                } else {
-                    for id in &expired_ids {
-                        state.remove_entry(id);
-                    }
-                    #[cfg(debug_assertions)]
-                    state.assert_invariants();
-                    let post_len = state.len();
-                    inner.l1.store(Arc::new(state));
-                    (expired_ids, post_len)
-                }
+            let now = inner.executor.now();
+            let expired_ids = {
+                let snapshot = inner.l1.load_full();
+                snapshot
+                    .entries
+                    .iter()
+                    .filter(|(_, entry)| entry.is_expired_at(now))
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>()
             };
 
-            // Record metrics after the short snapshot write — `record_*` is a
-            // consumer-defined trait method that may do arbitrary
-            // work, so it stays outside `write_coord`. It remains under
-            // `commit_coord` to preserve event/metric ordering.
-            // Spec §3.5.1: TTL-driven evictions count, the dashboard
-            // splits by reason. We also sample `record_lru_size`
-            // once per sweep tick that removed anything (no-op when
-            // expired_ids is empty — the size didn't change).
-            let removed_count = expired_ids.len();
-            for id in expired_ids {
-                let _ = inner.events.send(PunnuEvent::Invalidate {
-                    id,
-                    reason: EventReason::TtlExpired,
-                });
-                if let Some(m) = &inner.config.metrics {
-                    record_metric_safely(|| {
-                        m.record_eviction(std::any::type_name::<T>(), EventReason::TtlExpired);
-                    });
-                }
+            #[cfg(all(
+                test,
+                any(
+                    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+                    all(feature = "runtime-wasm", target_arch = "wasm32"),
+                )
+            ))]
+            inner
+                .pause_next_sweep_after_candidates_for_test(!expired_ids.is_empty())
+                .await;
+
+            if expired_ids.is_empty() {
+                continue;
             }
-            if removed_count > 0
-                && let Some(m) = &inner.config.metrics
-            {
-                record_metric_safely(|| m.record_lru_size(std::any::type_name::<T>(), post_len));
+
+            if !inner.sweep_expired(expired_ids) {
+                break;
             }
         }
     }));

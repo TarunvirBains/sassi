@@ -39,7 +39,6 @@ tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-lru = { workspace = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
 im = { workspace = true }

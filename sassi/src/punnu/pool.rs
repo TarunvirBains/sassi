@@ -43,6 +43,18 @@ use tokio::sync::broadcast;
 #[cfg(test)]
 type AfterPublishHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
+#[cfg(all(
+    test,
+    any(
+        all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+        all(feature = "runtime-wasm", target_arch = "wasm32"),
+    )
+))]
+struct SweepCandidatePause {
+    collected: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
 /// Typed in-memory pool — the cache primitive. See module-level docs
 /// for concurrency and identity-map contract.
 ///
@@ -141,6 +153,19 @@ pub(crate) struct PunnuInner<T: Cacheable> {
         all(feature = "runtime-wasm", target_arch = "wasm32"),
     ))]
     pub(crate) sweep_initialised: Option<Arc<Notify>>,
+
+    /// Test-only pause point for the candidate-then-prepare sweep race.
+    /// When set, the next sweep tick that collects at least one expired
+    /// candidate notifies `collected` and waits on `resume` before it
+    /// enters the coordinated prepare path.
+    #[cfg(all(
+        test,
+        any(
+            all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+            all(feature = "runtime-wasm", target_arch = "wasm32"),
+        )
+    ))]
+    sweep_candidate_pause: Mutex<Option<SweepCandidatePause>>,
 
     /// Single-flight in-flight fetch registry — deduplicates
     /// concurrent [`Punnu::get_or_fetch`] callers for the same id so
@@ -645,6 +670,26 @@ impl<T: Cacheable> Punnu<T> {
         self.inner.sweep_initialised.clone()
     }
 
+    #[cfg(all(
+        test,
+        any(
+            all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+            all(feature = "runtime-wasm", target_arch = "wasm32"),
+        )
+    ))]
+    fn pause_next_sweep_after_candidates_for_test(
+        &self,
+        collected: Arc<Notify>,
+        resume: Arc<Notify>,
+    ) {
+        *self
+            .inner
+            .sweep_candidate_pause
+            .lock()
+            .expect("Punnu sweep-candidate test hook lock poisoned") =
+            Some(SweepCandidatePause { collected, resume });
+    }
+
     fn with_write_coordinator<R>(
         &self,
         prepare: impl FnOnce(L1State<T>) -> PreparedWrite<T, R>,
@@ -932,6 +977,98 @@ impl<T: Cacheable> Punnu<T> {
     }
 }
 
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
+impl<T: Cacheable> PunnuInner<T> {
+    /// Prepare and publish a TTL sweep from candidate ids collected
+    /// from an earlier snapshot.
+    ///
+    /// Returns `false` only when a coordinator lock was poisoned; the
+    /// sweep task treats that as a terminal condition and exits.
+    pub(crate) fn sweep_expired(&self, candidate_ids: Vec<T::Id>) -> bool {
+        let _commit_guard = match self.commit_coord.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+
+        let (removed_ids, post_len) = {
+            let _guard = match self.write_coord.lock() {
+                Ok(guard) => guard,
+                Err(_) => return false,
+            };
+            let now = self.executor.now();
+            let mut state = (*self.l1.load_full()).clone();
+            let mut removed_ids = Vec::new();
+
+            for id in candidate_ids {
+                if state.get(&id).is_some_and(|entry| entry.is_expired_at(now)) {
+                    state.remove_entry(&id);
+                    removed_ids.push(id);
+                }
+            }
+
+            if removed_ids.is_empty() {
+                (removed_ids, state.len())
+            } else {
+                #[cfg(debug_assertions)]
+                state.assert_invariants();
+                let post_len = state.len();
+                self.l1.store(Arc::new(state));
+                (removed_ids, post_len)
+            }
+        };
+
+        let removed_count = removed_ids.len();
+        for id in removed_ids {
+            let _ = self.events.send(PunnuEvent::Invalidate {
+                id,
+                reason: EventReason::TtlExpired,
+            });
+            if let Some(m) = &self.config.metrics {
+                record_metric_safely(|| {
+                    m.record_eviction(std::any::type_name::<T>(), EventReason::TtlExpired);
+                });
+            }
+        }
+
+        if removed_count > 0
+            && let Some(m) = &self.config.metrics
+        {
+            record_metric_safely(|| m.record_lru_size(std::any::type_name::<T>(), post_len));
+        }
+
+        true
+    }
+
+    #[cfg(all(
+        test,
+        any(
+            all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+            all(feature = "runtime-wasm", target_arch = "wasm32"),
+        )
+    ))]
+    pub(crate) async fn pause_next_sweep_after_candidates_for_test(&self, has_candidates: bool) {
+        if !has_candidates {
+            return;
+        }
+
+        let pause = {
+            let mut hook = self
+                .sweep_candidate_pause
+                .lock()
+                .expect("Punnu sweep-candidate test hook lock poisoned");
+            hook.take()
+        };
+
+        if let Some(pause) = pause {
+            pause.collected.notify_one();
+            pause.resume.notified().await;
+        }
+    }
+}
+
 /// Builder for [`Punnu<T>`]. Construct via [`Punnu::builder`].
 ///
 /// The builder pattern lets the v0.1 surface stay narrow while
@@ -1082,6 +1219,14 @@ impl<T: Cacheable> PunnuBuilder<T> {
                 all(feature = "runtime-wasm", target_arch = "wasm32"),
             ))]
             sweep_initialised: sweep_initialised.clone(),
+            #[cfg(all(
+                test,
+                any(
+                    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+                    all(feature = "runtime-wasm", target_arch = "wasm32"),
+                )
+            ))]
+            sweep_candidate_pause: Mutex::new(None),
             in_flight: InFlightRegistry::new(),
         });
 
@@ -1141,6 +1286,8 @@ mod commit_order_tests {
     use std::sync::{Condvar, Mutex as StdMutex};
     use std::thread;
     use std::time::{Duration as StdDuration, Instant as StdInstant};
+    #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
+    use tokio::sync::Notify;
     use tokio::sync::broadcast::error::TryRecvError;
 
     #[derive(Debug, Clone)]
@@ -1279,5 +1426,64 @@ mod commit_order_tests {
 
         assert_eq!(insert_event_id(rx.try_recv().unwrap()), 1);
         assert_eq!(insert_event_id(rx.try_recv().unwrap()), 2);
+    }
+
+    #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
+    #[tokio::test(start_paused = true)]
+    async fn sweep_rechecks_expiry_before_removing_stale_candidate() {
+        let punnu = Punnu::<EventOrderItem>::builder()
+            .config(PunnuConfig {
+                default_ttl: Some(Duration::from_secs(5)),
+                ttl_sweep_interval: Some(Duration::from_secs(1)),
+                ..Default::default()
+            })
+            .build();
+        let mut rx = punnu.events();
+
+        punnu.insert(EventOrderItem { id: 1 }).await.unwrap();
+        let notify = punnu
+            ._test_sweep_initialised()
+            .expect("tokio sweep should expose readiness hook in tests");
+        notify.notified().await;
+
+        let candidates_collected = Arc::new(Notify::new());
+        let resume_prepare = Arc::new(Notify::new());
+        punnu.pause_next_sweep_after_candidates_for_test(
+            candidates_collected.clone(),
+            resume_prepare.clone(),
+        );
+
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        candidates_collected.notified().await;
+
+        punnu
+            .insert_with_ttl(EventOrderItem { id: 1 }, Duration::from_secs(60))
+            .await
+            .expect("newer same-id write should commit before sweep prepare resumes");
+
+        resume_prepare.notify_one();
+        for _ in 0..2 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            punnu.get(&1).is_some(),
+            "sweep must not evict a newer same-id value that replaced an expired candidate"
+        );
+        assert_eq!(punnu.len(), 1);
+
+        while let Ok(ev) = rx.try_recv() {
+            assert!(
+                !matches!(
+                    ev,
+                    PunnuEvent::Invalidate {
+                        id: 1,
+                        reason: EventReason::TtlExpired,
+                    }
+                ),
+                "stale candidate should not emit a TtlExpired event for the newer value"
+            );
+        }
     }
 }
