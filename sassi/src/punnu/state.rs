@@ -56,13 +56,23 @@ impl<T> Entry<T> {
 
 /// Immutable-snapshot-friendly L1 state.
 ///
-/// `entries` stores payloads by id, `keys` supports O(1) random sampling
-/// by index, and `positions` maps ids back into `keys` for coherent
+/// `entries` stores payloads by id, `keys` supports random-access sampling
+/// over the vector, and `positions` maps ids back into `keys` for coherent
 /// swap-remove.
 pub(crate) struct L1State<T: Cacheable> {
     pub(crate) entries: HashMap<T::Id, Arc<Entry<T>>>,
     pub(crate) keys: Vector<T::Id>,
     pub(crate) positions: HashMap<T::Id, usize>,
+}
+
+impl<T: Cacheable> Clone for L1State<T> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            keys: self.keys.clone(),
+            positions: self.positions.clone(),
+        }
+    }
 }
 
 impl<T: Cacheable> L1State<T> {
@@ -101,6 +111,11 @@ impl<T: Cacheable> L1State<T> {
         id: T::Id,
         entry: Arc<Entry<T>>,
     ) -> Option<Arc<Entry<T>>> {
+        assert!(
+            id == entry.value.id(),
+            "L1State invariant violated: insert key does not match entry payload id"
+        );
+
         if !self.entries.contains_key(&id) {
             self.positions.insert(id.clone(), self.keys.len());
             self.keys.push_back(id.clone());
@@ -174,6 +189,14 @@ impl<T: Cacheable> L1State<T> {
                 "L1State invariant violated: entry has no position"
             );
         }
+
+        for (id, entry) in self.entries.iter() {
+            let payload_id = entry.value.id();
+            assert!(
+                id == &payload_id,
+                "L1State invariant violated: map key does not match entry payload id"
+            );
+        }
     }
 }
 
@@ -216,6 +239,16 @@ mod tests {
         let entry = Entry::new(Arc::new(Item { id: 7 }), None, 42);
 
         assert_eq!(entry.access_epoch(), 42);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "L1State invariant violated: insert key does not match entry payload id"
+    )]
+    fn insert_entry_should_reject_mismatched_entry_identity() {
+        let mut state = L1State::empty();
+
+        state.insert_entry(1, entry(2));
     }
 
     #[test]
