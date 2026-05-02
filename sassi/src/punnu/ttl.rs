@@ -1,110 +1,61 @@
-//! Storage entry layout + TTL helpers.
-//!
-//! The internal LRU map stores [`Entry<T>`] rather than `Arc<T>`
-//! directly so per-entry metadata (currently just `expires_at`) lives
-//! alongside the value. Consumers never see `Entry<T>` — `Punnu`
-//! returns `Arc<T>` from `get` / `insert`. The storage shape
-//! ([`Entry<T>`] with `expires_at: Option<Instant>`) lands alongside
-//! the pool itself; the lazy-expiry behaviour and the background
-//! sweep that act on `expires_at` live in this module too.
+//! TTL background sweep helpers.
 //!
 //! # TTL semantics (spec §6.2.5)
 //!
 //! Two mechanisms enforce expiry:
 //!
 //! - **Lazy expiry on access.** Always active. [`Punnu::get`] checks
-//!   `expires_at <= now`; if expired, removes the entry from L1 and
-//!   emits `PunnuEvent::Invalidate { reason: TtlExpired }`. Cost: one
-//!   comparison per `get`.
+//!   `expires_at <= now`; if expired, returns `None` without cleanup
+//!   or events. Cost: one comparison per `get`.
 //! - **Background sweep.** Active iff
 //!   [`crate::punnu::PunnuConfig::ttl_sweep_interval`] is `Some`. Walks
 //!   the L1 every interval tick, removes anything already expired,
 //!   emits `TtlExpired` for each. Bounded O(n) per tick where n is
-//!   the entry count; the sweep takes the L1 write lock briefly. Off
+//!   the entry count; the sweep takes the write coordinator briefly. Off
 //!   by default — only worth running when the access pattern leaves
 //!   long-tail expired entries lingering in storage and the metrics
 //!   layer or downstream subscribers rely on prompt removal.
 //!
 //! Interaction with other invalidation paths is documented in the
-//! spec; the short version: independent of LRU and save/delete; same
-//! reason discriminator (`TtlExpired`) regardless of which mechanism
-//! observes the expiry first.
-//!
-//! # Why an internal struct rather than a tuple?
-//!
-//! - **Forward compatibility:** later metadata (per-entry `inserted_at`
-//!   for refresh hints, per-entry `tenant_origin` for cross-tenant
-//!   guard diagnostics, …) lands without changing every callsite.
-//! - **Discoverability:** `entry.is_expired_at(now)` reads better than
-//!   `entry.1.map(|t| t <= now).unwrap_or(false)` and keeps the
-//!   comparison policy in one place.
-//! - **Clone semantics:** `Entry<T>: Clone` cheaply because the
-//!   payload is `Arc<T>`; `Instant` is `Copy`. Cloning happens
-//!   on every `get` returning a sharable handle.
+//! spec; the short version: sweep emits `TtlExpired`, while lazy reads
+//! only record metrics and writers may remove expired entries silently
+//! when they touch the same id or need to reclaim capacity.
 
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
 use crate::cacheable::Cacheable;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
+use crate::punnu::config::record_metric_safely;
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
 use crate::punnu::events::{EventReason, PunnuEvent};
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
 use crate::punnu::pool::PunnuInner;
-use crate::time::Instant;
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
 use std::sync::Arc;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
 use std::sync::Weak;
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
 use tokio::sync::Notify;
-
-/// LRU storage cell — holds the cached payload plus per-entry
-/// metadata.
-///
-/// `pub(crate)` because `Punnu` returns `Arc<T>` from `get`; the
-/// metadata is internal bookkeeping.
-pub(crate) struct Entry<T> {
-    /// Shared handle to the cached payload.
-    pub value: Arc<T>,
-
-    /// Absolute expiry deadline, computed from
-    /// `executor.now() + ttl` at insert time. `None` means the entry
-    /// never expires on time (LRU eviction can still drop it). The
-    /// [`Instant`] type is target-aware (see [`crate::time`]) — on
-    /// native it's `tokio::time::Instant` so test pause/advance is
-    /// honoured; on wasm it's `web_time::Instant` (browser
-    /// `Performance.now()`).
-    pub expires_at: Option<Instant>,
-}
-
-impl<T> Entry<T> {
-    /// Construct an entry with an explicit expiry deadline. `None`
-    /// means the entry never expires on time (LRU eviction is the
-    /// only way for it to leave the cache).
-    pub(crate) fn with_expiry(value: Arc<T>, expires_at: Option<Instant>) -> Self {
-        Self { value, expires_at }
-    }
-
-    /// Has the entry's TTL elapsed against `now`?
-    ///
-    /// Pure (no clock read) so callers can sample a `now` once per
-    /// sweep tick (or once per `get`) and reuse it across many
-    /// entries — the background sweep does exactly this.
-    pub(crate) fn is_expired_at(&self, now: Instant) -> bool {
-        match self.expires_at {
-            Some(deadline) => deadline <= now,
-            None => false,
-        }
-    }
-}
-
-// Manual `Clone`: deriving would require `T: Clone` even though the
-// only data field is `Arc<T>` (which is `Clone` regardless of `T`).
-impl<T> Clone for Entry<T> {
-    fn clone(&self) -> Self {
-        Self {
-            value: self.value.clone(),
-            expires_at: self.expires_at,
-        }
-    }
-}
 
 /// Spawn the background sweep task via the [`PunnuExecutor`]
 /// abstraction.
@@ -130,7 +81,10 @@ impl<T> Clone for Entry<T> {
 /// `tokio::spawn`; on wasm it's `wasm_bindgen_futures::spawn_local`.
 /// The sleep is similarly routed through `executor.sleep`. The sweep
 /// body itself is runtime-agnostic.
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-wasm"))]
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
 pub(crate) fn spawn_sweep<T: Cacheable>(
     weak: Weak<PunnuInner<T>>,
     interval: std::time::Duration,
@@ -170,34 +124,44 @@ pub(crate) fn spawn_sweep<T: Cacheable>(
             // dropped, the inner is gone and we exit cleanly.
             let Some(inner) = weak.upgrade() else { break };
 
-            // Scope the lock so we drop it before broadcasting the
-            // events — the broadcast send is non-blocking but should
-            // still not extend lock-hold time.
-            let expired_ids: Vec<T::Id> = {
-                let mut map = match inner.map.write() {
+            // Publish the sweep as one ordered commit. `commit_coord`
+            // covers snapshot publish plus event/metric side effects,
+            // so a later writer cannot emit ahead of this sweep.
+            let _commit_guard = match inner.commit_coord.lock() {
+                Ok(guard) => guard,
+                Err(_) => break,
+            };
+            let (expired_ids, post_len): (Vec<T::Id>, usize) = {
+                let _guard = match inner.write_coord.lock() {
                     Ok(guard) => guard,
-                    // Lock poisoning means a previous panic left the
-                    // map in an inconsistent state. The sweep can't
-                    // do anything useful in that case; bail out. The
-                    // public API surface returns the same poison.
                     Err(_) => break,
                 };
                 let now = inner.executor.now();
-                let mut to_remove = Vec::new();
-                for (id, entry) in map.iter() {
+                let mut state = (*inner.l1.load_full()).clone();
+                let mut expired_ids = Vec::new();
+                for (id, entry) in state.entries.iter() {
                     if entry.is_expired_at(now) {
-                        to_remove.push(id.clone());
+                        expired_ids.push(id.clone());
                     }
                 }
-                for id in &to_remove {
-                    map.pop(id);
+                if expired_ids.is_empty() {
+                    (expired_ids, state.len())
+                } else {
+                    for id in &expired_ids {
+                        state.remove_entry(id);
+                    }
+                    #[cfg(debug_assertions)]
+                    state.assert_invariants();
+                    let post_len = state.len();
+                    inner.l1.store(Arc::new(state));
+                    (expired_ids, post_len)
                 }
-                to_remove
             };
 
-            // Record metrics outside the lock — `record_*` is a
+            // Record metrics after the short snapshot write — `record_*` is a
             // consumer-defined trait method that may do arbitrary
-            // work; we don't want it inside the L1 write-lock scope.
+            // work, so it stays outside `write_coord`. It remains under
+            // `commit_coord` to preserve event/metric ordering.
             // Spec §3.5.1: TTL-driven evictions count, the dashboard
             // splits by reason. We also sample `record_lru_size`
             // once per sweep tick that removed anything (no-op when
@@ -209,17 +173,15 @@ pub(crate) fn spawn_sweep<T: Cacheable>(
                     reason: EventReason::TtlExpired,
                 });
                 if let Some(m) = &inner.config.metrics {
-                    m.record_eviction(std::any::type_name::<T>(), EventReason::TtlExpired);
+                    record_metric_safely(|| {
+                        m.record_eviction(std::any::type_name::<T>(), EventReason::TtlExpired);
+                    });
                 }
             }
             if removed_count > 0
                 && let Some(m) = &inner.config.metrics
             {
-                let post_len = match inner.map.read() {
-                    Ok(g) => g.len(),
-                    Err(_) => continue,
-                };
-                m.record_lru_size(std::any::type_name::<T>(), post_len);
+                record_metric_safely(|| m.record_lru_size(std::any::type_name::<T>(), post_len));
             }
         }
     }));

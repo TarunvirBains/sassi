@@ -84,8 +84,8 @@ async fn prime_sweep<T: Cacheable>(p: &Punnu<T>) {
 /// pending wake-ups after a `tokio::time::advance`. The sweep task's
 /// `executor.sleep(...)` is a wakeup point on the paused clock; one
 /// yield per tick we want to process is sufficient because the sweep
-/// does no awaits between ticks (it acquires the L1 lock
-/// synchronously, drains, releases).
+/// does no awaits between ticks (it coordinates synchronously,
+/// publishes, and releases).
 async fn drive_sweep_ticks(n: usize) {
     for _ in 0..n {
         tokio::task::yield_now().await;
@@ -94,9 +94,10 @@ async fn drive_sweep_ticks(n: usize) {
 
 #[tokio::test(start_paused = true)]
 async fn sweep_removes_expired_without_get() {
-    // Without sweep, an expired entry stays in L1 storage until a
-    // `get` triggers the lazy path. With sweep configured, it's
-    // gone from `len` after at most one sweep interval after expiry.
+    // Without sweep, an expired entry can stay in L1 storage until a
+    // same-id writer or capacity pressure prepares a cleanup snapshot.
+    // With sweep configured, it's gone from `len` after at most one
+    // sweep interval after expiry.
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
             default_ttl: Some(Duration::from_secs(5)),
@@ -269,8 +270,10 @@ async fn sweep_removes_on_configured_tick_boundary() {
 #[tokio::test(start_paused = true)]
 async fn sweep_interval_off_means_no_background_removal() {
     // Default config has `ttl_sweep_interval = None`. An expired
-    // entry stays in L1 (occupying capacity) until a `get` triggers
-    // the lazy path. This matches the spec — sweep is opt-in.
+    // entry stays in L1 (occupying capacity) because lazy `get`
+    // observes expiry without physical cleanup. This matches the spec
+    // — sweep is opt-in and writers clean the same id or reclaim
+    // expired entries under capacity pressure.
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
             default_ttl: Some(Duration::from_secs(5)),
@@ -285,10 +288,11 @@ async fn sweep_interval_off_means_no_background_removal() {
     assert_eq!(
         p.len(),
         1,
-        "without ttl_sweep_interval, expired entries stay until next get"
+        "without ttl_sweep_interval, expired entries stay until same-id write, capacity pressure, or sweep cleanup"
     );
 
-    // The lazy path then removes it.
+    // The lazy path observes expiry but leaves physical cleanup to a
+    // same-id writer, capacity pressure, or an enabled sweep.
     assert!(p.get(&1).is_none());
-    assert_eq!(p.len(), 0);
+    assert_eq!(p.len(), 1);
 }

@@ -15,6 +15,7 @@ pub(crate) mod single_flight;
 pub(crate) mod state;
 pub mod tenant;
 pub(crate) mod ttl;
+pub(crate) mod write;
 
 pub use config::{BackendFailureMode, CacheTier, OnConflict, PunnuConfig, PunnuMetrics};
 pub use events::{EventReason, InvalidationReason, PunnuEvent};

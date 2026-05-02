@@ -219,11 +219,13 @@ pub enum EventReason {
     #[non_exhaustive]
     LruEvict,
 
-    /// System-internal: the entry's TTL elapsed. Either a lazy check
-    /// on `get` observed expiry, or the optional background sweep
-    /// task removed the entry mid-tick. See spec §6.2.5 for the TTL
-    /// contract. Not reachable via [`crate::punnu::Punnu::invalidate`];
-    /// sealed against external construction.
+    /// System-internal: the entry's TTL elapsed and a physical cleanup
+    /// path removed it. Lazy `get` observes expired entries as absent
+    /// without emitting this event; the optional background sweep emits
+    /// it when it removes an expired entry mid-tick. See spec §6.2.5
+    /// for the TTL contract. Not reachable via
+    /// [`crate::punnu::Punnu::invalidate`]; sealed against external
+    /// construction.
     #[non_exhaustive]
     TtlExpired,
 

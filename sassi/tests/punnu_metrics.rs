@@ -17,10 +17,13 @@
 
 #![cfg(feature = "runtime-tokio")]
 
+use futures::FutureExt;
 use sassi::{
     BackendError, CacheTier, Cacheable, EventReason, FetchError, Field, InvalidationReason, Punnu,
     PunnuConfig, PunnuMetrics,
 };
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -88,6 +91,37 @@ impl PunnuMetrics for CountingMetrics {
     }
 }
 
+struct PanickingMetrics {
+    lru_size_panics_remaining: AtomicUsize,
+}
+
+impl PanickingMetrics {
+    fn new(lru_size_panics_remaining: usize) -> Self {
+        Self {
+            lru_size_panics_remaining: AtomicUsize::new(lru_size_panics_remaining),
+        }
+    }
+}
+
+impl PunnuMetrics for PanickingMetrics {
+    fn record_hit(&self, _type_name: &'static str, _tier: CacheTier) {}
+    fn record_miss(&self, _type_name: &'static str) {}
+    fn record_eviction(&self, _type_name: &'static str, _reason: EventReason) {}
+    fn record_backend_error(&self, _type_name: &'static str, _err: &BackendError) {}
+    fn record_fetch_latency(&self, _type_name: &'static str, _duration: Duration) {}
+    fn record_lru_size(&self, _type_name: &'static str, _size: usize) {
+        if self
+            .lru_size_panics_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            panic!("intentional metrics panic");
+        }
+    }
+}
+
 fn punnu_with_metrics(metrics: Arc<CountingMetrics>) -> Punnu<E> {
     let dyn_metrics: Arc<dyn PunnuMetrics> = metrics;
     Punnu::<E>::builder()
@@ -96,6 +130,27 @@ fn punnu_with_metrics(metrics: Arc<CountingMetrics>) -> Punnu<E> {
             ..Default::default()
         })
         .build()
+}
+
+#[tokio::test]
+async fn metrics_panic_does_not_poison_ordered_commit_path() {
+    let metrics: Arc<dyn PunnuMetrics> = Arc::new(PanickingMetrics::new(1));
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            metrics: Some(metrics),
+            ..Default::default()
+        })
+        .build();
+
+    let first = AssertUnwindSafe(p.insert(E { id: 1 })).catch_unwind().await;
+    assert!(
+        first.is_ok(),
+        "metrics panics should be isolated from cache writes"
+    );
+    assert!(p.get(&1).is_some());
+
+    p.insert(E { id: 2 }).await.unwrap();
+    assert!(p.get(&2).is_some());
 }
 
 #[tokio::test]

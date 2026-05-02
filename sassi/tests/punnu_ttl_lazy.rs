@@ -1,10 +1,10 @@
 //! TTL lazy-expiry path.
 //!
 //! Spec §6.2.5: when an entry's `expires_at` deadline has passed,
-//! `Punnu::get` returns `None`, removes the entry from L1, and emits
-//! a `PunnuEvent::Invalidate { reason: TtlExpired }`. This file
-//! exercises that contract — the background sweep variant lives in
-//! `punnu_ttl_sweep.rs`.
+//! `Punnu::get` returns `None` but does not mutate L1 and does not
+//! emit an event. Writers treat expired entries as absent on their
+//! next snapshot write. This file exercises that lazy contract — the
+//! background sweep variant lives in `punnu_ttl_sweep.rs`.
 //!
 //! All tests run under `#[tokio::test(start_paused = true)]` and use
 //! `tokio::time::advance(...)` to drive virtual time forward
@@ -14,7 +14,7 @@
 //! observable to the cache. No real `sleep` calls — the tests are
 //! impervious to CI scheduling jitter.
 
-use sassi::{Cacheable, EventReason, Field, Punnu, PunnuConfig, PunnuEvent};
+use sassi::{Cacheable, EventReason, Field, OnConflict, Punnu, PunnuConfig, PunnuEvent};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -55,8 +55,6 @@ async fn ttl_expires_lazily_on_get() {
         "entry visible immediately after insert"
     );
 
-    // Subscribe BEFORE the expiry triggers so we can observe the
-    // TtlExpired event without racing.
     let mut rx = p.events();
     tokio::time::advance(Duration::from_secs(61)).await;
 
@@ -64,16 +62,18 @@ async fn ttl_expires_lazily_on_get() {
         p.get(&1).is_none(),
         "expired entry should be None after TTL elapses"
     );
-
-    // The lazy-expiry path emits TtlExpired exactly once for the
-    // observed entry.
-    match rx.try_recv().expect("expected TtlExpired event") {
-        PunnuEvent::Invalidate {
-            id: 1,
-            reason: EventReason::TtlExpired { .. },
-        } => {}
-        other => panic!("expected TtlExpired for id=1, got {other:?}"),
-    }
+    assert_eq!(
+        p.len(),
+        1,
+        "lazy TTL miss should not physically remove the expired entry"
+    );
+    assert!(
+        matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "lazy TTL miss should not emit an event"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -117,8 +117,24 @@ async fn insert_with_ttl_overrides_when_pool_default_is_none() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn lazy_expiry_decrements_len() {
-    // After lazy expiry on get, the entry must be physically gone.
+async fn insert_with_ttl_duration_max_disables_expiry_without_overflow() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            default_ttl: Some(Duration::from_secs(1)),
+            ..Default::default()
+        })
+        .build();
+    p.insert_with_ttl(E { id: 1 }, Duration::MAX).await.unwrap();
+
+    tokio::time::advance(Duration::from_secs(60 * 60)).await;
+    assert!(
+        p.get(&1).is_some(),
+        "Duration::MAX should saturate to a non-expiring entry instead of overflowing"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn lazy_expiry_keeps_l1_entry_until_a_writer_replaces_it() {
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
             default_ttl: Some(Duration::from_secs(5)),
@@ -128,15 +144,70 @@ async fn lazy_expiry_decrements_len() {
     p.insert(E { id: 1 }).await.unwrap();
     assert_eq!(p.len(), 1);
     tokio::time::advance(Duration::from_secs(6)).await;
-    let _ = p.get(&1); // triggers lazy expiry
-    assert_eq!(p.len(), 0, "lazy expiry must remove the entry from L1");
+    let _ = p.get(&1);
+    assert_eq!(
+        p.len(),
+        1,
+        "lazy expiry should leave physical cleanup to a same-id writer, capacity pressure, or sweep"
+    );
+
+    p.insert(E { id: 1 }).await.unwrap();
+    assert!(p.get(&1).is_some());
+    assert_eq!(p.len(), 1, "replacement must not duplicate the key");
 }
 
 #[tokio::test(start_paused = true)]
-async fn lazy_expiry_event_fires_at_most_once_for_a_given_entry() {
-    // Two `get`s after expiry should not produce two TtlExpired
-    // events — the first `get` removes the entry; the second `get`
-    // observes a miss with no event.
+async fn unrelated_writer_does_not_sweep_expired_entries_without_capacity_pressure() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            default_ttl: Some(Duration::from_secs(5)),
+            lru_size: 16,
+            ..Default::default()
+        })
+        .build();
+    p.insert(E { id: 1 }).await.unwrap();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(p.get(&1).is_none());
+    assert_eq!(p.len(), 1);
+
+    p.insert(E { id: 2 }).await.unwrap();
+    assert_eq!(
+        p.len(),
+        2,
+        "unrelated writes should not perform an O(n) expired-entry sweep when capacity is not under pressure"
+    );
+    assert!(p.get(&2).is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn capacity_pressure_reclaims_expired_entries_before_lru_eviction() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            default_ttl: Some(Duration::from_secs(5)),
+            lru_size: 2,
+            ..Default::default()
+        })
+        .build();
+    p.insert(E { id: 1 }).await.unwrap();
+    p.insert_with_ttl(E { id: 2 }, Duration::from_secs(30))
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert!(p.get(&1).is_none());
+    assert!(p.get(&2).is_some());
+
+    p.insert(E { id: 3 }).await.unwrap();
+    assert_eq!(p.len(), 2);
+    assert!(p.get(&1).is_none());
+    assert!(
+        p.get(&2).is_some(),
+        "fresh entries must not be LRU-evicted while expired entries can satisfy capacity pressure"
+    );
+    assert!(p.get(&3).is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn lazy_expiry_get_emits_no_ttl_events() {
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
             default_ttl: Some(Duration::from_secs(5)),
@@ -147,9 +218,7 @@ async fn lazy_expiry_event_fires_at_most_once_for_a_given_entry() {
     let mut rx = p.events();
     tokio::time::advance(Duration::from_secs(6)).await;
 
-    // First get: triggers lazy expiry, emits TtlExpired.
     assert!(p.get(&1).is_none());
-    // Second get: cache miss, no event.
     assert!(p.get(&1).is_none());
 
     let mut ttl_events_observed = 0;
@@ -165,8 +234,8 @@ async fn lazy_expiry_event_fires_at_most_once_for_a_given_entry() {
         }
     }
     assert_eq!(
-        ttl_events_observed, 1,
-        "TtlExpired must fire exactly once per expired entry, even with multiple gets"
+        ttl_events_observed, 0,
+        "lazy get should not emit TtlExpired events"
     );
 }
 
@@ -190,12 +259,9 @@ async fn unexpired_get_does_not_emit_ttl_event() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn lazy_expiry_under_concurrent_gets_emits_one_event() {
-    // Race condition probe: many concurrent `get` calls for the same
-    // expired entry must collectively produce at most one
-    // `TtlExpired` event. The expiry decision + pop happen under the
-    // same write lock, so only the first `get` to acquire the lock
-    // observes the entry and emits.
+async fn lazy_expiry_under_concurrent_gets_emits_no_event_and_keeps_len() {
+    // Many concurrent `get` calls for the same expired entry should
+    // all miss without mutating L1 or emitting events.
     let p = Punnu::<E>::builder()
         .config(PunnuConfig {
             default_ttl: Some(Duration::from_secs(5)),
@@ -232,7 +298,57 @@ async fn lazy_expiry_under_concurrent_gets_emits_one_event() {
         }
     }
     assert_eq!(
-        ttl_events_observed, 1,
-        "at most one TtlExpired event must fire across concurrent gets for an expired entry"
+        ttl_events_observed, 0,
+        "lazy get should not emit TtlExpired events under contention"
     );
+    assert_eq!(p.len(), 1, "lazy get should not remove the expired entry");
+}
+
+#[tokio::test(start_paused = true)]
+async fn insert_treats_expired_existing_entry_as_absent_under_reject() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            default_ttl: Some(Duration::from_secs(5)),
+            on_conflict: OnConflict::Reject,
+            ..Default::default()
+        })
+        .build();
+    p.insert(E { id: 1 }).await.unwrap();
+    tokio::time::advance(Duration::from_secs(6)).await;
+
+    let replaced = p
+        .insert(E { id: 1 })
+        .await
+        .expect("expired entries should not cause Reject conflicts");
+
+    assert_eq!(replaced.id, 1);
+    assert_eq!(p.len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacing_expired_entry_emits_insert_not_update() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            default_ttl: Some(Duration::from_secs(5)),
+            on_conflict: OnConflict::Update,
+            ..Default::default()
+        })
+        .build();
+    p.insert(E { id: 1 }).await.unwrap();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let mut rx = p.events();
+
+    p.insert(E { id: 1 }).await.unwrap();
+
+    match rx.try_recv().expect("expected insert event") {
+        PunnuEvent::Insert { value } => assert_eq!(value.id, 1),
+        PunnuEvent::Update { .. } => {
+            panic!("replacing an expired entry should emit Insert, not Update")
+        }
+        other => panic!("expected Insert for expired replacement, got {other:?}"),
+    }
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }

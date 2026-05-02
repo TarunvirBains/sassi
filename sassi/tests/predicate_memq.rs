@@ -145,3 +145,65 @@ fn punnu_scope_iter_consumes_the_query_handle() {
 
     assert_eq!(ids, vec![3]);
 }
+
+#[test]
+fn punnu_scope_filters_union_without_hidden_query_membership() {
+    let punnu = Punnu::<User>::builder().build();
+    block_on(async {
+        punnu.insert(user(1, 30, 2, "sales")).await.unwrap();
+        punnu.insert(user(2, 17, 3, "sales")).await.unwrap();
+        punnu.insert(user(3, 40, 1, "ops")).await.unwrap();
+        punnu.insert(user(4, 28, 8, "ops")).await.unwrap();
+    });
+
+    let mut adult_sales_ids = punnu
+        .scope(Vec::new())
+        .filter_basic(|f| f.team.eq("sales".to_owned()))
+        .filter_basic(|f| f.age.gte(18))
+        .collect()
+        .into_iter()
+        .map(|u| u.id)
+        .collect::<Vec<_>>();
+    adult_sales_ids.sort_unstable();
+
+    let mut ops_ids = punnu
+        .scope(Vec::new())
+        .filter_basic(|f| f.team.eq("ops".to_owned()))
+        .collect()
+        .into_iter()
+        .map(|u| u.id)
+        .collect::<Vec<_>>();
+    ops_ids.sort_unstable();
+
+    assert_eq!(adult_sales_ids, vec![1]);
+    assert_eq!(ops_ids, vec![3, 4]);
+    assert_eq!(
+        punnu.len(),
+        4,
+        "scopes must not encode hidden query membership in L1"
+    );
+}
+
+#[test]
+fn punnu_scope_chained_values_do_not_mutate_l1() {
+    let punnu = Punnu::<User>::builder().build();
+    block_on(async {
+        punnu.insert(user(1, 30, 2, "sales")).await.unwrap();
+    });
+
+    let chained = punnu
+        .scope(Vec::new())
+        .chain_values(vec![user(99, 44, 9, "external")])
+        .chain(vec![Arc::new(user(100, 45, 10, "external"))])
+        .collect();
+    let mut ids = chained.iter().map(|u| u.id).collect::<Vec<_>>();
+    ids.sort_unstable();
+
+    assert_eq!(ids, vec![1, 99, 100]);
+    assert_eq!(punnu.len(), 1);
+    assert!(
+        punnu.get(&99).is_none(),
+        "chain_values must not insert into L1"
+    );
+    assert!(punnu.get(&100).is_none(), "chain must not insert into L1");
+}

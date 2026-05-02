@@ -374,30 +374,27 @@ async fn coalesced_awaiters_fire_insert_event_exactly_once() {
 ///    can interleave Actor B's work before on_fetched fires.
 /// 3. Actor B independently `insert`s id=1 with the Punnu's default
 ///    TTL (1s). The entry is now in L1.
-/// 4. Time advances past 1s. Actor B's entry is expired *but not
-///    popped* — no `get` has been called against id=1 since the
-///    insert.
+/// 4. Time advances past 1s. Actor B's entry is expired but still
+///    resident — lazy `get` observes expiry without physical cleanup.
 /// 5. The test signals A's fetcher to complete; A's on_fetched runs
 ///    against an L1 that has Actor B's expired entry.
 ///
 /// Pre-fix code path: on_fetched calls `insert_arc_into_l1`. Under
 /// `OnConflict::Reject`, the expired-but-present entry triggers
-/// `Conflict`. The fall-back `punnu.get(&id)` then lazy-pops the
-/// expired entry, returns `None`, and `unwrap_or(arc)` returns A's
-/// never-inserted value. L1 is now empty (B was popped, A was never
-/// inserted). Subsequent `get(1)` misses — violation of
+/// `Conflict`. The fall-back `punnu.get(&id)` observes the expired
+/// entry as a miss, and `unwrap_or(arc)` returns A's never-inserted
+/// value. A subsequent `get(1)` still misses — violation of
 /// `get_or_fetch`'s post-condition.
 ///
 /// Post-fix code path: on_fetched calls `insert_arc_or_existing`,
-/// which peeks under the L1 write lock, sees the expired entry,
-/// treats it as absent, and atomically replaces it with A's value.
-/// Subsequent `get(1)` hits with A's value.
+/// which coordinates with writers, sees the expired entry in the
+/// current snapshot, treats it as absent, and publishes a replacement
+/// snapshot with A's value. Subsequent `get(1)` hits with A's value.
 ///
 /// The yield-and-Notify orchestration is what makes the test
 /// genuinely exercise on_fetched's expired-conflict path. A
 /// single-actor test (the previous version) gets short-circuited by
-/// `get_or_fetch`'s initial `get` which lazy-pops before on_fetched
-/// runs — the M2 race window doesn't open.
+/// `get_or_fetch`'s initial `get`, so the M2 race window doesn't open.
 #[tokio::test(start_paused = true)]
 async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
     use sassi::{OnConflict, PunnuConfig};
@@ -422,8 +419,8 @@ async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
     // the single-flight entry, and (c) entered the fetcher body.
     // Actor A is parked on `go.notified()`. Without this, a
     // `yield_now()` heuristic could let Actor B's insert beat Actor
-    // A's initial `get`, and Actor A's later `get` would lazy-pop
-    // the expired B entry before on_fetched ran — making the test
+    // A's initial `get`, so Actor A could observe B's value or miss
+    // before the intended on_fetched interleaving — making the test
     // vacuous against pre-fix code. Same shape as the issue #4
     // sweep handshake: deterministic readiness > yield count.
     let go = Arc::new(Notify::new());
@@ -465,8 +462,8 @@ async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
     .await
     .unwrap();
 
-    // Step 4: advance past TTL. Actor B's entry is expired but not
-    // popped (no get since insert).
+    // Step 4: advance past TTL. Actor B's entry is expired but still
+    // resident; lazy reads do not physically clean it up.
     tokio::time::advance(Duration::from_secs(2)).await;
 
     // Step 5: wake Actor A's fetcher. on_fetched runs against an L1
@@ -480,8 +477,8 @@ async fn expired_concurrent_insert_does_not_block_single_flight_insert() {
     assert_eq!(result.name, "actor_a");
 
     // Headline assertion: subsequent get must hit. Pre-fix this would
-    // miss (B was lazy-popped, A was never inserted). Post-fix, the
-    // atomic insert_arc_or_existing replaced B with A.
+    // miss (B stayed expired-resident, A was never inserted). Post-fix,
+    // the atomic insert_arc_or_existing replaced B with A.
     let cached = p
         .get(&1)
         .expect("subsequent get must hit; pre-fix L1 was empty after expired-conflict");

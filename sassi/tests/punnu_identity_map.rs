@@ -140,8 +140,12 @@ async fn lru_eviction_at_capacity() {
         .await
         .unwrap();
 
-    // Item 1 was the least-recently-used at the time item 3 landed.
-    assert!(punnu.get(&1).is_none(), "id 1 should have been LRU-evicted");
+    // With only three residents, sampled-LRU covers the whole state
+    // and selects the lowest access epoch.
+    assert!(
+        punnu.get(&1).is_none(),
+        "id 1 should have been sampled-LRU evicted"
+    );
     assert!(punnu.get(&2).is_some());
     assert!(punnu.get(&3).is_some());
     assert_eq!(punnu.len(), 2);
@@ -270,6 +274,23 @@ fn build_panics_on_zero_ttl_sweep_interval() {
     let _ = Punnu::<Item>::builder()
         .config(PunnuConfig {
             ttl_sweep_interval: Some(std::time::Duration::ZERO),
+            ..Default::default()
+        })
+        .build();
+}
+
+#[test]
+#[cfg(not(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+)))]
+#[should_panic(
+    expected = "PunnuConfig::ttl_sweep_interval requires `runtime-tokio` on native targets or `runtime-wasm` on wasm32"
+)]
+fn build_panics_on_ttl_sweep_without_target_compatible_runtime() {
+    let _ = Punnu::<Item>::builder()
+        .config(PunnuConfig {
+            ttl_sweep_interval: Some(std::time::Duration::from_secs(1)),
             ..Default::default()
         })
         .build();

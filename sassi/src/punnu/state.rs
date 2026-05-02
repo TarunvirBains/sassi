@@ -1,10 +1,9 @@
 //! Snapshot L1 state substrate for [`crate::punnu::Punnu`].
 //!
-//! This module is intentionally parallel to the current `RwLock<LruCache>`
-//! storage in `pool.rs`. Task 12B will switch `Punnu<T>` over to this
-//! substrate; for now the module owns the data invariants and tests.
+//! `pool.rs` publishes this state through `ArcSwap`. This module owns
+//! the `entries` / `keys` / `positions` invariants and the small
+//! mutation helpers used by coordinated snapshot writers.
 
-// Task 12A lands the substrate before Task 12B starts consuming it.
 #![allow(dead_code)]
 
 use crate::cacheable::Cacheable;

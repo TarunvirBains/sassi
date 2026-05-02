@@ -57,8 +57,10 @@ use std::time::Duration;
 // A native build with `runtime-wasm` enabled (inert per Cargo.toml
 // docs) still uses the `Send` bound.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 pub(crate) type BoxFut<'a> = futures::future::BoxFuture<'a, ()>;
 #[cfg(target_arch = "wasm32")]
+#[allow(dead_code)]
 pub(crate) type BoxFut<'a> = futures::future::LocalBoxFuture<'a, ()>;
 
 /// Internal abstraction over runtime primitives — `spawn`, `sleep`,
@@ -77,6 +79,7 @@ pub(crate) trait PunnuExecutor: Send + Sync {
     /// spawned future when cancellation must follow owner-loss (see
     /// the TTL sweep in [`crate::punnu::ttl::spawn_sweep`] for the
     /// pattern).
+    #[allow(dead_code)]
     fn spawn(&self, fut: BoxFut<'static>);
 
     /// Async sleep for `duration`. The returned future yields control
@@ -85,6 +88,7 @@ pub(crate) trait PunnuExecutor: Send + Sync {
     /// `tokio::time::advance(...)`. On wasm, the underlying
     /// `gloo_timers::future::TimeoutFuture` uses `setTimeout` so the
     /// sleep advances with browser real time.
+    #[allow(dead_code)]
     fn sleep(&self, duration: Duration) -> BoxFut<'static>;
 
     /// Read the monotonic clock. Returns the executor-appropriate

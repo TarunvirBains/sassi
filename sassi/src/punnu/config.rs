@@ -25,6 +25,7 @@
 
 use crate::error::BackendError;
 use crate::punnu::events::EventReason;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -74,13 +75,17 @@ pub struct PunnuConfig {
     pub default_ttl: Option<Duration>,
 
     /// Optional background-sweep interval. `None` (default) leaves
-    /// expired entries in storage until the next `get` triggers the
-    /// lazy expiry path; `Some(d)` spawns a task that scans the L1
-    /// every `d` and removes anything that's already expired.
-    /// Spawning requires the `runtime-tokio` feature; on WASM (with
-    /// the `runtime-wasm` executor landing in a later task) this
-    /// becomes the executor's responsibility. See spec §6.2.5 for the
-    /// contract.
+    /// expired entries resident in storage; lazy `get` observes them
+    /// as absent without cleanup. Later writers remove an expired
+    /// entry silently when they touch the same id or when capacity
+    /// pressure requires reclaiming expired entries before sampled-LRU
+    /// eviction. `Some(d)` spawns a task that scans the L1 every `d`
+    /// and removes anything that's already expired.
+    /// Spawning requires a target-compatible runtime feature:
+    /// `runtime-tokio` on native targets or `runtime-wasm` on wasm32.
+    /// Without one, opting into a sweep panics at build time instead
+    /// of silently dropping the configured cleanup path. See spec
+    /// §6.2.5 for the contract.
     pub ttl_sweep_interval: Option<Duration>,
 
     /// Backend cache-key namespace prepended to all L2 backend keys.
@@ -99,9 +104,9 @@ pub struct PunnuConfig {
     /// metrics layer they already use (Prometheus, OpenTelemetry,
     /// statsd, …) without sassi pulling in a metrics framework.
     /// Default `None` is a no-op that costs nothing at runtime.
-    /// Hook is called from [`crate::punnu::Punnu::get`] /
-    /// [`crate::punnu::Punnu::insert`] /
-    /// [`crate::punnu::Punnu::invalidate`].
+    /// Hook is called from L1 hits/misses, writes/invalidations,
+    /// `get_or_fetch` slow paths, lazy TTL misses, LRU pressure, and
+    /// optional TTL sweep cleanup.
     pub metrics: Option<Arc<dyn PunnuMetrics>>,
 }
 
@@ -212,6 +217,14 @@ pub enum CacheTier {
 /// callsites. All methods take `&self` — implementations typically
 /// forward to atomic counters or a metrics-library handle.
 ///
+/// Callbacks run synchronously on the calling operation. Eviction and
+/// size callbacks run in Punnu's ordered commit path after the short
+/// snapshot write and before the next writer may publish, so
+/// implementations must be fast and must not call back into the same
+/// [`crate::punnu::Punnu`] instance. Sassi catches and logs callback
+/// panics so observability failures do not poison the cache write
+/// path.
+///
 /// `type_name` is `std::any::type_name::<T>()` — pre-baked at compile
 /// time, zero-runtime-cost, suitable for a Prometheus label.
 pub trait PunnuMetrics: Send + Sync {
@@ -221,13 +234,16 @@ pub trait PunnuMetrics: Send + Sync {
     /// A `get` miss — neither L1 nor L2 had the entry.
     fn record_miss(&self, type_name: &'static str);
 
-    /// An entry left the cache. The reason discriminator lets metrics
-    /// distinguish LRU pressure (undersized capacity) from TTL expiry
-    /// (configured freshness window) from manual / save / delete
+    /// An eviction-class metric observation occurred. For LRU, sweep,
+    /// manual, save/delete, and backend invalidation paths this means
+    /// an entry left L1. For lazy TTL reads, `TtlExpired` records that
+    /// an expired resident entry was treated as absent even though
+    /// physical cleanup and `PunnuEvent` emission are deferred to a
+    /// writer or sweep. The reason discriminator lets metrics
+    /// distinguish capacity pressure, freshness misses, and explicit
     /// invalidation. Takes the full [`EventReason`] taxonomy — metrics
-    /// dashboards typically split by every reason, including the
-    /// system-internal `LruEvict` / `TtlExpired` / `BackendInvalidation`
-    /// reasons that callers cannot directly trigger.
+    /// dashboards typically split by every reason, including
+    /// system-internal reasons callers cannot directly trigger.
     fn record_eviction(&self, type_name: &'static str, reason: EventReason);
 
     /// An L2 backend operation failed. Surfaces the underlying
@@ -235,9 +251,7 @@ pub trait PunnuMetrics: Send + Sync {
     /// (network vs. serialization vs. not-found).
     fn record_backend_error(&self, type_name: &'static str, err: &BackendError);
 
-    /// End-to-end fetch latency for `get_or_fetch`-style flows. Wires
-    /// up when single-flight lands in a later task; included now so
-    /// the trait shape is stable.
+    /// End-to-end fetch latency for `get_or_fetch`-style slow paths.
     fn record_fetch_latency(&self, type_name: &'static str, duration: Duration);
 
     /// L1 entry count, sampled — useful for "is the LRU near its
@@ -245,4 +259,10 @@ pub trait PunnuMetrics: Send + Sync {
     /// inserts and invalidations); consumers should treat it as a
     /// gauge sample, not a stream of every change.
     fn record_lru_size(&self, type_name: &'static str, size: usize);
+}
+
+pub(crate) fn record_metric_safely(callback: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(callback)).is_err() {
+        tracing::warn!("PunnuMetrics callback panicked; ignoring metrics sample");
+    }
 }
