@@ -83,14 +83,12 @@ pub enum FetchError {
     #[error("fetch serialization error: {0}")]
     Serialization(String),
 
-    /// The consumer-supplied fetcher closure panicked. Sassi does not
-    /// `catch_unwind` around the fetcher (that would mask programmer
-    /// bugs); this variant surfaces only via the
-    /// [`futures::future::Shared`] follower-broadcast path described in
-    /// spec §3.5.1: when the fetcher panics, *every* awaiter sees this
-    /// error rather than one peer hanging on a dropped future. The
-    /// `type_name` is `std::any::type_name::<T>()` of the cached type
-    /// — useful as a diagnostic label.
+    /// The consumer-supplied fetcher closure panicked. Sassi catches the
+    /// unwind inside the single-flight owner future and translates it
+    /// into this structured error for every attached awaiter, so one
+    /// panicking fetcher cannot strand peers on a dropped shared future.
+    /// The `type_name` is `std::any::type_name::<T>()` of the cached
+    /// type — useful as a diagnostic label.
     #[error("fetcher panicked while resolving {type_name}: {message}")]
     FetcherPanic {
         /// `std::any::type_name::<T>()` of the cached type.

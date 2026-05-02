@@ -7,7 +7,8 @@
 #![cfg(feature = "runtime-tokio")]
 
 use sassi::{
-    Cacheable, FetchError, Field, InsertError, OnConflict, Punnu, PunnuConfig, PunnuEvent,
+    Cacheable, EventReason, FetchError, Field, InsertError, OnConflict, Punnu, PunnuConfig,
+    PunnuEvent,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -275,5 +276,54 @@ async fn get_or_fetch_many_conflict_does_not_partially_insert() {
     assert!(
         saw_id_2_insert,
         "the competing writer should still have emitted its own insert"
+    );
+}
+
+#[tokio::test]
+async fn get_or_fetch_many_capacity_pressure_emits_only_final_resident_inserts() {
+    let p = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            lru_size: 2,
+            ..Default::default()
+        })
+        .build();
+    let mut rx = p.events();
+
+    let result = p
+        .get_or_fetch_many(&[1, 2, 3, 4], |missing| async move {
+            Ok::<_, FetchError>(missing.into_iter().map(|id| E { id }).collect())
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.len(),
+        4,
+        "batch callers should receive fetched values even when L1 can retain only a subset"
+    );
+    assert_eq!(p.len(), 2);
+    let mut final_ids = p
+        .scope(Vec::new())
+        .collect()
+        .into_iter()
+        .map(|value| value.id)
+        .collect::<Vec<_>>();
+    final_ids.sort_unstable();
+
+    let mut inserted_ids = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            PunnuEvent::Insert { value } => inserted_ids.push(value.id),
+            PunnuEvent::Invalidate {
+                reason: EventReason::LruEvict { .. },
+                ..
+            } => panic!("transient fetched values must not emit LRU invalidations"),
+            other => panic!("unexpected event after batch fetch: {other:?}"),
+        }
+    }
+    inserted_ids.sort_unstable();
+    assert_eq!(
+        inserted_ids, final_ids,
+        "insert events must describe only values retained in the committed snapshot"
     );
 }

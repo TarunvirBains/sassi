@@ -8,25 +8,31 @@
 //! without any backend dependency. Predicates compose with `&`, `|`,
 //! `^`, `!` operators and run identically on both runtimes.
 //!
-//! Pre-v0.1.0 alpha. Public surface lands incrementally per the
-//! implementation plan; this version exposes the [`Cacheable`] trait
-//! and [`Field`] accessor that the rest of the surface builds on.
+//! Pre-v0.1.0 alpha. The core public surface is available now:
+//! [`Cacheable`] identities, [`Punnu<T>`](Punnu) pools, in-memory
+//! [`MemQ`] scopes, lazy fetch helpers, TTL/LRU policy, event streams,
+//! and atomic delta application.
 //!
-//! # Quick tour (preview)
+//! # Quick tour
 //!
-//! ```no_run
-//! # // no_run because Punnu doesn't exist yet — preview only
-//! use sassi::Field;
+//! ```
+//! use sassi::{Cacheable, Field, MemQ, Punnu};
+//!
+//! #[derive(Clone)]
 //! struct User { id: i64, age: u32 }
+//!
 //! #[derive(Default)]
 //! struct UserFields {
 //!     pub id: Field<User, i64>,
 //!     pub age: Field<User, u32>,
 //! }
-//! impl sassi::Cacheable for User {
+//!
+//! impl Cacheable for User {
 //!     type Id = i64;
 //!     type Fields = UserFields;
+//!
 //!     fn id(&self) -> i64 { self.id }
+//!
 //!     fn fields() -> UserFields {
 //!         UserFields {
 //!             id: Field::new("id", |u| &u.id),
@@ -34,6 +40,17 @@
 //!         }
 //!     }
 //! }
+//!
+//! # let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+//! # rt.block_on(async {
+//! let users = Punnu::<User>::builder().build();
+//! users.insert(User { id: 1, age: 32 }).await.unwrap();
+//!
+//! let adults = users
+//!     .scope(vec![MemQ::filter_basic(User::fields().age.gte(18))])
+//!     .collect();
+//! assert_eq!(adults.len(), 1);
+//! # });
 //! ```
 
 #![forbid(unsafe_code)]

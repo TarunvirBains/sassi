@@ -375,6 +375,40 @@ async fn apply_delta_treats_expired_prior_as_absent() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn apply_delta_tombstone_treats_expired_resident_as_absent() {
+    let p = Punnu::<Item>::builder()
+        .config(PunnuConfig {
+            default_ttl: Some(Duration::from_secs(5)),
+            ..Default::default()
+        })
+        .build();
+    p.insert(Item {
+        id: 1,
+        group: "a",
+        name: "old",
+    })
+    .await
+    .unwrap();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let mut rx = p.events();
+
+    let stats = p.apply_delta(delta(vec![], [1]));
+
+    assert_eq!(stats.applied_items, 0);
+    assert_eq!(
+        stats.tombstones_evicted, 0,
+        "expired residents are absent, not live tombstone removals"
+    );
+    assert_eq!(stats.lru_evictions, 0);
+    assert_eq!(p.len(), 0);
+    assert!(p.get(&1).is_none());
+    assert!(
+        matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+        "expired residents must not emit OnDelete tombstone events"
+    );
+}
+
 #[tokio::test]
 async fn apply_delta_reports_lru_evictions_after_delta() {
     let p = Punnu::<Item>::builder()

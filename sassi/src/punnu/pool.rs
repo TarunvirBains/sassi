@@ -488,12 +488,12 @@ impl<T: Cacheable> Punnu<T> {
             .inner
             .in_flight
             .get_or_fetch(id, fetcher, on_fetched)
-            .await?;
+            .await;
 
         let elapsed = self.inner.executor.now() - start;
         self.metrics_record_fetch_latency(elapsed);
 
-        Ok(result)
+        result
     }
 
     /// Batch get-or-fetch. Splits `ids` into "already cached"
@@ -862,13 +862,13 @@ impl<T: Cacheable> Punnu<T> {
         mut state: L1State<T>,
         values: Vec<(Arc<T>, Option<Instant>, u64)>,
     ) -> PreparedWrite<T, Result<Vec<Arc<T>>, InsertError>> {
+        let now = self.inner.executor.now();
         let original_state = state.clone();
         let mut events = Vec::new();
-        let mut inserted = Vec::with_capacity(values.len());
+        let mut accepted = Vec::with_capacity(values.len());
 
         for (value, expires_at, epoch) in values {
             let id = value.id();
-            let now = self.inner.executor.now();
             Self::remove_expired_entry(&mut state, &id, now);
 
             let existing = state.get(&id).cloned();
@@ -878,22 +878,43 @@ impl<T: Cacheable> Punnu<T> {
 
             let entry = Arc::new(Entry::new(value.clone(), expires_at, epoch));
             state.insert_entry(id.clone(), entry);
+            accepted.push((id, value, existing.map(|entry| entry.value.clone())));
+        }
 
-            let write_event = match (existing, self.inner.config.on_conflict) {
+        self.remove_expired_entries_for_capacity(&mut state, now);
+        let lru_victims = self.evict_ids_to_capacity(&mut state, None);
+
+        for (id, value, old) in &accepted {
+            if state.get(id).is_none() {
+                continue;
+            }
+            events.push(match (old, self.inner.config.on_conflict) {
                 (Some(old), OnConflict::Update) => PunnuEvent::Update {
-                    old: old.value.clone(),
+                    old: old.clone(),
                     new: value.clone(),
                 },
                 _ => PunnuEvent::Insert {
                     value: value.clone(),
                 },
-            };
-
-            self.remove_expired_entries_for_capacity(&mut state, now);
-            self.evict_to_capacity(&mut state, &mut events, Some(&id));
-            events.push(write_event);
-            inserted.push(value);
+            });
         }
+
+        for id in lru_victims {
+            let was_visible = original_state
+                .get(&id)
+                .is_some_and(|entry| !entry.is_expired_at(now));
+            if was_visible {
+                events.push(PunnuEvent::Invalidate {
+                    id,
+                    reason: EventReason::LruEvict,
+                });
+            }
+        }
+
+        let inserted = accepted
+            .into_iter()
+            .map(|(_id, value, _old)| value)
+            .collect();
 
         PreparedWrite::new(state, events, Ok(inserted))
     }
@@ -991,6 +1012,9 @@ impl<T: Cacheable> Punnu<T> {
 
         let mut tombstone_events = Vec::new();
         for id in tombstones {
+            if Self::remove_expired_entry(&mut state, &id, now) {
+                continue;
+            }
             if state.remove_entry(&id).is_some() {
                 stats.tombstones_evicted += 1;
                 tombstone_events.push(PunnuEvent::Invalidate {

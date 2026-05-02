@@ -280,6 +280,44 @@ async fn metrics_records_fetch_latency_on_slow_path() {
 }
 
 #[tokio::test]
+async fn metrics_records_fetch_latency_on_fetcher_error() {
+    let m = Arc::new(CountingMetrics::default());
+    let p = punnu_with_metrics(m.clone());
+
+    let result = p
+        .get_or_fetch(&1, |_id| async {
+            Err::<Option<E>, _>(FetchError::Serialization("failed".into()))
+        })
+        .await;
+
+    assert!(matches!(result, Err(FetchError::Serialization(_))));
+    let latencies = m.fetch_latencies.lock().unwrap().clone();
+    assert_eq!(
+        latencies.len(),
+        1,
+        "failed slow-path fetches should still record latency"
+    );
+}
+
+#[tokio::test]
+async fn metrics_records_fetch_latency_on_identity_mismatch() {
+    let m = Arc::new(CountingMetrics::default());
+    let p = punnu_with_metrics(m.clone());
+
+    let result = p
+        .get_or_fetch(&1, |_id| async { Ok::<_, FetchError>(Some(E { id: 2 })) })
+        .await;
+
+    assert!(matches!(result, Err(FetchError::IdentityMismatch { .. })));
+    let latencies = m.fetch_latencies.lock().unwrap().clone();
+    assert_eq!(
+        latencies.len(),
+        1,
+        "identity-mismatch slow paths should still record latency"
+    );
+}
+
+#[tokio::test]
 async fn metrics_no_fetch_latency_on_l1_hit_path() {
     let m = Arc::new(CountingMetrics::default());
     let p = punnu_with_metrics(m.clone());
