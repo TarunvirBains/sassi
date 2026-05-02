@@ -27,11 +27,11 @@ pub(crate) struct Entry<T> {
 
 impl<T> Entry<T> {
     /// Construct a new L1 entry.
-    pub(crate) fn new(value: Arc<T>, expires_at: Option<Instant>) -> Self {
+    pub(crate) fn new(value: Arc<T>, expires_at: Option<Instant>, epoch: u64) -> Self {
         Self {
             value,
             expires_at,
-            last_access_epoch: AtomicU64::new(0),
+            last_access_epoch: AtomicU64::new(epoch),
         }
     }
 
@@ -208,7 +208,14 @@ mod tests {
     }
 
     fn entry(id: i64) -> Arc<Entry<Item>> {
-        Arc::new(Entry::new(Arc::new(Item { id }), None))
+        Arc::new(Entry::new(Arc::new(Item { id }), None, 0))
+    }
+
+    #[test]
+    fn entry_new_should_initialize_access_epoch() {
+        let entry = Entry::new(Arc::new(Item { id: 7 }), None, 42);
+
+        assert_eq!(entry.access_epoch(), 42);
     }
 
     #[test]
