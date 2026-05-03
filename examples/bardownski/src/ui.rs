@@ -241,7 +241,14 @@ fn enter_terminal_after_raw_mode() -> Result<Terminal<CrosstermBackend<Stdout>>,
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
+    match Terminal::new(backend) {
+        Ok(terminal) => Ok(terminal),
+        Err(err) => {
+            let mut stdout = io::stdout();
+            let _ = execute!(stdout, LeaveAlternateScreen);
+            Err(Box::new(err))
+        }
+    }
 }
 
 impl Drop for TerminalGuard {
