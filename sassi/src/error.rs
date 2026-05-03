@@ -21,6 +21,29 @@
 
 use thiserror::Error;
 
+/// Errors produced by Sassi's JSON wire envelope.
+///
+/// Backends store values as a versioned envelope rather than raw
+/// payload JSON so future major format changes can be rejected
+/// explicitly instead of being misread as the current shape.
+#[cfg(feature = "serde")]
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum WireFormatError {
+    /// The envelope's major version is not understood by this crate.
+    #[error("wire format major version mismatch: got {got}, expected {expected}")]
+    VersionMismatch {
+        /// Major version found in the stored envelope.
+        got: u64,
+        /// Major version this crate can read.
+        expected: u64,
+    },
+
+    /// JSON serialization or deserialization failed.
+    #[error("wire serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
+}
+
 /// Reasons a [`crate::punnu::Punnu::insert`] (or the L2 write-through
 /// behind it) can fail.
 ///
@@ -54,6 +77,11 @@ pub enum InsertError {
     /// alone.
     #[error("backend write-through failed: {0}")]
     BackendFailed(#[from] BackendError),
+
+    /// Versioned wire envelope serialization/deserialization failed.
+    #[cfg(feature = "serde")]
+    #[error("wire-format error: {0}")]
+    WireFormat(#[from] WireFormatError),
 }
 
 /// Reasons a [`crate::punnu::Punnu::get_or_fetch`] (or batch variant)
@@ -151,6 +179,11 @@ pub enum BackendError {
     #[error("backend serialization error: {0}")]
     Serialization(String),
 
+    /// The backend encountered a Sassi wire-envelope error.
+    #[cfg(feature = "serde")]
+    #[error("backend wire-format error: {0}")]
+    WireFormat(#[from] WireFormatError),
+
     /// Network / IO transport error. Inner string is backend-supplied.
     #[error("backend network error: {0}")]
     Network(String),
@@ -159,4 +192,11 @@ pub enum BackendError {
     /// variant size stays small.
     #[error("backend error: {0}")]
     Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+#[cfg(feature = "serde")]
+impl From<serde_json::Error> for BackendError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Serialization(err.to_string())
+    }
 }

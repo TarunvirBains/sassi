@@ -11,11 +11,19 @@
 //! prepare a new snapshot under a small synchronous coordinator and
 //! publish it atomically.
 
+#[cfg(feature = "serde")]
+use crate::backend::{BackendInvalidation, BackendKeyspace, BackendRuntime, CacheBackend};
 use crate::cacheable::Cacheable;
+#[cfg(feature = "serde")]
+use crate::error::BackendError;
 use crate::error::{FetchError, InsertError};
 use crate::executor::{DefaultExecutor, PunnuExecutor};
 use crate::predicate::MemQ;
-use crate::punnu::config::{CacheTier, OnConflict, PunnuConfig, record_metric_safely};
+#[cfg(feature = "serde")]
+use crate::punnu::config::retry_delay_for_attempt;
+use crate::punnu::config::{
+    BackendFailureMode, CacheTier, OnConflict, PunnuConfig, record_metric_safely,
+};
 use crate::punnu::delta::{DeltaApplyStats, DeltaResult};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::eviction::choose_sampled_lru_victim;
@@ -30,6 +38,10 @@ use crate::punnu::ttl::spawn_sweep;
 use crate::punnu::write::PreparedWrite;
 use crate::time::Instant;
 use arc_swap::ArcSwap;
+#[cfg(feature = "serde")]
+use futures::StreamExt;
+#[cfg(feature = "serde")]
+use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -141,6 +153,12 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// any internal refactor; v0.1 always populates this with
     /// `Arc<DefaultExecutor>`. See spec §3.11 / §3.11.1.
     pub(crate) executor: Arc<dyn PunnuExecutor>,
+
+    /// Optional L2 backend adapter. `None` is the default L1-only
+    /// shape; `NoBackend` is available when callers want an explicit
+    /// no-op backend value.
+    #[cfg(feature = "serde")]
+    pub(crate) backend: Option<Arc<dyn BackendRuntime<T>>>,
 
     /// Readiness signal fired on the sweep task's first poll, *before*
     /// the first sleep. Tests `await` this before
@@ -269,6 +287,38 @@ impl<T: Cacheable> Punnu<T> {
         arc: Arc<T>,
         ttl: Option<Duration>,
     ) -> Result<Arc<T>, InsertError> {
+        #[cfg(feature = "serde")]
+        if let Some(backend) = &self.inner.backend {
+            let id = arc.id();
+            if self.live_conflict_for_reject(&id) {
+                return Err(InsertError::Conflict);
+            }
+            let keyspace = self.backend_keyspace();
+            if matches!(
+                self.inner.config.backend_failure_mode,
+                BackendFailureMode::Error
+            ) {
+                backend
+                    .put(&keyspace, &id, arc.as_ref(), ttl)
+                    .await
+                    .map_err(InsertError::BackendFailed)?;
+                return self.insert_arc_l1(arc, ttl).await;
+            }
+
+            let inserted = self.insert_arc_l1(arc.clone(), ttl).await?;
+            self.write_backend_after_l1(backend.as_ref(), &keyspace, &id, arc.as_ref(), ttl)
+                .await;
+            return Ok(inserted);
+        }
+
+        self.insert_arc_l1(arc, ttl).await
+    }
+
+    async fn insert_arc_l1(
+        &self,
+        arc: Arc<T>,
+        ttl: Option<Duration>,
+    ) -> Result<Arc<T>, InsertError> {
         let expires_at = self.expiry_deadline(ttl);
         let epoch = self.next_access_epoch();
         self.with_write_coordinator(|state| self.prepare_insert(state, arc, expires_at, epoch))
@@ -321,8 +371,12 @@ impl<T: Cacheable> Punnu<T> {
     /// `async` because L2 backend invalidation (a later task) is
     /// async; the L1-only path resolves immediately.
     pub async fn invalidate(&self, id: &T::Id, reason: InvalidationReason) {
+        #[cfg(feature = "serde")]
+        let id_for_backend = id.clone();
         self.invalidate_internal(id, EventReason::from(reason))
-            .await
+            .await;
+        #[cfg(feature = "serde")]
+        self.invalidate_backend_after_l1(&id_for_backend).await;
     }
 
     /// Internal invalidation entry point — accepts the full
@@ -337,6 +391,45 @@ impl<T: Cacheable> Punnu<T> {
     pub(crate) async fn invalidate_internal(&self, id: &T::Id, reason: EventReason) {
         let id = id.clone();
         self.with_write_coordinator(|state| self.prepare_invalidate(state, &id, reason));
+    }
+
+    #[cfg(feature = "serde")]
+    pub(crate) async fn invalidate_all_internal(&self, reason: EventReason) {
+        self.with_write_coordinator(|state| self.prepare_invalidate_all(state, reason));
+    }
+
+    /// Async lookup that checks L1 first, then the configured L2 backend.
+    ///
+    /// Backend hits are validated against the requested canonical id
+    /// before they can enter L1. A backend that returns the wrong id is
+    /// treated as corrupt data for this key and does not contaminate the
+    /// resident identity map.
+    #[cfg(feature = "serde")]
+    pub async fn get_async(&self, id: &T::Id) -> Result<Option<Arc<T>>, BackendError> {
+        if let Some(arc) = self.get(id) {
+            return Ok(Some(arc));
+        }
+
+        let Some(backend) = &self.inner.backend else {
+            return Ok(None);
+        };
+        let keyspace = self.backend_keyspace();
+        let Some(value) = self
+            .read_backend_with_policy(backend.as_ref(), &keyspace, id)
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        if value.id() != *id {
+            return Err(BackendError::Serialization(format!(
+                "backend returned mismatched id for {}",
+                std::any::type_name::<T>()
+            )));
+        }
+
+        self.metrics_record_hit(CacheTier::L2);
+        Ok(Some(self.insert_arc_or_existing(Arc::new(value)).await))
     }
 
     /// Atomically apply a delta-sync batch to the L1 identity map.
@@ -960,6 +1053,23 @@ impl<T: Cacheable> Punnu<T> {
         PreparedWrite::new(state, events, removed)
     }
 
+    #[cfg(feature = "serde")]
+    fn prepare_invalidate_all(
+        &self,
+        mut state: L1State<T>,
+        reason: EventReason,
+    ) -> PreparedWrite<T, usize> {
+        let ids = state.keys.iter().cloned().collect::<Vec<_>>();
+        let mut events = Vec::with_capacity(ids.len());
+        for id in ids {
+            if state.remove_entry(&id).is_some() {
+                events.push(PunnuEvent::Invalidate { id, reason });
+            }
+        }
+        let removed = events.len();
+        PreparedWrite::new(state, events, removed)
+    }
+
     fn prepare_apply_delta(
         &self,
         mut state: L1State<T>,
@@ -1215,6 +1325,193 @@ impl<T: Cacheable> Punnu<T> {
             record_metric_safely(|| m.record_fetch_latency(std::any::type_name::<T>(), duration));
         }
     }
+
+    #[cfg(feature = "serde")]
+    fn metrics_record_backend_error(&self, err: &BackendError) {
+        if let Some(m) = &self.inner.config.metrics {
+            record_metric_safely(|| m.record_backend_error(std::any::type_name::<T>(), err));
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    fn backend_keyspace(&self) -> BackendKeyspace {
+        BackendKeyspace::for_type::<T>(self.inner.config.namespace.as_deref())
+    }
+
+    #[cfg(feature = "serde")]
+    fn live_conflict_for_reject(&self, id: &T::Id) -> bool {
+        if !matches!(self.inner.config.on_conflict, OnConflict::Reject) {
+            return false;
+        }
+        let now = self.inner.executor.now();
+        self.inner
+            .l1
+            .load()
+            .get(id)
+            .is_some_and(|entry| !entry.is_expired_at(now))
+    }
+
+    #[cfg(feature = "serde")]
+    async fn read_backend_with_policy(
+        &self,
+        backend: &dyn BackendRuntime<T>,
+        keyspace: &BackendKeyspace,
+        id: &T::Id,
+    ) -> Result<Option<T>, BackendError> {
+        match self.inner.config.backend_failure_mode {
+            BackendFailureMode::Error => backend.get(keyspace, id).await,
+            BackendFailureMode::L1Only => match backend.get(keyspace, id).await {
+                Ok(value) => Ok(value),
+                Err(err) => {
+                    self.log_backend_error(&err);
+                    self.metrics_record_backend_error(&err);
+                    Ok(None)
+                }
+            },
+            BackendFailureMode::Retry { attempts } => {
+                match self
+                    .retry_backend_get(backend, keyspace, id, attempts)
+                    .await
+                {
+                    Ok(value) => Ok(value),
+                    Err(err) => {
+                        self.log_backend_error(&err);
+                        self.metrics_record_backend_error(&err);
+                        Ok(None)
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    async fn retry_backend_get(
+        &self,
+        backend: &dyn BackendRuntime<T>,
+        keyspace: &BackendKeyspace,
+        id: &T::Id,
+        attempts: u8,
+    ) -> Result<Option<T>, BackendError> {
+        for attempt in 1..=attempts {
+            if attempt > 1 {
+                self.inner
+                    .executor
+                    .sleep(jittered_delay(retry_delay_for_attempt(attempt)))
+                    .await;
+            }
+            match backend.get(keyspace, id).await {
+                Ok(value) => return Ok(value),
+                Err(err) if is_retryable_backend_error(&err) && attempt < attempts => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(feature = "serde")]
+    async fn write_backend_after_l1(
+        &self,
+        backend: &dyn BackendRuntime<T>,
+        keyspace: &BackendKeyspace,
+        id: &T::Id,
+        value: &T,
+        ttl: Option<Duration>,
+    ) {
+        let result = match self.inner.config.backend_failure_mode {
+            BackendFailureMode::L1Only => backend.put(keyspace, id, value, ttl).await,
+            BackendFailureMode::Retry { attempts } => {
+                self.retry_backend_put(backend, keyspace, id, value, ttl, attempts)
+                    .await
+            }
+            BackendFailureMode::Error => return,
+        };
+
+        if let Err(err) = result {
+            self.log_backend_error(&err);
+            self.metrics_record_backend_error(&err);
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    async fn invalidate_backend_after_l1(&self, id: &T::Id) {
+        let Some(backend) = &self.inner.backend else {
+            return;
+        };
+        let keyspace = self.backend_keyspace();
+        let result = match self.inner.config.backend_failure_mode {
+            BackendFailureMode::Retry { attempts } => {
+                self.retry_backend_invalidate(backend.as_ref(), &keyspace, id, attempts)
+                    .await
+            }
+            BackendFailureMode::L1Only | BackendFailureMode::Error => {
+                backend.invalidate(&keyspace, id).await
+            }
+        };
+
+        if let Err(err) = result {
+            self.log_backend_error(&err);
+            self.metrics_record_backend_error(&err);
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    async fn retry_backend_put(
+        &self,
+        backend: &dyn BackendRuntime<T>,
+        keyspace: &BackendKeyspace,
+        id: &T::Id,
+        value: &T,
+        ttl: Option<Duration>,
+        attempts: u8,
+    ) -> Result<(), BackendError> {
+        for attempt in 1..=attempts {
+            if attempt > 1 {
+                self.inner
+                    .executor
+                    .sleep(jittered_delay(retry_delay_for_attempt(attempt)))
+                    .await;
+            }
+            match backend.put(keyspace, id, value, ttl).await {
+                Ok(()) => return Ok(()),
+                Err(err) if is_retryable_backend_error(&err) && attempt < attempts => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "serde")]
+    async fn retry_backend_invalidate(
+        &self,
+        backend: &dyn BackendRuntime<T>,
+        keyspace: &BackendKeyspace,
+        id: &T::Id,
+        attempts: u8,
+    ) -> Result<(), BackendError> {
+        for attempt in 1..=attempts {
+            if attempt > 1 {
+                self.inner
+                    .executor
+                    .sleep(jittered_delay(retry_delay_for_attempt(attempt)))
+                    .await;
+            }
+            match backend.invalidate(keyspace, id).await {
+                Ok(()) => return Ok(()),
+                Err(err) if is_retryable_backend_error(&err) && attempt < attempts => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "serde")]
+    fn log_backend_error(&self, err: &BackendError) {
+        tracing::warn!(
+            type_name = std::any::type_name::<T>(),
+            error = %err,
+            "sassi backend operation failed"
+        );
+    }
 }
 
 #[cfg(any(
@@ -1318,6 +1615,8 @@ impl<T: Cacheable> PunnuInner<T> {
 /// fully-formed [`PunnuConfig`].
 pub struct PunnuBuilder<T: Cacheable> {
     config: PunnuConfig,
+    #[cfg(feature = "serde")]
+    backend: Option<Arc<dyn BackendRuntime<T>>>,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 
@@ -1327,6 +1626,8 @@ impl<T: Cacheable> PunnuBuilder<T> {
     pub fn new() -> Self {
         Self {
             config: PunnuConfig::default(),
+            #[cfg(feature = "serde")]
+            backend: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -1350,6 +1651,22 @@ impl<T: Cacheable> PunnuBuilder<T> {
     /// ```
     pub fn config(mut self, config: PunnuConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Attach an L2 cache backend.
+    ///
+    /// The backend receives keyspaces derived from this Punnu's
+    /// [`PunnuConfig::namespace`] and cached Rust type. It must not use
+    /// a separate namespace source.
+    #[cfg(feature = "serde")]
+    pub fn backend<B>(mut self, backend: B) -> Self
+    where
+        T: Serialize + DeserializeOwned,
+        T::Id: Serialize + DeserializeOwned,
+        B: CacheBackend<T> + 'static,
+    {
+        self.backend = Some(crate::backend::erase_backend::<T, B>(backend));
         self
     }
 
@@ -1433,9 +1750,30 @@ impl<T: Cacheable> PunnuBuilder<T> {
                  with un-namespaced deployments."
             );
         }
+        if matches!(
+            self.config.backend_failure_mode,
+            BackendFailureMode::Retry { attempts: 0 }
+        ) {
+            panic!("BackendFailureMode::Retry requires attempts >= 1");
+        }
+        #[cfg(all(
+            feature = "serde",
+            not(any(
+                all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+                all(feature = "runtime-wasm", target_arch = "wasm32"),
+            ))
+        ))]
+        if self.backend.is_some() {
+            panic!(
+                "PunnuBuilder::backend requires `runtime-tokio` on native targets or \
+                 `runtime-wasm` on wasm32 so sassi can drive the backend invalidation stream"
+            );
+        }
         let sweep_interval = self.config.ttl_sweep_interval;
         let (events, _) = broadcast::channel(self.config.event_channel_capacity);
         let executor: Arc<dyn PunnuExecutor> = Arc::new(DefaultExecutor);
+        #[cfg(feature = "serde")]
+        let backend = self.backend;
 
         #[cfg(any(
             all(feature = "runtime-tokio", not(target_arch = "wasm32")),
@@ -1454,6 +1792,8 @@ impl<T: Cacheable> PunnuBuilder<T> {
             events,
             config: self.config,
             executor,
+            #[cfg(feature = "serde")]
+            backend,
             #[cfg(any(
                 all(feature = "runtime-tokio", not(target_arch = "wasm32")),
                 all(feature = "runtime-wasm", target_arch = "wasm32"),
@@ -1478,6 +1818,8 @@ impl<T: Cacheable> PunnuBuilder<T> {
             all(feature = "runtime-wasm", target_arch = "wasm32"),
         ))]
         spawn_sweep_if_configured(&inner, sweep_interval, sweep_initialised);
+        #[cfg(feature = "serde")]
+        spawn_backend_listener_if_configured(&inner);
         #[cfg(not(any(
             all(feature = "runtime-tokio", not(target_arch = "wasm32")),
             all(feature = "runtime-wasm", target_arch = "wasm32"),
@@ -1510,6 +1852,64 @@ fn spawn_sweep_if_configured<T: Cacheable>(
     if let (Some(interval), Some(notify)) = (interval, sweep_initialised) {
         spawn_sweep(Arc::downgrade(inner), interval, notify);
     }
+}
+
+#[cfg(feature = "serde")]
+fn spawn_backend_listener_if_configured<T: Cacheable>(inner: &Arc<PunnuInner<T>>) {
+    let Some(backend) = inner.backend.clone() else {
+        return;
+    };
+    let keyspace = BackendKeyspace::for_type::<T>(inner.config.namespace.as_deref());
+    let weak = Arc::downgrade(inner);
+    inner.executor.spawn(Box::pin(async move {
+        let mut stream = backend.invalidation_stream(keyspace);
+        while let Some(message) = stream.next().await {
+            let Some(inner) = weak.upgrade() else {
+                break;
+            };
+            match message {
+                Ok(BackendInvalidation::Id(id)) => {
+                    Punnu { inner }
+                        .invalidate_internal(&id, EventReason::BackendInvalidation)
+                        .await;
+                }
+                Ok(BackendInvalidation::All) => {
+                    Punnu { inner }
+                        .invalidate_all_internal(EventReason::BackendInvalidation)
+                        .await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        type_name = std::any::type_name::<T>(),
+                        error = %err,
+                        "sassi backend invalidation stream error"
+                    );
+                    if let Some(m) = &inner.config.metrics {
+                        record_metric_safely(|| {
+                            m.record_backend_error(std::any::type_name::<T>(), &err);
+                        });
+                    }
+                }
+            }
+        }
+    }));
+}
+
+#[cfg(feature = "serde")]
+fn is_retryable_backend_error(err: &BackendError) -> bool {
+    matches!(err, BackendError::Network(_) | BackendError::Other(_))
+}
+
+#[cfg(feature = "serde")]
+fn jittered_delay(base: Duration) -> Duration {
+    if base.is_zero() {
+        return base;
+    }
+    let jitter_cap_micros = (base.as_micros() / 4).min(u64::MAX as u128) as u64;
+    if jitter_cap_micros == 0 {
+        return base;
+    }
+    base + Duration::from_micros(fastrand::u64(..=jitter_cap_micros))
 }
 
 impl<T: Cacheable> Default for PunnuBuilder<T> {

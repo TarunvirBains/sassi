@@ -69,3 +69,4 @@ gloo-timers = { workspace = true, optional = true }
 # real `sleep` calls. Dev-only; never linked into a production build.
 tokio = { version = "1.48", default-features = false, features = ["sync", "rt", "time", "macros", "test-util"] }
 proptest = { workspace = true }
+tempfile = "3"

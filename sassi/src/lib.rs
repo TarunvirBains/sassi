@@ -56,6 +56,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(feature = "serde")]
+pub mod backend;
 pub mod cacheable;
 pub mod error;
 pub(crate) mod executor;
@@ -63,8 +65,17 @@ pub mod predicate;
 pub mod punnu;
 pub mod sassi;
 mod time;
+#[cfg(feature = "serde")]
+pub mod wire;
 
+#[cfg(feature = "serde")]
+pub use backend::{
+    BackendInvalidation, BackendInvalidationStream, BackendKeyspace, CacheBackend, FileBackend,
+    MemoryBackend, NoBackend,
+};
 pub use cacheable::{Cacheable, Field};
+#[cfg(feature = "serde")]
+pub use error::WireFormatError;
 pub use error::{BackendError, FetchError, InsertError};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp, MemQ};
 pub use punnu::{

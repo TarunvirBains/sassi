@@ -178,6 +178,10 @@ fn into_clone(err: FetchError) -> FetchErrorClone {
             FetchErrorClone::BackendSerialization(s)
         }
         FetchError::Backend(BackendError::Network(s)) => FetchErrorClone::BackendNetwork(s),
+        #[cfg(feature = "serde")]
+        FetchError::Backend(BackendError::WireFormat(e)) => {
+            FetchErrorClone::BackendSerialization(format!("{e}"))
+        }
         FetchError::Backend(BackendError::Other(e)) => {
             FetchErrorClone::BackendOtherRendered(format!("{e}"))
         }

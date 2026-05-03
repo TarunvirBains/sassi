@@ -609,6 +609,7 @@ dependencies = [
  "sassi-macros",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

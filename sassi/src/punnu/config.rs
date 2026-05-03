@@ -143,6 +143,20 @@ impl std::fmt::Debug for PunnuConfig {
     }
 }
 
+/// Non-jittered base retry delay for backend attempt `attempt_number`.
+///
+/// Attempt numbers are 1-based and include the original backend call.
+/// Attempt 1 has no preceding delay. Attempt 2 waits 25ms; later
+/// attempts double until capped at 1s. Production retry paths add
+/// jitter on top of this base to avoid synchronized retry storms.
+pub fn retry_delay_for_attempt(attempt_number: u8) -> Duration {
+    if attempt_number <= 1 {
+        return Duration::ZERO;
+    }
+    let exponent = u32::from(attempt_number.saturating_sub(2)).min(10);
+    Duration::from_millis((25u64.saturating_mul(1u64 << exponent)).min(1_000))
+}
+
 /// Behaviour when an L2 backend write-through fails.
 ///
 /// Defaults to [`BackendFailureMode::L1Only`] — the most permissive
@@ -164,9 +178,11 @@ pub enum BackendFailureMode {
     /// is a correctness requirement, not an optimisation.
     Error,
 
-    /// Retry the backend operation up to `attempts` times before
-    /// falling through to L1Only behaviour. Backoff strategy is left
-    /// to the backend implementation (no global retry policy).
+    /// Retry the backend operation up to `attempts` total attempts
+    /// (including the original call) before falling through to
+    /// L1Only behaviour for retryable errors. Backoff is centrally
+    /// defined by [`retry_delay_for_attempt`] plus 0-25% jitter in
+    /// production call paths. `attempts` must be at least 1.
     Retry {
         /// Number of attempts before giving up.
         attempts: u8,
