@@ -78,6 +78,27 @@ fn wire_from_slice_should_reject_incompatible_major_version() {
 }
 
 #[test]
+fn wire_from_slice_should_check_major_before_payload_shape() {
+    let incompatible = serde_json::json!({
+        "__sassi_v": wire::WIRE_FORMAT_MAJOR + 1,
+        "future_payload": {
+            "identity": "not-the-v0-shape"
+        }
+    });
+    let bytes = serde_json::to_vec(&incompatible).unwrap();
+
+    let err = wire::from_slice::<E>(&bytes).unwrap_err();
+
+    match err {
+        WireFormatError::VersionMismatch { got, expected } => {
+            assert_eq!(got, wire::WIRE_FORMAT_MAJOR + 1);
+            assert_eq!(expected, wire::WIRE_FORMAT_MAJOR);
+        }
+        other => panic!("expected version mismatch, got {other:?}"),
+    }
+}
+
+#[test]
 fn wire_error_should_convert_to_insert_serialization_error() {
     let err = WireFormatError::VersionMismatch {
         got: 1,
@@ -130,4 +151,26 @@ async fn insert_serialized_should_reject_incompatible_major_without_inserting() 
         other => panic!("expected version mismatch, got {other:?}"),
     }
     assert!(pool.get(&11).is_none());
+}
+
+#[tokio::test]
+async fn insert_serialized_should_check_major_before_payload_shape() {
+    let pool = Punnu::<E>::builder().build();
+    let incompatible = serde_json::json!({
+        "__sassi_v": wire::WIRE_FORMAT_MAJOR + 1,
+        "future_payload": {
+            "identity": "not-the-v0-shape"
+        }
+    });
+    let bytes = serde_json::to_vec(&incompatible).unwrap();
+
+    let err = pool.insert_serialized(&bytes).await.unwrap_err();
+
+    match err {
+        InsertError::WireFormat(WireFormatError::VersionMismatch { got, expected }) => {
+            assert_eq!(got, wire::WIRE_FORMAT_MAJOR + 1);
+            assert_eq!(expected, wire::WIRE_FORMAT_MAJOR);
+        }
+        other => panic!("expected version mismatch, got {other:?}"),
+    }
 }

@@ -19,9 +19,15 @@ struct EnvelopeRef<'a, T: ?Sized> {
 }
 
 #[derive(Deserialize)]
-struct Envelope<T> {
+struct EnvelopeVersion {
     #[serde(rename = "__sassi_v")]
     version: u64,
+}
+
+#[derive(Deserialize)]
+struct Envelope<T> {
+    #[serde(rename = "__sassi_v")]
+    _version: u64,
     payload: T,
 }
 
@@ -48,12 +54,13 @@ pub fn to_vec<T: Serialize + ?Sized>(payload: &T) -> Result<Vec<u8>, WireFormatE
 /// [`WireFormatError::Serde`] when the bytes are not valid envelope
 /// JSON for the requested payload type.
 pub fn from_slice<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, WireFormatError> {
-    let envelope: Envelope<T> = serde_json::from_slice(bytes)?;
-    if envelope.version != WIRE_FORMAT_MAJOR {
+    let version: EnvelopeVersion = serde_json::from_slice(bytes)?;
+    if version.version != WIRE_FORMAT_MAJOR {
         return Err(WireFormatError::VersionMismatch {
-            got: envelope.version,
+            got: version.version,
             expected: WIRE_FORMAT_MAJOR,
         });
     }
+    let envelope: Envelope<T> = serde_json::from_slice(bytes)?;
     Ok(envelope.payload)
 }

@@ -48,9 +48,11 @@ pub enum WireFormatError {
 /// The default L1-only configuration only ever produces
 /// [`InsertError::Conflict`] (when the pool is configured with
 /// [`crate::punnu::OnConflict::Reject`] and an entry with the same id is
-/// already present). [`InsertError::Serialization`],
-/// [`InsertError::BackendFailed`], and [`InsertError::WireFormat`]
-/// become reachable when an L2 backend is attached.
+/// already present). [`InsertError::WireFormat`] is also reachable from
+/// [`crate::punnu::Punnu::insert_serialized`] before any L2 backend is
+/// involved. [`InsertError::Serialization`] and
+/// [`InsertError::BackendFailed`] become reachable when an L2 backend is
+/// attached.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum InsertError {
