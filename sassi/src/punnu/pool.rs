@@ -26,6 +26,7 @@ use crate::punnu::config::{
 use crate::punnu::delta::{DeltaApplyStats, DeltaResult};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::eviction::choose_sampled_lru_victim;
+use crate::punnu::refresh::{PunnuFetcher, RefreshHandle, RefreshMode};
 use crate::punnu::scope::PunnuScope;
 use crate::punnu::single_flight::InFlightRegistry;
 use crate::punnu::state::{Entry, L1State};
@@ -46,7 +47,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 #[cfg(any(
     feature = "serde",
@@ -54,7 +55,7 @@ use std::time::Duration;
     all(feature = "runtime-wasm", target_arch = "wasm32"),
 ))]
 use tokio::sync::Notify;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 #[cfg(test)]
 type AfterPublishHook = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -502,6 +503,62 @@ impl<T: Cacheable> Punnu<T> {
     /// observable and are not counted.
     pub fn apply_delta(&self, delta: DeltaResult<T>) -> DeltaApplyStats {
         self.with_write_coordinator(|state| self.prepare_apply_delta(state, delta))
+    }
+
+    /// Start a fixed-interval refresh task for this pool.
+    ///
+    /// Scheduled ticks fetch and apply values in the background; fetch
+    /// errors are logged and skipped so a transient source outage does
+    /// not stop later ticks. [`RefreshHandle::refresh_now`] runs
+    /// through the same background task and returns the fetch/apply
+    /// result to the caller.
+    ///
+    /// [`RefreshMode::UpsertOnly`] is absence-safe for partial
+    /// pollers: fetched rows are inserted or updated and absent
+    /// resident ids are left in place. It is not same-id query
+    /// isolation; if two refreshers return the same id, the pool keeps
+    /// one canonical value according to [`PunnuConfig::on_conflict`].
+    /// [`RefreshMode::Replace`] treats the fetched result as the
+    /// complete authoritative set for the whole `Punnu<T>` and removes
+    /// resident ids that are absent from the fetch.
+    ///
+    /// This helper updates the in-process L1 identity map. It does not
+    /// publish L2 backend invalidations; backend-driven invalidation
+    /// remains a namespace/type-wide mechanism, not a query refresh
+    /// signal.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval` is zero. If no runtime feature is enabled,
+    /// the configured executor will panic with a clear runtime-feature
+    /// diagnostic when the task is spawned.
+    pub fn start_periodic_refresh<F>(
+        &self,
+        interval: Duration,
+        fetcher: F,
+        mode: RefreshMode,
+    ) -> RefreshHandle
+    where
+        F: PunnuFetcher<T>,
+    {
+        assert!(
+            !interval.is_zero(),
+            "periodic refresh interval must be non-zero"
+        );
+
+        let fetcher = Arc::new(fetcher);
+        let weak = Arc::downgrade(&self.inner);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let (trigger_tx, trigger_rx) = mpsc::channel(8);
+
+        self.inner.executor.spawn(Box::pin(run_periodic_refresh(
+            weak, fetcher, interval, mode, cancel_rx, trigger_rx,
+        )));
+
+        RefreshHandle {
+            cancel: cancel_tx,
+            trigger: trigger_tx,
+        }
     }
 
     /// Get-or-fetch convenience for the lazy-fetch-on-miss pattern.
@@ -1292,6 +1349,121 @@ impl<T: Cacheable> Punnu<T> {
         PreparedWrite::new(state, events, stats)
     }
 
+    fn apply_refresh_items(&self, items: Vec<T>, mode: RefreshMode) {
+        self.with_write_coordinator(|state| match mode {
+            RefreshMode::UpsertOnly => self.prepare_refresh_upsert(state, items),
+            RefreshMode::Replace => self.prepare_refresh_replace(state, items),
+        });
+    }
+
+    fn prepare_refresh_upsert(&self, mut state: L1State<T>, items: Vec<T>) -> PreparedWrite<T, ()> {
+        let now = self.inner.executor.now();
+        let original_state = state.clone();
+        let mut normalized_items = BTreeMap::new();
+        for value in items {
+            normalized_items.insert(value.id(), value);
+        }
+
+        let mut accepted_items = BTreeMap::new();
+        for (id, value) in normalized_items {
+            Self::remove_expired_entry(&mut state, &id, now);
+            let existing = state.get(&id).cloned();
+            if existing.is_some() && matches!(self.inner.config.on_conflict, OnConflict::Reject) {
+                continue;
+            }
+            let value = Arc::new(value);
+            let expires_at = self.expiry_deadline(self.inner.config.default_ttl);
+            let epoch = self.next_access_epoch();
+            state.insert_entry(
+                id.clone(),
+                Arc::new(Entry::new(value.clone(), expires_at, epoch)),
+            );
+            accepted_items.insert(id, existing.map(|entry| entry.value.clone()));
+        }
+
+        self.remove_expired_entries_for_capacity(&mut state, now);
+        let lru_victims = self.evict_ids_to_capacity(&mut state, None);
+        let mut events = Self::visible_lru_events(&original_state, lru_victims, now);
+
+        for (id, old) in accepted_items {
+            let Some(final_entry) = state.get(&id) else {
+                continue;
+            };
+            let value = final_entry.value.clone();
+            events.push(self.refresh_write_event(old, value));
+        }
+
+        PreparedWrite::new(state, events, ())
+    }
+
+    fn prepare_refresh_replace(
+        &self,
+        mut state: L1State<T>,
+        items: Vec<T>,
+    ) -> PreparedWrite<T, ()> {
+        let now = self.inner.executor.now();
+        let original_state = state.clone();
+        let mut normalized_items = BTreeMap::new();
+        for value in items {
+            normalized_items.insert(value.id(), value);
+        }
+
+        let mut events = Vec::new();
+        let resident_ids = state.keys.iter().cloned().collect::<Vec<_>>();
+        for id in resident_ids {
+            if normalized_items.contains_key(&id) {
+                continue;
+            }
+            if Self::remove_expired_entry(&mut state, &id, now) {
+                continue;
+            }
+            if state.remove_entry(&id).is_some() {
+                events.push(PunnuEvent::Invalidate {
+                    id,
+                    reason: EventReason::Manual,
+                });
+            }
+        }
+
+        let mut accepted_items = BTreeMap::new();
+        for (id, value) in normalized_items {
+            Self::remove_expired_entry(&mut state, &id, now);
+            let existing = state.get(&id).cloned();
+            if existing.is_some() && matches!(self.inner.config.on_conflict, OnConflict::Reject) {
+                continue;
+            }
+            let value = Arc::new(value);
+            let expires_at = self.expiry_deadline(self.inner.config.default_ttl);
+            let epoch = self.next_access_epoch();
+            state.insert_entry(
+                id.clone(),
+                Arc::new(Entry::new(value.clone(), expires_at, epoch)),
+            );
+            accepted_items.insert(id, existing.map(|entry| entry.value.clone()));
+        }
+
+        self.remove_expired_entries_for_capacity(&mut state, now);
+        let lru_victims = self.evict_ids_to_capacity(&mut state, None);
+        events.extend(Self::visible_lru_events(&original_state, lru_victims, now));
+
+        for (id, old) in accepted_items {
+            let Some(final_entry) = state.get(&id) else {
+                continue;
+            };
+            let value = final_entry.value.clone();
+            events.push(self.refresh_write_event(old, value));
+        }
+
+        PreparedWrite::new(state, events, ())
+    }
+
+    fn refresh_write_event(&self, old: Option<Arc<T>>, value: Arc<T>) -> PunnuEvent<T> {
+        match (old, self.inner.config.on_conflict) {
+            (Some(old), OnConflict::Update) => PunnuEvent::Update { old, new: value },
+            _ => PunnuEvent::Insert { value },
+        }
+    }
+
     fn remove_expired_entry(state: &mut L1State<T>, id: &T::Id, now: Instant) -> bool {
         let expired = state.get(id).is_some_and(|entry| entry.is_expired_at(now));
         if expired {
@@ -1829,6 +2001,119 @@ impl<T: Cacheable> PunnuInner<T> {
             pause.collected.notify_one();
             pause.resume.notified().await;
         }
+    }
+}
+
+async fn run_periodic_refresh<T, F>(
+    weak: Weak<PunnuInner<T>>,
+    fetcher: Arc<F>,
+    interval: Duration,
+    mode: RefreshMode,
+    mut cancel: watch::Receiver<bool>,
+    mut triggers: mpsc::Receiver<oneshot::Sender<Result<(), FetchError>>>,
+) where
+    T: Cacheable,
+    F: PunnuFetcher<T>,
+{
+    loop {
+        if refresh_cancelled(&cancel) {
+            reply_stopped_to_queued_triggers(&mut triggers);
+            break;
+        }
+
+        let Some(executor) = weak.upgrade().map(|inner| inner.executor.clone()) else {
+            reply_stopped_to_queued_triggers(&mut triggers);
+            break;
+        };
+        let sleep = executor.sleep(interval);
+
+        tokio::select! {
+            biased;
+            changed = cancel.changed() => {
+                let _ = changed;
+                reply_stopped_to_queued_triggers(&mut triggers);
+                break;
+            }
+            reply = triggers.recv() => {
+                let Some(reply) = reply else {
+                    break;
+                };
+                if refresh_cancelled(&cancel) || weak.upgrade().is_none() {
+                    let _ = reply.send(Err(refresh_task_stopped_error()));
+                    break;
+                }
+                let result = run_refresh_once(&weak, fetcher.as_ref(), mode, &mut cancel).await;
+                let stopped = refresh_cancelled(&cancel) || weak.upgrade().is_none();
+                let _ = reply.send(result);
+                if stopped {
+                    reply_stopped_to_queued_triggers(&mut triggers);
+                    break;
+                }
+            }
+            _ = sleep => {
+                if refresh_cancelled(&cancel) || weak.upgrade().is_none() {
+                    break;
+                }
+                let result = run_refresh_once(&weak, fetcher.as_ref(), mode, &mut cancel).await;
+                if refresh_cancelled(&cancel) || weak.upgrade().is_none() {
+                    reply_stopped_to_queued_triggers(&mut triggers);
+                    break;
+                }
+                if let Err(err) = result {
+                    tracing::warn!(error = %err, "periodic refresh failed");
+                }
+            }
+        }
+    }
+}
+
+async fn run_refresh_once<T, F>(
+    weak: &Weak<PunnuInner<T>>,
+    fetcher: &F,
+    mode: RefreshMode,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<(), FetchError>
+where
+    T: Cacheable,
+    F: PunnuFetcher<T>,
+{
+    if refresh_cancelled(cancel) {
+        return Err(refresh_task_stopped_error());
+    }
+
+    let items = tokio::select! {
+        biased;
+        changed = cancel.changed() => {
+            let _ = changed;
+            return Err(refresh_task_stopped_error());
+        }
+        result = fetcher.fetch() => result?,
+    };
+
+    if refresh_cancelled(cancel) {
+        return Err(refresh_task_stopped_error());
+    }
+
+    let Some(inner) = weak.upgrade() else {
+        return Err(refresh_task_stopped_error());
+    };
+    Punnu { inner }.apply_refresh_items(items, mode);
+    Ok(())
+}
+
+fn refresh_task_stopped_error() -> FetchError {
+    FetchError::Serialization("refresh task stopped".to_owned())
+}
+
+fn refresh_cancelled(cancel: &watch::Receiver<bool>) -> bool {
+    *cancel.borrow() || cancel.has_changed().is_err()
+}
+
+fn reply_stopped_to_queued_triggers(
+    triggers: &mut mpsc::Receiver<oneshot::Sender<Result<(), FetchError>>>,
+) {
+    while let Ok(reply) = triggers.try_recv() {
+        let _ = reply.send(Err(refresh_task_stopped_error()));
     }
 }
 

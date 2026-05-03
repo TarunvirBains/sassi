@@ -80,7 +80,8 @@ pub use error::{BackendError, FetchError, InsertError};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp, MemQ};
 pub use punnu::{
     BackendFailureMode, CacheTier, DeltaApplyStats, DeltaResult, EventReason, InvalidationReason,
-    OnConflict, Punnu, PunnuBuilder, PunnuConfig, PunnuEvent, PunnuMetrics, PunnuScope, TenantKey,
+    OnConflict, Punnu, PunnuBuilder, PunnuConfig, PunnuEvent, PunnuFetcher, PunnuMetrics,
+    PunnuScope, RefreshHandle, RefreshMode, TenantKey,
 };
 pub use sassi::Sassi;
 pub use time::Instant;
