@@ -303,6 +303,34 @@ impl<T: Cacheable> Punnu<T> {
         self.insert_arc_internal(arc, Some(ttl)).await
     }
 
+    /// Deserialize a value from Sassi's versioned wire envelope and
+    /// insert it into the pool.
+    ///
+    /// This is the entry point for bytes that crossed a process,
+    /// runtime, or transport boundary. The payload must be encoded by
+    /// [`crate::wire::to_vec`]; incompatible wire-format majors are
+    /// rejected before the value reaches the identity map.
+    ///
+    /// All normal [`Punnu::insert`] semantics still apply after
+    /// deserialization: conflict handling, TTL defaults, LRU pressure,
+    /// backend write-through, events, and metrics.
+    ///
+    /// # Errors
+    ///
+    /// - [`InsertError::WireFormat`] if the bytes are not a valid
+    ///   Sassi wire envelope for `T`, or if the envelope major version
+    ///   is incompatible.
+    /// - Any error that [`Punnu::insert`] can return after the value
+    ///   has been deserialized.
+    #[cfg(feature = "serde")]
+    pub async fn insert_serialized(&self, bytes: &[u8]) -> Result<Arc<T>, InsertError>
+    where
+        T: DeserializeOwned,
+    {
+        let value = crate::wire::from_slice(bytes)?;
+        self.insert(value).await
+    }
+
     /// Internal insert — shared by `insert` and `insert_with_ttl`.
     /// `ttl` is the absolute TTL applied to this entry (`None` means
     /// no expiry).

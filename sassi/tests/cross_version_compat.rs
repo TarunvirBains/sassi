@@ -1,6 +1,6 @@
 #![cfg(feature = "serde")]
 
-use sassi::{Cacheable, Field, InsertError, WireFormatError, wire};
+use sassi::{Cacheable, Field, InsertError, Punnu, WireFormatError, wire};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,4 +93,41 @@ fn wire_error_should_convert_to_insert_serialization_error() {
         }
         other => panic!("expected insert serialization error, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn insert_serialized_should_deserialize_v0_envelope_and_insert_value() {
+    let pool = Punnu::<E>::builder().build();
+    let bytes = wire::to_vec(&E {
+        id: 9,
+        label: "nine".into(),
+    })
+    .unwrap();
+
+    let inserted = pool.insert_serialized(&bytes).await.unwrap();
+
+    assert_eq!(inserted.id, 9);
+    assert_eq!(inserted.label, "nine");
+    assert_eq!(pool.get(&9).unwrap().label, "nine");
+}
+
+#[tokio::test]
+async fn insert_serialized_should_reject_incompatible_major_without_inserting() {
+    let pool = Punnu::<E>::builder().build();
+    let incompatible = serde_json::json!({
+        "__sassi_v": wire::WIRE_FORMAT_MAJOR + 1,
+        "payload": { "id": 11, "label": "future" }
+    });
+    let bytes = serde_json::to_vec(&incompatible).unwrap();
+
+    let err = pool.insert_serialized(&bytes).await.unwrap_err();
+
+    match err {
+        InsertError::WireFormat(WireFormatError::VersionMismatch { got, expected }) => {
+            assert_eq!(got, wire::WIRE_FORMAT_MAJOR + 1);
+            assert_eq!(expected, wire::WIRE_FORMAT_MAJOR);
+        }
+        other => panic!("expected version mismatch, got {other:?}"),
+    }
+    assert!(pool.get(&11).is_none());
 }
