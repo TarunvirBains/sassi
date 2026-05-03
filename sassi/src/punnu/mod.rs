@@ -12,6 +12,7 @@ pub mod delta_refresh;
 pub mod events;
 pub(crate) mod eviction;
 pub mod pool;
+pub(crate) mod recovery;
 pub mod refresh;
 pub mod scope;
 pub(crate) mod single_flight;

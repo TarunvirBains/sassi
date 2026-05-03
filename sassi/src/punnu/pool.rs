@@ -38,14 +38,15 @@ use crate::punnu::state::{Entry, L1State};
 use crate::punnu::ttl::spawn_sweep;
 use crate::punnu::write::PreparedWrite;
 use crate::time::Instant;
+use crate::watermark::DeltaSyncCacheable;
 use arc_swap::ArcSwap;
 #[cfg(feature = "serde")]
 use futures::StreamExt;
 #[cfg(feature = "serde")]
 use serde::{Serialize, de::DeserializeOwned};
-use std::collections::BTreeMap;
 #[cfg(feature = "serde")]
 use std::collections::BTreeSet;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -504,6 +505,24 @@ impl<T: Cacheable> Punnu<T> {
     /// observable and are not counted.
     pub fn apply_delta(&self, delta: DeltaResult<T>) -> DeltaApplyStats {
         self.with_write_coordinator(|state| self.prepare_apply_delta(state, delta))
+    }
+
+    pub(crate) fn apply_delta_recovering(
+        &self,
+        delta: DeltaResult<T>,
+        recovered_ids: &HashSet<T::Id>,
+    ) -> DeltaApplyStats
+    where
+        T: DeltaSyncCacheable,
+    {
+        self.with_write_coordinator(|state| {
+            self.prepare_apply_delta_with_filter(state, delta, |state, id, value| {
+                recovered_ids.contains(id)
+                    && state
+                        .get(id)
+                        .is_some_and(|entry| entry.value.watermark() > value.watermark())
+            })
+        })
     }
 
     /// Start a fixed-interval refresh task for this pool.
@@ -1037,6 +1056,15 @@ impl<T: Cacheable> Punnu<T> {
             .collect()
     }
 
+    pub(crate) fn contains_unexpired(&self, id: &T::Id) -> bool {
+        let now = self.inner.executor.now();
+        self.inner
+            .l1
+            .load()
+            .get(id)
+            .is_some_and(|entry| !entry.is_expired_at(now))
+    }
+
     /// Test-only readiness handshake — resolves once the background
     /// TTL sweep task has been polled the first time and is parked on
     /// its initial `executor.sleep(interval)`. Tests `await` this
@@ -1331,8 +1359,17 @@ impl<T: Cacheable> Punnu<T> {
 
     fn prepare_apply_delta(
         &self,
+        state: L1State<T>,
+        delta: DeltaResult<T>,
+    ) -> PreparedWrite<T, DeltaApplyStats> {
+        self.prepare_apply_delta_with_filter(state, delta, |_, _, _| false)
+    }
+
+    fn prepare_apply_delta_with_filter(
+        &self,
         mut state: L1State<T>,
         delta: DeltaResult<T>,
+        mut skip_item: impl FnMut(&L1State<T>, &T::Id, &T) -> bool,
     ) -> PreparedWrite<T, DeltaApplyStats> {
         let now = self.inner.executor.now();
         let original_state = state.clone();
@@ -1357,6 +1394,9 @@ impl<T: Cacheable> Punnu<T> {
 
             let existing = state.get(&id).cloned();
             if existing.is_some() && matches!(self.inner.config.on_conflict, OnConflict::Reject) {
+                continue;
+            }
+            if skip_item(&state, &id, &value) {
                 continue;
             }
 

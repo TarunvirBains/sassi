@@ -9,7 +9,9 @@
 use crate::error::FetchError;
 use crate::executor::BoxFut;
 use crate::punnu::delta::DeltaResult;
+use crate::punnu::events::{EventReason, PunnuEvent};
 use crate::punnu::pool::Punnu;
+use crate::punnu::recovery::{RecoverySet, RecoverySnapshot};
 use crate::punnu::single_flight::{FetchErrorClone, into_clone};
 use crate::watermark::DeltaSyncCacheable;
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,10 +25,12 @@ use futures::future::Shared;
 use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 /// User-supplied delta fetcher for one refresh subscription.
@@ -108,8 +112,8 @@ pub struct DeltaQuery<T: DeltaSyncCacheable> {
     pub since: Option<T::Watermark>,
     /// IDs that must be recovered regardless of watermark.
     ///
-    /// Task 14c does not populate this yet; Task 14d wires the
-    /// recovery-set policies.
+    /// Eviction recovery uses this to ask the fetcher for IDs that
+    /// this subscription previously observed but L1 later evicted.
     pub recover_ids: HashSet<T::Id>,
 }
 
@@ -194,6 +198,72 @@ impl<T: DeltaSyncCacheable> DeltaRefreshHandle<T> {
         let _ = self.inner.cancel.send(true);
     }
 
+    /// Configure eviction-triggered recovery for this subscription.
+    ///
+    /// When enabled, LRU evictions for IDs this subscription has
+    /// observed are passed to the fetcher as
+    /// [`DeltaQuery::recover_ids`] on a later delta update.
+    pub fn with_eviction_recovery(self, enabled: bool) -> Self {
+        self.inner
+            .eviction_recovery_enabled
+            .store(enabled, Ordering::Release);
+        if !enabled {
+            self.inner
+                .recovery
+                .lock()
+                .expect("delta refresh recovery lock poisoned")
+                .clear();
+            self.inner.satisfied_force_full_generation.store(
+                self.inner.force_full_generation.load(Ordering::Acquire),
+                Ordering::Release,
+            );
+        }
+        self
+    }
+
+    /// Configure periodic full refreshes.
+    ///
+    /// `Some(n)` makes every nth successful scheduled refresh tick use
+    /// `since = None`; `None` disables the policy.
+    pub fn with_periodic_full_refresh(self, every_n_ticks: Option<NonZeroUsize>) -> Self {
+        self.inner.periodic_full_every.store(
+            every_n_ticks.map(NonZeroUsize::get).unwrap_or(0),
+            Ordering::Release,
+        );
+        self.inner
+            .periodic_full_progress
+            .store(0, Ordering::Release);
+        self
+    }
+
+    /// Count IDs queued for eviction recovery on this subscription.
+    ///
+    /// Returns zero when eviction recovery is disabled.
+    pub fn pending_eviction_recovery_count(&self) -> usize {
+        if !self.inner.eviction_recovery_enabled.load(Ordering::Acquire) {
+            return 0;
+        }
+        self.inner
+            .recovery
+            .lock()
+            .expect("delta refresh recovery lock poisoned")
+            .len()
+    }
+
+    /// Current periodic full-refresh progress.
+    ///
+    /// Returns `None` when the policy is disabled; otherwise returns
+    /// `(elapsed, configured_every)`.
+    pub fn periodic_full_refresh_progress(&self) -> Option<(usize, NonZeroUsize)> {
+        let every = NonZeroUsize::new(self.inner.periodic_full_every.load(Ordering::Acquire))?;
+        let progress = self
+            .inner
+            .periodic_full_progress
+            .load(Ordering::Acquire)
+            .min(every.get().saturating_sub(1));
+        Some((progress, every))
+    }
+
     /// Return the current subscription watermark.
     pub fn watermark(&self) -> Option<T::Watermark> {
         self.inner
@@ -214,6 +284,15 @@ pub(crate) struct RefreshSubscription<T: DeltaSyncCacheable> {
     punnu: Punnu<T>,
     fetcher: Arc<dyn DeltaPunnuFetcher<T>>,
     last_watermark: Mutex<Option<T::Watermark>>,
+    membership: Mutex<HashSet<T::Id>>,
+    recovery: Mutex<RecoverySet<T::Id>>,
+    eviction_recovery_enabled: AtomicBool,
+    force_full_generation: AtomicU64,
+    satisfied_force_full_generation: AtomicU64,
+    lru_warning_issued: AtomicBool,
+    periodic_full_every: AtomicUsize,
+    periodic_full_progress: AtomicUsize,
+    recovery_tick: AtomicU64,
     slot: Mutex<InFlightSlot<T>>,
     next_operation_id: AtomicU64,
     cancel: watch::Sender<bool>,
@@ -243,6 +322,13 @@ enum TickKind {
     Full,
 }
 
+struct MembershipUpdate<Id> {
+    full_refresh: bool,
+    item_ids: HashSet<Id>,
+    tombstones: HashSet<Id>,
+    recovered_ids: HashSet<Id>,
+}
+
 enum UpdateFullAction<T: DeltaSyncCacheable> {
     AwaitFull(SharedUpdate<T>),
     AwaitDeltaThenFull {
@@ -260,6 +346,34 @@ type UpdateFuture<T> = LocalBoxFuture<'static, SharedOutput<T>>;
 
 type SharedUpdate<T> = Shared<UpdateFuture<T>>;
 
+impl<Id> MembershipUpdate<Id>
+where
+    Id: Eq + std::hash::Hash + Clone,
+{
+    fn from_delta<T>(
+        kind: TickKind,
+        delta: &DeltaResult<T, T::Watermark>,
+        recovery_snapshot: &RecoverySnapshot<T::Id>,
+    ) -> MembershipUpdate<T::Id>
+    where
+        T: DeltaSyncCacheable<Id = Id>,
+    {
+        let tombstones = delta.tombstones.clone();
+        let item_ids = delta
+            .items
+            .iter()
+            .map(|item| item.id())
+            .filter(|id| !tombstones.contains(id))
+            .collect();
+        MembershipUpdate {
+            full_refresh: matches!(kind, TickKind::Full),
+            item_ids,
+            tombstones,
+            recovered_ids: recovery_snapshot.ids(),
+        }
+    }
+}
+
 impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
     pub(crate) fn spawn<F>(punnu: Punnu<T>, interval: Duration, fetcher: F) -> DeltaRefreshHandle<T>
     where
@@ -272,9 +386,18 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let subscription = Arc::new(Self {
+            recovery: Mutex::new(RecoverySet::new(punnu.config().lru_size)),
             punnu,
             fetcher: Arc::new(fetcher),
             last_watermark: Mutex::new(None),
+            membership: Mutex::new(HashSet::new()),
+            eviction_recovery_enabled: AtomicBool::new(false),
+            force_full_generation: AtomicU64::new(0),
+            satisfied_force_full_generation: AtomicU64::new(0),
+            lru_warning_issued: AtomicBool::new(false),
+            periodic_full_every: AtomicUsize::new(0),
+            periodic_full_progress: AtomicUsize::new(0),
+            recovery_tick: AtomicU64::new(1),
             slot: Mutex::new(InFlightSlot::Empty),
             next_operation_id: AtomicU64::new(1),
             cancel: cancel_tx,
@@ -282,6 +405,12 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
 
         let loop_subscription = subscription.clone();
         let executor = subscription.punnu.executor();
+        let events_subscription = subscription.clone();
+        let events = subscription.punnu.events();
+        let event_cancel_rx = cancel_rx.clone();
+        executor.spawn(box_spawn_future(async move {
+            run_delta_recovery_event_listener(events_subscription, events, event_cancel_rx).await;
+        }));
         executor.spawn(box_spawn_future(async move {
             run_periodic_delta_refresh(loop_subscription, interval, cancel_rx).await;
         }));
@@ -292,8 +421,23 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
     }
 
     async fn update(subscription: Arc<Self>) -> Result<UpdateResult<T>, FetchError> {
-        let shared = subscription.shared_for_delta();
-        shared.await.map_err(FetchError::from)
+        let (_, result) = Self::update_with_kind(subscription).await?;
+        Ok(result)
+    }
+
+    async fn update_with_kind(
+        subscription: Arc<Self>,
+    ) -> Result<(TickKind, UpdateResult<T>), FetchError> {
+        if subscription.delta_should_promote_to_full() {
+            return Self::update_full(subscription)
+                .await
+                .map(|result| (TickKind::Full, result));
+        }
+        let (kind, shared) = subscription.shared_for_delta();
+        shared
+            .await
+            .map(|result| (kind, result))
+            .map_err(FetchError::from)
     }
 
     async fn update_full(subscription: Arc<Self>) -> Result<UpdateResult<T>, FetchError> {
@@ -348,7 +492,7 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
         }
     }
 
-    fn shared_for_delta(self: &Arc<Self>) -> SharedUpdate<T> {
+    fn shared_for_delta(self: &Arc<Self>) -> (TickKind, SharedUpdate<T>) {
         let mut slot = self
             .slot
             .lock()
@@ -362,15 +506,21 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
                     shared: shared.clone(),
                     pending_full: None,
                 };
-                shared
+                (TickKind::Delta, shared)
             }
-            InFlightSlot::Delta { shared, .. } | InFlightSlot::Full { shared, .. } => {
-                shared.clone()
-            }
+            InFlightSlot::Delta { shared, .. } => (TickKind::Delta, shared.clone()),
+            InFlightSlot::Full { shared, .. } => (TickKind::Full, shared.clone()),
         }
     }
 
     async fn run_tick(&self, kind: TickKind) -> Result<UpdateResult<T>, FetchError> {
+        let current_tick = self.recovery_tick.fetch_add(1, Ordering::Relaxed);
+        let observed_force_generation = if matches!(kind, TickKind::Full) {
+            self.force_full_generation.load(Ordering::Acquire)
+        } else {
+            0
+        };
+        let (recovery_snapshot, recover_ids) = self.prepare_recovery_query(kind, current_tick);
         let since = match kind {
             TickKind::Delta => self
                 .last_watermark
@@ -380,26 +530,218 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
             TickKind::Full => None,
         };
 
-        let delta = self
-            .fetcher
-            .fetch_delta(DeltaQuery {
-                since,
-                recover_ids: HashSet::new(),
-            })
-            .await?;
+        let fetch = AssertUnwindSafe(self.fetcher.fetch_delta(DeltaQuery { since, recover_ids }))
+            .catch_unwind()
+            .await;
 
-        let (applied, next_watermark) = self.apply_delta_and_observed_watermark(delta);
+        let delta = match fetch {
+            Ok(Ok(delta)) => delta,
+            Ok(Err(err)) => {
+                self.restore_recovery_after_failed(recovery_snapshot, current_tick);
+                return Err(err);
+            }
+            Err(panic_payload) => {
+                self.restore_recovery_after_failed(recovery_snapshot, current_tick);
+                return Err(FetchError::FetcherPanic {
+                    type_name: std::any::type_name::<T>(),
+                    message: panic_message(&panic_payload),
+                });
+            }
+        };
+
+        let membership_update =
+            MembershipUpdate::<T::Id>::from_delta(kind, &delta, &recovery_snapshot);
+        self.prime_membership_for_observed_items(&membership_update);
+        let (applied, next_watermark) =
+            self.apply_delta_and_observed_watermark(delta, &recovery_snapshot);
+        self.queue_missing_observed_items(&membership_update);
         let watermark = self.advance_watermark(next_watermark);
+        self.note_successful_tick(kind, observed_force_generation);
+        self.apply_membership_update(membership_update);
+        self.recovery
+            .lock()
+            .expect("delta refresh recovery lock poisoned")
+            .note_success(recovery_snapshot);
 
         Ok(UpdateResult { applied, watermark })
+    }
+
+    fn prepare_recovery_query(
+        &self,
+        kind: TickKind,
+        current_tick: u64,
+    ) -> (RecoverySnapshot<T::Id>, HashSet<T::Id>) {
+        if !self.eviction_recovery_enabled.load(Ordering::Acquire) {
+            if matches!(kind, TickKind::Full) {
+                self.satisfied_force_full_generation.store(
+                    self.force_full_generation.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+            }
+            return (RecoverySnapshot::empty(), HashSet::new());
+        }
+
+        let mut recovery = self
+            .recovery
+            .lock()
+            .expect("delta refresh recovery lock poisoned");
+        match kind {
+            TickKind::Delta => {
+                let snapshot = recovery.snapshot_eligible(current_tick);
+                let recover_ids = snapshot.ids();
+                (snapshot, recover_ids)
+            }
+            TickKind::Full => (recovery.snapshot_all(), HashSet::new()),
+        }
+    }
+
+    fn restore_recovery_after_failed(&self, snapshot: RecoverySnapshot<T::Id>, current_tick: u64) {
+        self.recovery
+            .lock()
+            .expect("delta refresh recovery lock poisoned")
+            .restore_after_failed(snapshot, current_tick);
+    }
+
+    fn delta_should_promote_to_full(&self) -> bool {
+        if !self.eviction_recovery_enabled.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.force_full_generation.load(Ordering::Acquire)
+            > self.satisfied_force_full_generation.load(Ordering::Acquire)
+        {
+            return true;
+        }
+        self.recovery
+            .lock()
+            .expect("delta refresh recovery lock poisoned")
+            .is_overflowing()
+    }
+
+    fn next_periodic_tick_is_full(&self) -> bool {
+        let every = self.periodic_full_every.load(Ordering::Acquire);
+        every != 0
+            && self
+                .periodic_full_progress
+                .load(Ordering::Acquire)
+                .saturating_add(1)
+                >= every
+    }
+
+    fn note_successful_tick(&self, kind: TickKind, observed_force_generation: u64) {
+        if matches!(kind, TickKind::Full) {
+            self.satisfied_force_full_generation
+                .fetch_max(observed_force_generation, Ordering::AcqRel);
+            if self.periodic_full_every.load(Ordering::Acquire) != 0 {
+                self.periodic_full_progress.store(0, Ordering::Release);
+            }
+        }
+    }
+
+    fn note_successful_scheduled_delta_tick(&self) {
+        let every = self.periodic_full_every.load(Ordering::Acquire);
+        if every == 0 {
+            return;
+        }
+        let next = self
+            .periodic_full_progress
+            .load(Ordering::Acquire)
+            .saturating_add(1)
+            .min(every.saturating_sub(1));
+        self.periodic_full_progress.store(next, Ordering::Release);
+    }
+
+    fn prime_membership_for_observed_items(&self, update: &MembershipUpdate<T::Id>) {
+        if update.item_ids.is_empty() && update.tombstones.is_empty() {
+            return;
+        }
+        let mut membership = self
+            .membership
+            .lock()
+            .expect("delta refresh membership lock poisoned");
+        for id in &update.tombstones {
+            membership.remove(id);
+        }
+        membership.extend(update.item_ids.iter().cloned());
+    }
+
+    fn queue_missing_observed_items(&self, update: &MembershipUpdate<T::Id>) {
+        let missing = update
+            .item_ids
+            .iter()
+            .filter(|id| !self.punnu.contains_unexpired(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            return;
+        }
+        let mut recovery = self
+            .recovery
+            .lock()
+            .expect("delta refresh recovery lock poisoned");
+        for id in missing {
+            recovery.record_eviction(id);
+        }
+    }
+
+    fn apply_membership_update(&self, update: MembershipUpdate<T::Id>) {
+        let mut membership = self
+            .membership
+            .lock()
+            .expect("delta refresh membership lock poisoned");
+        if update.full_refresh {
+            *membership = update.item_ids;
+        } else {
+            for id in update.recovered_ids {
+                if !update.item_ids.contains(&id) && !update.tombstones.contains(&id) {
+                    membership.remove(&id);
+                }
+            }
+            for id in update.tombstones {
+                membership.remove(&id);
+            }
+            membership.extend(update.item_ids);
+        }
+    }
+
+    fn note_lru_eviction(&self, id: T::Id) {
+        if !self.lru_warning_issued.swap(true, Ordering::AcqRel) {
+            tracing::warn!(
+                "Punnu LRU eviction observed while a delta refresh subscription is active; \
+                 consider raising lru_size, enabling eviction recovery, or configuring periodic full refresh"
+            );
+        }
+
+        let owned_by_subscription = self
+            .membership
+            .lock()
+            .expect("delta refresh membership lock poisoned")
+            .contains(&id);
+        if owned_by_subscription {
+            self.recovery
+                .lock()
+                .expect("delta refresh recovery lock poisoned")
+                .record_eviction(id);
+        }
+    }
+
+    fn note_event_lag(&self, skipped: u64) {
+        tracing::warn!(
+            skipped,
+            "delta refresh subscription event stream lagged; forcing next recovery tick to full refresh"
+        );
+        self.force_full_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     fn apply_delta_and_observed_watermark(
         &self,
         delta: DeltaResult<T, T::Watermark>,
+        recovery_snapshot: &RecoverySnapshot<T::Id>,
     ) -> (usize, Option<T::Watermark>) {
         let next_watermark = delta.observed_watermark();
-        let stats = self.punnu.apply_delta(delta.without_high_watermark());
+        let recovered_ids = recovery_snapshot.ids();
+        let stats = self
+            .punnu
+            .apply_delta_recovering(delta.without_high_watermark(), &recovered_ids);
         (stats.applied_items, next_watermark)
     }
 
@@ -529,18 +871,68 @@ async fn run_periodic_delta_refresh<T>(
                 if refresh_cancelled(&cancel) {
                     break;
                 }
-                let shared = subscription.shared_for_delta();
                 tokio::select! {
                     biased;
                     changed = cancel.changed() => {
                         let _ = changed;
                         break;
                     }
-                    result = shared => {
-                        if let Err(err) = result.map_err(FetchError::from) {
+                    result = run_periodic_tick(subscription.clone()) => {
+                        if let Err(err) = result {
                             tracing::warn!(error = %err, "delta refresh failed");
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+async fn run_periodic_tick<T>(
+    subscription: Arc<RefreshSubscription<T>>,
+) -> Result<UpdateResult<T>, FetchError>
+where
+    T: DeltaSyncCacheable,
+{
+    if subscription.next_periodic_tick_is_full() {
+        RefreshSubscription::update_full(subscription).await
+    } else {
+        let (kind, result) = RefreshSubscription::update_with_kind(subscription.clone()).await?;
+        if matches!(kind, TickKind::Delta) {
+            subscription.note_successful_scheduled_delta_tick();
+        }
+        Ok(result)
+    }
+}
+
+async fn run_delta_recovery_event_listener<T>(
+    subscription: Arc<RefreshSubscription<T>>,
+    mut events: broadcast::Receiver<PunnuEvent<T>>,
+    mut cancel: watch::Receiver<bool>,
+) where
+    T: DeltaSyncCacheable,
+{
+    loop {
+        if refresh_cancelled(&cancel) {
+            break;
+        }
+
+        tokio::select! {
+            biased;
+            changed = cancel.changed() => {
+                let _ = changed;
+                break;
+            }
+            event = events.recv() => {
+                match event {
+                    Ok(PunnuEvent::Invalidate { id, reason: EventReason::LruEvict }) => {
+                        subscription.note_lru_eviction(id);
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        subscription.note_event_lag(skipped);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         }
