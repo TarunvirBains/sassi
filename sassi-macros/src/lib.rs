@@ -14,6 +14,9 @@ mod cacheable;
 mod trait_impl;
 
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro2::{Span, TokenStream as TokenStream2};
+use quote::{format_ident, quote};
 
 /// Derive macro for `sassi::Cacheable`.
 ///
@@ -54,4 +57,21 @@ pub fn derive_cacheable(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
     trait_impl::trait_impl(args, input)
+}
+
+fn sassi_path() -> Result<TokenStream2, syn::Error> {
+    let found = crate_name("sassi").map_err(|e| {
+        syn::Error::new(
+            Span::call_site(),
+            format!("sassi macro expansion could not resolve the `sassi` crate: {e}"),
+        )
+    })?;
+
+    Ok(match found {
+        FoundCrate::Itself => quote!(crate),
+        FoundCrate::Name(name) => {
+            let ident = format_ident!("{}", name);
+            quote!(::#ident)
+        }
+    })
 }

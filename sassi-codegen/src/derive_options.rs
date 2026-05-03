@@ -1,13 +1,15 @@
 //! Parsing support for `#[derive(Cacheable)]` helper attributes.
 
 use proc_macro2::Span;
-use syn::{Data, DeriveInput, Fields, LitStr};
+use syn::{Data, DeriveInput, Fields, LitStr, spanned::Spanned};
 
 /// Parsed options from `#[cacheable(...)]` helper attributes.
 #[derive(Debug, Default)]
 pub struct CacheableDeriveOptions {
     /// Optional field that should back `DeltaSyncCacheable::watermark`.
     pub watermark_field: Option<WatermarkField>,
+    /// Optional stable L2 backend keyspace type name.
+    pub type_name: Option<CacheTypeName>,
 }
 
 /// Name and source span for a requested watermark field.
@@ -16,6 +18,15 @@ pub struct WatermarkField {
     /// Field name provided in `#[cacheable(watermark_field = "...")]`.
     pub name: String,
     /// Span of the string literal naming the field.
+    pub span: Span,
+}
+
+/// Stable backend keyspace type name requested by `#[cacheable(type_name = "...")]`.
+#[derive(Debug)]
+pub struct CacheTypeName {
+    /// Application-owned stable cache type name.
+    pub value: String,
+    /// Span of the string literal naming the type.
     pub span: Span,
 }
 
@@ -33,10 +44,25 @@ impl WatermarkField {
     }
 }
 
+impl CacheTypeName {
+    /// Construct a stable cache type-name option from a value and source span.
+    ///
+    /// Downstream macro crates with their own attribute grammar can use this to
+    /// feed [`generate_cacheable_impl`](crate::generate_cacheable_impl)
+    /// without depending on sassi's exact `#[cacheable(...)]` syntax.
+    pub fn new(value: impl Into<String>, span: Span) -> Self {
+        Self {
+            value: value.into(),
+            span,
+        }
+    }
+}
+
 /// Parse `#[cacheable(...)]` helper attributes on a derive input.
 pub fn parse_cacheable_derive_options(
     input: &DeriveInput,
 ) -> Result<CacheableDeriveOptions, syn::Error> {
+    reject_generic_cacheable_input(input)?;
     reject_field_level_cacheable_attrs(input)?;
 
     let mut options = CacheableDeriveOptions::default();
@@ -47,30 +73,60 @@ pub fn parse_cacheable_derive_options(
         }
 
         attr.parse_nested_meta(|meta| {
-            if !meta.path.is_ident("watermark_field") {
-                return Err(meta.error("Cacheable: unsupported #[cacheable(...)] option"));
+            if meta.path.is_ident("watermark_field") {
+                if options.watermark_field.is_some() {
+                    return Err(meta.error("Cacheable: duplicate `watermark_field` option"));
+                }
+
+                let value = meta.value()?;
+                let field: LitStr = value.parse()?;
+                let name = field.value();
+                if name.is_empty() {
+                    return Err(syn::Error::new(
+                        field.span(),
+                        "Cacheable: `watermark_field` cannot be empty",
+                    ));
+                }
+
+                options.watermark_field = Some(WatermarkField::new(name, field.span()));
+                return Ok(());
             }
 
-            if options.watermark_field.is_some() {
-                return Err(meta.error("Cacheable: duplicate `watermark_field` option"));
+            if meta.path.is_ident("type_name") {
+                if options.type_name.is_some() {
+                    return Err(meta.error("Cacheable: duplicate `type_name` option"));
+                }
+
+                let value = meta.value()?;
+                let type_name: LitStr = value.parse()?;
+                let name = type_name.value();
+                if name.is_empty() {
+                    return Err(syn::Error::new(
+                        type_name.span(),
+                        "Cacheable: `type_name` cannot be empty",
+                    ));
+                }
+
+                options.type_name = Some(CacheTypeName::new(name, type_name.span()));
+                return Ok(());
             }
 
-            let value = meta.value()?;
-            let field: LitStr = value.parse()?;
-            let name = field.value();
-            if name.is_empty() {
-                return Err(syn::Error::new(
-                    field.span(),
-                    "Cacheable: `watermark_field` cannot be empty",
-                ));
-            }
-
-            options.watermark_field = Some(WatermarkField::new(name, field.span()));
-            Ok(())
+            Err(meta.error("Cacheable: unsupported #[cacheable(...)] option"))
         })?;
     }
 
     Ok(options)
+}
+
+fn reject_generic_cacheable_input(input: &DeriveInput) -> Result<(), syn::Error> {
+    if input.generics.params.is_empty() && input.generics.where_clause.is_none() {
+        return Ok(());
+    }
+
+    Err(syn::Error::new(
+        input.generics.span(),
+        "Cacheable: generic structs are not supported in v0.1; use a concrete wrapper type",
+    ))
 }
 
 fn reject_field_level_cacheable_attrs(input: &DeriveInput) -> Result<(), syn::Error> {

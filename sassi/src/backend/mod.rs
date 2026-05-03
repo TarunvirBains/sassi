@@ -2,7 +2,7 @@
 //!
 //! A backend is scoped by [`BackendKeyspace`], which Sassi constructs
 //! from [`crate::punnu::PunnuConfig::namespace`] and
-//! `std::any::type_name::<T>()`. Backend implementations must treat
+//! [`crate::Cacheable::cache_type_name`]. Backend implementations must treat
 //! that keyspace as the only namespace/type source of truth.
 
 mod file;
@@ -27,7 +27,7 @@ pub type BackendInvalidationStream<Id> =
 /// Namespace/type scope for backend storage and invalidation channels.
 ///
 /// `namespace` comes from [`crate::punnu::PunnuConfig::namespace`].
-/// `type_name` is `std::any::type_name::<T>()` for the cached type.
+/// `type_name` is [`crate::Cacheable::cache_type_name`] for the cached type.
 /// Backends should encode both components before putting them in
 /// filesystem paths, Redis keys, channels, or other backend-native
 /// identifiers.
@@ -35,7 +35,7 @@ pub type BackendInvalidationStream<Id> =
 pub struct BackendKeyspace {
     /// Optional deployment/application namespace.
     pub namespace: Option<Arc<str>>,
-    /// Cached Rust type name.
+    /// Cached type label from [`crate::Cacheable::cache_type_name`].
     pub type_name: &'static str,
 }
 
@@ -44,7 +44,7 @@ impl BackendKeyspace {
     pub(crate) fn for_type<T: Cacheable>(namespace: Option<&str>) -> Self {
         Self {
             namespace: namespace.map(Arc::from),
-            type_name: std::any::type_name::<T>(),
+            type_name: T::cache_type_name(),
         }
     }
 }
@@ -84,8 +84,12 @@ where
     /// Invalidate one backend entry and publish an id-scoped invalidation if supported.
     async fn invalidate(&self, keyspace: &BackendKeyspace, id: &T::Id) -> Result<(), BackendError>;
 
-    /// Invalidate every backend entry in this keyspace and publish an all-scoped
+    /// Invalidate backend entries in this keyspace and publish an all-scoped
     /// invalidation if supported.
+    ///
+    /// Backend implementations may need to scan or batch-delete native storage.
+    /// Unless an implementation documents stronger guarantees, this is not a
+    /// quiescence barrier against concurrent writers in the same keyspace.
     async fn invalidate_all(&self, keyspace: &BackendKeyspace) -> Result<(), BackendError>;
 
     /// Subscribe to backend invalidations for one keyspace.

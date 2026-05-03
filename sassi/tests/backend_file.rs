@@ -92,6 +92,62 @@ async fn file_backend_ttl_expiry_removes_expired_entry() {
 }
 
 #[tokio::test]
+async fn file_backend_ignores_stale_legacy_ttl_sidecar_for_fresh_inline_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path());
+    let value = E {
+        id: 10,
+        label: "fresh".into(),
+    };
+
+    backend
+        .put(&keyspace(None), &value.id(), &value, None)
+        .await
+        .unwrap();
+
+    let data_path = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flat_map(|entry| walkdir(entry.unwrap().path()))
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .expect("data file should exist");
+    std::fs::write(data_path.with_extension("ttl"), b"0").unwrap();
+
+    let loaded = backend.get(&keyspace(None), &10).await.unwrap();
+
+    assert_eq!(loaded, Some(value));
+    assert!(
+        !data_path.with_extension("ttl").exists(),
+        "stale legacy ttl sidecar should be removed after the fresh value is read"
+    );
+}
+
+#[tokio::test]
+async fn file_backend_reads_fresh_inline_value_when_stale_sidecar_cleanup_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path());
+    let value = E {
+        id: 11,
+        label: "fresh".into(),
+    };
+
+    backend
+        .put(&keyspace(None), &value.id(), &value, None)
+        .await
+        .unwrap();
+
+    let data_path = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flat_map(|entry| walkdir(entry.unwrap().path()))
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .expect("data file should exist");
+    std::fs::create_dir(data_path.with_extension("ttl")).unwrap();
+
+    let loaded = backend.get(&keyspace(None), &11).await.unwrap();
+
+    assert_eq!(loaded, Some(value));
+}
+
+#[tokio::test]
 async fn file_backend_namespaces_do_not_collide() {
     let dir = tempfile::tempdir().unwrap();
     let backend = FileBackend::new(dir.path());

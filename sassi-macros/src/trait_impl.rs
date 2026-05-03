@@ -23,6 +23,8 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{ItemImpl, parse_macro_input, spanned::Spanned};
 
+use crate::sassi_path;
+
 /// Expand `#[sassi::trait_impl]` on a concrete trait impl.
 ///
 /// The original impl is emitted unchanged. A `inventory::submit!`
@@ -81,13 +83,18 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    let sassi_path = match sassi_path() {
+        Ok(path) => path,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
     let model_ty = &item.self_ty;
     let expanded = quote! {
         #item
 
         const _: () = {
             fn __sassi_collect_trait_impl(
-                sassi: &::sassi::Sassi,
+                sassi: &#sassi_path::Sassi,
             ) -> ::std::boxed::Box<dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync> {
                 let values: ::std::vec::Vec<::std::sync::Arc<dyn #trait_path>> =
                     match sassi.pool::<#model_ty>() {
@@ -102,8 +109,8 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
                 ::std::boxed::Box::new(values)
             }
 
-            ::sassi::__private::inventory::submit! {
-                ::sassi::__private::TraitImplEntry {
+            #sassi_path::__private::inventory::submit! {
+                #sassi_path::__private::TraitImplEntry {
                     trait_type_id: ::std::any::TypeId::of::<dyn #trait_path>(),
                     model_type_id: ::std::any::TypeId::of::<#model_ty>(),
                     collect_fn: __sassi_collect_trait_impl,

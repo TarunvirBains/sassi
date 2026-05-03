@@ -70,6 +70,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
+proc-macro-crate = "3.5.0"
 
 # Typed distributed plugin registration. Used by sassi's
 # `#[sassi::trait_impl]` macro to register `(model type, trait)` pairs

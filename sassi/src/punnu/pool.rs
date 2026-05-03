@@ -41,7 +41,7 @@ use crate::time::Instant;
 use crate::watermark::DeltaSyncCacheable;
 use arc_swap::ArcSwap;
 #[cfg(feature = "serde")]
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 #[cfg(feature = "serde")]
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(feature = "serde")]
@@ -65,6 +65,9 @@ type AfterPublishHook = Arc<dyn Fn() + Send + Sync + 'static>;
 type BeforeL1StoreHook = Arc<dyn Fn() + Send + Sync + 'static>;
 #[cfg(test)]
 type BeforeFetchL1CommitHook = Arc<dyn Fn() + Send + Sync + 'static>;
+
+#[cfg(feature = "serde")]
+const BACKEND_LISTENER_OWNER_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 #[cfg(all(
     test,
@@ -436,10 +439,12 @@ impl<T: Cacheable> Punnu<T> {
         reason: InvalidationReason,
     ) -> Result<(), BackendError> {
         let reason = EventReason::from(reason);
+
         #[cfg(feature = "serde")]
         if self.strict_backend_errors_enabled() {
+            let _guard = self.acquire_backend_strict_insert(id).await;
             self.invalidate_backend_strict(id).await?;
-            self.invalidate_internal(id, reason).await;
+            self.invalidate_l1(id, reason);
             return Ok(());
         }
 
@@ -461,13 +466,25 @@ impl<T: Cacheable> Punnu<T> {
     /// would defeat the public-vs-internal split that motivates the
     /// two enums.
     pub(crate) async fn invalidate_internal(&self, id: &T::Id, reason: EventReason) {
-        let id = id.clone();
-        self.with_write_coordinator(|state| self.prepare_invalidate(state, &id, reason));
+        #[cfg(feature = "serde")]
+        let _guard = if self.strict_backend_errors_enabled() {
+            Some(self.acquire_backend_strict_insert(id).await)
+        } else {
+            None
+        };
+
+        self.invalidate_l1(id, reason);
     }
 
     #[cfg(feature = "serde")]
     pub(crate) async fn invalidate_all_internal(&self, reason: EventReason) {
+        self.wait_for_backend_strict_inserts_empty().await;
         self.with_write_coordinator(|state| self.prepare_invalidate_all(state, reason));
+    }
+
+    fn invalidate_l1(&self, id: &T::Id, reason: EventReason) {
+        let id = id.clone();
+        self.with_write_coordinator(|state| self.prepare_invalidate(state, &id, reason));
     }
 
     /// Async lookup that checks L1 first, then the configured L2 backend.
@@ -528,6 +545,12 @@ impl<T: Cacheable> Punnu<T> {
     /// counts previously visible resident ids removed by sampled-LRU;
     /// transient delta candidates dropped before publication are not
     /// observable and are not counted.
+    ///
+    /// If a strict L2 write-through insert is in flight for any id in
+    /// the batch, the batch is left unapplied and
+    /// [`DeltaApplyStats::backend_reserved_skips`] reports the number
+    /// of blocked ids. Retry the delta later if the source is
+    /// authoritative.
     pub fn apply_delta(&self, delta: DeltaResult<T>) -> DeltaApplyStats {
         self.with_write_coordinator(|state| self.prepare_apply_delta(state, delta))
     }
@@ -1410,6 +1433,22 @@ impl<T: Cacheable> Punnu<T> {
             }
         }
 
+        #[cfg(feature = "serde")]
+        {
+            let reserved_skips = normalized_items
+                .keys()
+                .filter(|id| self.backend_strict_insert_reserved(id))
+                .count()
+                + tombstones
+                    .iter()
+                    .filter(|id| self.backend_strict_insert_reserved(id))
+                    .count();
+            if reserved_skips > 0 {
+                stats.backend_reserved_skips = reserved_skips;
+                return PreparedWrite::new(original_state, Vec::new(), stats);
+            }
+        }
+
         let mut accepted_items = BTreeMap::new();
 
         for (id, value) in normalized_items {
@@ -1469,19 +1508,31 @@ impl<T: Cacheable> Punnu<T> {
         PreparedWrite::new(state, events, stats)
     }
 
-    fn apply_refresh_items(&self, items: Vec<T>, mode: RefreshMode) {
+    fn apply_refresh_items(&self, items: Vec<T>, mode: RefreshMode) -> bool {
         self.with_write_coordinator(|state| match mode {
             RefreshMode::UpsertOnly => self.prepare_refresh_upsert(state, items),
             RefreshMode::Replace => self.prepare_refresh_replace(state, items),
-        });
+        })
     }
 
-    fn prepare_refresh_upsert(&self, mut state: L1State<T>, items: Vec<T>) -> PreparedWrite<T, ()> {
+    fn prepare_refresh_upsert(
+        &self,
+        mut state: L1State<T>,
+        items: Vec<T>,
+    ) -> PreparedWrite<T, bool> {
         let now = self.inner.executor.now();
         let original_state = state.clone();
         let mut normalized_items = BTreeMap::new();
         for value in items {
             normalized_items.insert(value.id(), value);
+        }
+
+        #[cfg(feature = "serde")]
+        if normalized_items
+            .keys()
+            .any(|id| self.backend_strict_insert_reserved(id))
+        {
+            return PreparedWrite::new(original_state, Vec::new(), true);
         }
 
         let mut accepted_items = BTreeMap::new();
@@ -1513,14 +1564,14 @@ impl<T: Cacheable> Punnu<T> {
             events.push(self.refresh_write_event(old, value));
         }
 
-        PreparedWrite::new(state, events, ())
+        PreparedWrite::new(state, events, false)
     }
 
     fn prepare_refresh_replace(
         &self,
         mut state: L1State<T>,
         items: Vec<T>,
-    ) -> PreparedWrite<T, ()> {
+    ) -> PreparedWrite<T, bool> {
         let now = self.inner.executor.now();
         let original_state = state.clone();
         let mut normalized_items = BTreeMap::new();
@@ -1528,9 +1579,21 @@ impl<T: Cacheable> Punnu<T> {
             normalized_items.insert(value.id(), value);
         }
 
+        #[cfg(feature = "serde")]
+        if normalized_items
+            .keys()
+            .any(|id| self.backend_strict_insert_reserved(id))
+        {
+            return PreparedWrite::new(original_state, Vec::new(), true);
+        }
+
         let mut events = Vec::new();
         let resident_ids = state.keys.iter().cloned().collect::<Vec<_>>();
         for id in resident_ids {
+            #[cfg(feature = "serde")]
+            if self.backend_strict_insert_reserved(&id) {
+                return PreparedWrite::new(original_state, Vec::new(), true);
+            }
             if normalized_items.contains_key(&id) {
                 continue;
             }
@@ -1574,7 +1637,7 @@ impl<T: Cacheable> Punnu<T> {
             events.push(self.refresh_write_event(old, value));
         }
 
-        PreparedWrite::new(state, events, ())
+        PreparedWrite::new(state, events, false)
     }
 
     fn refresh_write_event(&self, old: Option<Arc<T>>, value: Arc<T>) -> PunnuEvent<T> {
@@ -1858,6 +1921,23 @@ impl<T: Cacheable> Punnu<T> {
             .lock()
             .expect("Punnu backend strict-insert table lock poisoned")
             .contains(id)
+    }
+
+    #[cfg(feature = "serde")]
+    pub(crate) async fn wait_for_backend_strict_inserts_empty(&self) {
+        loop {
+            let notified = self.inner.backend_strict_insert_released.notified();
+            if self
+                .inner
+                .backend_strict_insert_ids
+                .lock()
+                .expect("Punnu backend strict-insert table lock poisoned")
+                .is_empty()
+            {
+                return;
+            }
+            notified.await;
+        }
     }
 
     #[cfg(feature = "serde")]
@@ -2217,7 +2297,14 @@ where
     let Some(inner) = weak.upgrade() else {
         return Err(refresh_task_stopped_error());
     };
-    Punnu { inner }.apply_refresh_items(items, mode);
+    let punnu = Punnu { inner };
+    #[cfg(feature = "serde")]
+    punnu.wait_for_backend_strict_inserts_empty().await;
+    if punnu.apply_refresh_items(items, mode) {
+        return Err(FetchError::Serialization(
+            "refresh deferred because a strict backend insert reserved one of its ids".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -2288,8 +2375,8 @@ impl<T: Cacheable> PunnuBuilder<T> {
     /// Attach an L2 cache backend.
     ///
     /// The backend receives keyspaces derived from this Punnu's
-    /// [`PunnuConfig::namespace`] and cached Rust type. It must not use
-    /// a separate namespace source.
+    /// [`PunnuConfig::namespace`] and [`Cacheable::cache_type_name`]. It must
+    /// not use a separate namespace source.
     #[cfg(feature = "serde")]
     pub fn backend<B>(mut self, backend: B) -> Self
     where
@@ -2520,9 +2607,30 @@ fn spawn_backend_listener_if_configured<T: Cacheable>(inner: &Arc<PunnuInner<T>>
     };
     let keyspace = BackendKeyspace::for_type::<T>(inner.config.namespace.as_deref());
     let weak = Arc::downgrade(inner);
-    inner.executor.spawn(Box::pin(async move {
+    let executor = inner.executor.clone();
+    let exec_for_loop = executor.clone();
+    executor.spawn(Box::pin(async move {
         let mut stream = backend.invalidation_stream(keyspace);
-        while let Some(message) = stream.next().await {
+        loop {
+            let next_message = stream.next().fuse();
+            let owner_check = exec_for_loop
+                .sleep(BACKEND_LISTENER_OWNER_CHECK_INTERVAL)
+                .fuse();
+            futures::pin_mut!(next_message, owner_check);
+
+            let message = futures::select_biased! {
+                message = next_message => message,
+                () = owner_check => {
+                    if weak.upgrade().is_none() {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            let Some(message) = message else {
+                break;
+            };
             let Some(inner) = weak.upgrade() else {
                 break;
             };

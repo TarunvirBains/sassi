@@ -6,8 +6,9 @@
 //! Proc-macro crates can't depend on each other directly, but they can
 //! share a regular library crate. `sassi-codegen` is that library: it
 //! emits `TokenStream`s for `Cacheable` derive output (the companion
-//! `{Name}Fields` struct, the `Cacheable` impl, the `T::fields()`
-//! constructor, and optional `DeltaSyncCacheable` impls). Each entry
+//! `{Name}Fields` struct, the `Cacheable` impl, stable backend type-name
+//! support, the `T::fields()` constructor, and optional `DeltaSyncCacheable`
+//! impls). Each entry
 //! point takes a `sassi_path: &TokenStream` parameter so the caller can
 //! target whatever path prefix the end-user crate exposes (`::sassi`
 //! from `sassi-macros`, `::djogi::cache` from a future
@@ -30,5 +31,7 @@ mod derive_options;
 mod fields_struct;
 
 pub use cacheable_impl::{generate_cacheable_impl, generate_delta_sync_cacheable_impl};
-pub use derive_options::{CacheableDeriveOptions, WatermarkField, parse_cacheable_derive_options};
+pub use derive_options::{
+    CacheTypeName, CacheableDeriveOptions, WatermarkField, parse_cacheable_derive_options,
+};
 pub use fields_struct::generate_fields_struct;

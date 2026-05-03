@@ -14,6 +14,12 @@ struct Item {
     on_sale: bool,
 }
 
+#[derive(Cacheable, Debug, Clone)]
+#[cacheable(type_name = "sassi.test.StableDerivedItem")]
+struct StableDerivedItem {
+    id: i64,
+}
+
 #[test]
 fn derive_emits_cacheable_impl() {
     let item = Item {
@@ -24,6 +30,37 @@ fn derive_emits_cacheable_impl() {
     };
     // `Cacheable::id` is reachable via the trait method.
     assert_eq!(<Item as Cacheable>::id(&item), 42);
+}
+
+#[test]
+fn derive_can_emit_stable_backend_type_name() {
+    assert_eq!(
+        <StableDerivedItem as Cacheable>::cache_type_name(),
+        "sassi.test.StableDerivedItem"
+    );
+}
+
+fn first_local_row_type_name() -> &'static str {
+    #[derive(Cacheable, Debug, Clone)]
+    struct Row {
+        id: i64,
+    }
+
+    <Row as Cacheable>::cache_type_name()
+}
+
+fn second_local_row_type_name() -> &'static str {
+    #[derive(Cacheable, Debug, Clone)]
+    struct Row {
+        id: i64,
+    }
+
+    <Row as Cacheable>::cache_type_name()
+}
+
+#[test]
+fn derive_default_cache_type_name_distinguishes_local_same_named_structs() {
+    assert_ne!(first_local_row_type_name(), second_local_row_type_name());
 }
 
 #[test]

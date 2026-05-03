@@ -1,9 +1,10 @@
 # Backends And Runtimes
 
 Sassi can be used as an in-process cache with no L2 backend. It can also write
-through to an L2 backend when persistence or cross-process invalidation is worth
-the extra moving parts. Runtime features control only the background work Sassi
-needs to spawn: sweep tasks, refresh loops, and backend invalidation listeners.
+through to an L2 backend when durability or explicit cross-process coordination is
+worth the extra moving parts. Runtime features control only the background work
+Sassi needs to spawn: sweep tasks, refresh loops, and backend invalidation
+listeners.
 
 ## L1 And L2
 
@@ -12,9 +13,36 @@ cheap and local. Writes publish new immutable snapshots and may evict by TTL,
 LRU, or explicit invalidation.
 
 L2 is optional. When attached, it implements `CacheBackend<T>` and receives a
-`BackendKeyspace` derived from `PunnuConfig::namespace` plus the Rust type name.
-That keyspace is the backend boundary. It does not change the fact that L1 is
-one identity map per `Punnu<T>` instance.
+`BackendKeyspace` derived from `PunnuConfig::namespace` plus
+`Cacheable::cache_type_name()`. That keyspace is the backend boundary. It does
+not change the fact that L1 is one identity map per `Punnu<T>` instance.
+
+L2 can be a durable/shared storage boundary, not automatic write coherence. L2
+`put` updates are shared only within the selected backend implementation, while
+each process maintains its own L1 state. Cross-process visibility depends on
+explicit invalidation and refresh behavior.
+
+For durable or shared L2 data, give cached types an application-owned stable
+type name:
+
+```rust
+#[derive(sassi::Cacheable, Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[cacheable(type_name = "myapp.User")]
+struct User {
+    id: i64,
+    name: String,
+}
+```
+
+Without an explicit type name, derived and hand-written impls default to Rust's
+type path. That is convenient for local caches, tests, and examples, but it is
+not a durable schema identifier: a module move or rename changes the backend
+keyspace.
+
+Treat explicit type names like durable schema identifiers: they should be unique
+within a namespace and reused only when the new Rust type can read the same wire
+payloads for the same ids. Reusing a name for incompatible shapes intentionally
+points two types at the same L2 keys.
 
 L1-only is a valid deployment. For many services, Sassi is valuable as a typed
 local resident cache even when all durable truth stays in a database or API.
@@ -26,7 +54,8 @@ With the `serde` feature enabled, the core crate includes:
 - `MemoryBackend`: an in-memory L2 implementation useful for tests and local
   wiring of the backend path.
 - `FileBackend`: a filesystem-backed L2 implementation that stores Sassi wire
-  envelopes plus TTL sidecars.
+  envelopes with inline TTL metadata. It still understands older TTL sidecars
+  for compatibility with earlier alpha builds.
 
 Example:
 
@@ -57,12 +86,32 @@ included in the default feature set.
 ## Redis Companion Crate
 
 Redis lives outside the core crate in `sassi-cache-redis`. The companion crate
-provides `RedisBackend<T>` for `CacheBackend<T>` with Redis storage and pub/sub
-invalidation.
+provides `RedisBackend<T>` for `CacheBackend<T>` with shared Redis storage and
+an explicit invalidation pub/sub stream.
 
 The backend carries no independent namespace. Keys and channels are derived
 from the `BackendKeyspace` Sassi passes in, so `PunnuConfig::namespace` remains
 the single source of backend keyspace separation.
+
+`put` updates Redis values and key index entries, but it does not publish
+invalidation events. Cross-process visibility for those writes depends on
+publishers calling `invalidate`/`invalidate_all` (or another explicit
+invalidation strategy) on the write path, or on applications designing reads to
+tolerate stale in-process entries.
+
+`RedisBackend` keeps a per-keyspace index of keys written through the backend,
+so `invalidate_all` walks Sassi-managed keys for that namespace/type rather than
+scanning an entire shared Redis database. Redis Lua scripts keep value/index
+mutations coupled, and all keys for a namespace/type use one Redis Cluster hash
+tag so multi-key scripts stay in one slot. TTL-backed index entries expire with
+the latest TTL-only data key for that keyspace, and ordinary backend operations
+also prune stale index members. In mixed persistent/TTL keyspaces, reads prune
+expired TTL members even when a persistent member keeps the index key alive.
+
+`invalidate_all` is still not a quiescence barrier: a concurrent writer in the
+same keyspace can publish after the current drain observes an empty index.
+Applications that need a global write barrier should coordinate writes outside
+Sassi or use a backend design with generation tokens.
 
 ```toml
 [dependencies]

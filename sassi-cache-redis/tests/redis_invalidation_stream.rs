@@ -83,6 +83,25 @@ fn keyspace<T: Cacheable>(namespace: String) -> BackendKeyspace {
     }
 }
 
+fn redis_key_prefix(keyspace: &BackendKeyspace) -> String {
+    let namespace = match &keyspace.namespace {
+        Some(namespace) => format!("ns_{}", encode_hex(namespace.as_bytes())),
+        None => "ns_none".to_owned(),
+    };
+    let type_part = format!("ty_{}", encode_hex(keyspace.type_name.as_bytes()));
+    format!("sassi:{{{namespace}:{type_part}}}")
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 struct FakePubSubServer {
     addr: SocketAddr,
     handle: thread::JoinHandle<io::Result<()>>,
@@ -488,4 +507,250 @@ async fn redis_invalidate_all_is_type_scoped() {
         f_backend.get(&f_keyspace, &1).await.unwrap().unwrap().label,
         "keep"
     );
+}
+
+#[tokio::test]
+async fn redis_invalidate_all_uses_backend_key_index_not_global_scan_match() {
+    let Some(client) = redis_client() else {
+        eprintln!("skipping redis test because REDIS_URL is not set");
+        return;
+    };
+    let backend = RedisBackend::<E>::new(client.clone());
+    let keyspace = keyspace::<E>(namespace("index-scan"));
+
+    backend
+        .put(
+            &keyspace,
+            &1,
+            &E {
+                id: 1,
+                label: "indexed".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let fake_matching_key = format!("{}:id_unindexed", redis_key_prefix(&keyspace));
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    redis::cmd("SET")
+        .arg(&fake_matching_key)
+        .arg("not managed by RedisBackend")
+        .query_async::<()>(&mut conn)
+        .await
+        .unwrap();
+
+    backend.invalidate_all(&keyspace).await.unwrap();
+
+    assert_eq!(backend.get(&keyspace, &1).await.unwrap(), None);
+    let still_present: Option<String> = redis::cmd("GET")
+        .arg(&fake_matching_key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        still_present.as_deref(),
+        Some("not managed by RedisBackend")
+    );
+    redis::cmd("DEL")
+        .arg(&fake_matching_key)
+        .query_async::<()>(&mut conn)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn redis_invalidate_all_drains_large_key_index_without_scan_mutation_gaps() {
+    let Some(client) = redis_client() else {
+        eprintln!("skipping redis test because REDIS_URL is not set");
+        return;
+    };
+    let backend = RedisBackend::<E>::new(client.clone());
+    let keyspace = keyspace::<E>(namespace("large-index-drain"));
+
+    for id in 0..1_200_i64 {
+        backend
+            .put(
+                &keyspace,
+                &id,
+                &E {
+                    id,
+                    label: "indexed".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    backend.invalidate_all(&keyspace).await.unwrap();
+
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let key_index = format!("{}:keys", redis_key_prefix(&keyspace));
+    let indexed_count: usize = redis::cmd("ZCARD")
+        .arg(&key_index)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(indexed_count, 0);
+
+    for id in [0_i64, 499, 500, 999, 1_199] {
+        assert_eq!(backend.get(&keyspace, &id).await.unwrap(), None);
+    }
+}
+
+#[tokio::test]
+async fn redis_ttl_key_index_expires_after_last_ttl_entry_expires() {
+    let Some(client) = redis_client() else {
+        eprintln!("skipping redis test because REDIS_URL is not set");
+        return;
+    };
+    let backend = RedisBackend::<E>::new(client.clone());
+    let keyspace = keyspace::<E>(namespace("ttl-index-expiry"));
+
+    backend
+        .put(
+            &keyspace,
+            &1,
+            &E {
+                id: 1,
+                label: "short".into(),
+            },
+            Some(Duration::from_millis(25)),
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(backend.get(&keyspace, &1).await.unwrap(), None);
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let key_index = format!("{}:keys", redis_key_prefix(&keyspace));
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(&key_index)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        !exists,
+        "TTL-only key index should expire with its last data key"
+    );
+}
+
+#[tokio::test]
+async fn redis_get_prunes_expired_ttl_members_when_persistent_index_keeps_key_alive() {
+    let Some(client) = redis_client() else {
+        eprintln!("skipping redis test because REDIS_URL is not set");
+        return;
+    };
+    let backend = RedisBackend::<E>::new(client.clone());
+    let keyspace = keyspace::<E>(namespace("ttl-index-prune-on-get"));
+
+    backend
+        .put(
+            &keyspace,
+            &0,
+            &E {
+                id: 0,
+                label: "persistent".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    for id in 1..=3_i64 {
+        backend
+            .put(
+                &keyspace,
+                &id,
+                &E {
+                    id,
+                    label: "short".into(),
+                },
+                Some(Duration::from_millis(25)),
+            )
+            .await
+            .unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        backend.get(&keyspace, &0).await.unwrap().unwrap().label,
+        "persistent"
+    );
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let key_index = format!("{}:keys", redis_key_prefix(&keyspace));
+    let indexed_count: usize = redis::cmd("ZCARD")
+        .arg(&key_index)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        indexed_count, 1,
+        "read path should prune expired TTL-only index members even when a \
+         persistent member keeps the index key alive"
+    );
+}
+
+#[tokio::test]
+async fn redis_duration_max_ttl_stores_persistent_value() {
+    let Some(client) = redis_client() else {
+        eprintln!("skipping redis test because REDIS_URL is not set");
+        return;
+    };
+    let backend = RedisBackend::<E>::new(client.clone());
+    let keyspace = keyspace::<E>(namespace("ttl-duration-max"));
+
+    backend
+        .put(
+            &keyspace,
+            &1,
+            &E {
+                id: 1,
+                label: "persistent".into(),
+            },
+            Some(Duration::MAX),
+        )
+        .await
+        .unwrap();
+
+    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let key = format!("{}:id_31", redis_key_prefix(&keyspace));
+    let ttl_ms: i64 = redis::cmd("PTTL")
+        .arg(&key)
+        .query_async(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        ttl_ms, -1,
+        "Duration::MAX should map to persistent Redis storage"
+    );
+    assert_eq!(
+        backend.get(&keyspace, &1).await.unwrap().unwrap().label,
+        "persistent"
+    );
+}
+
+#[tokio::test]
+async fn redis_sub_millisecond_ttl_rounds_up_instead_of_erroring() {
+    let Some(client) = redis_client() else {
+        eprintln!("skipping redis test because REDIS_URL is not set");
+        return;
+    };
+    let backend = RedisBackend::<E>::new(client.clone());
+    let keyspace = keyspace::<E>(namespace("ttl-sub-ms"));
+
+    backend
+        .put(
+            &keyspace,
+            &1,
+            &E {
+                id: 1,
+                label: "short".into(),
+            },
+            Some(Duration::from_nanos(1)),
+        )
+        .await
+        .unwrap();
 }

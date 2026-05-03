@@ -17,6 +17,12 @@
 //! aggregates should use wrapper structs rather than sentinel values, and
 //! tenant/substrate identity should live in the type, id, wrapper, fetcher, or
 //! caller-owned pool selection logic that actually enforces that boundary.
+//!
+//! When a `Punnu<T>` has an L2 backend, `T::cache_type_name()` contributes to
+//! the backend keyspace. Use `#[cacheable(type_name = "...")]` or a manual
+//! override for long-lived/shared L2 data so backend keys do not change when
+//! Rust modules are renamed. The derive default is for local caches, examples,
+//! and tests; it is not a durable schema identifier.
 
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -28,7 +34,25 @@ use std::marker::PhantomData;
 /// them disjoint at compile time. The identity-map invariant ("one `id()` → one
 /// cached entry") then holds per `Punnu` because the type signature fixes the
 /// shape.
+///
+/// `cache_type_name()` is part of the L2 backend keyspace. Derived types can set
+/// it with `#[cacheable(type_name = "myapp.User")]`; hand impls can override the
+/// method directly. Treat explicit names as durable schema identifiers: they
+/// should be unique inside a namespace and reused only for wire-compatible
+/// payloads keyed by the same ids.
 pub trait Cacheable: Send + Sync + 'static {
+    /// Stable type label used by L2 backends for cache-key and invalidation
+    /// keyspaces.
+    ///
+    /// The default preserves lightweight hand-impl ergonomics, but it is tied
+    /// to the Rust type path. Types that store long-lived or shared L2 data
+    /// should override this with an application-owned stable name. The derive
+    /// macro supports `#[cacheable(type_name = "...")]` for that path. Do not
+    /// rely on the default as a durable schema identifier.
+    fn cache_type_name() -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Identity type. Must be cheap to clone (the cache copies it on
     /// every lookup), hashable + equality-comparable for the LRU key,
     /// and orderable so iteration over `Punnu` entries is stable across

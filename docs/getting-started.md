@@ -32,10 +32,16 @@ From a workspace member under `examples/`, use a relative path like
 named `id`. The generated companion fields let predicates inspect the same
 field names and values that Sassi can evaluate in memory.
 
+If a type is stored in a shared or durable L2 backend, add a stable
+`type_name` so backend keys survive Rust module moves. The derive default is
+meant for local caches, tests, and examples rather than long-lived shared
+storage.
+
 ```rust
 use sassi::{Cacheable, MemQ, Punnu};
 
 #[derive(Cacheable, Clone, Debug)]
+#[cacheable(type_name = "myapp.User")]
 struct User {
     id: i64,
     name: String,

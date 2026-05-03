@@ -1,0 +1,5 @@
+error: Cacheable: generic structs are not supported in v0.1; use a concrete wrapper type
+ --> tests/compile_fail/cacheable_generic_struct.rs:7:21
+  |
+7 | struct GenericEntity<T> {
+  |                     ^

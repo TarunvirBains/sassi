@@ -14,13 +14,16 @@ use crate::derive_options::CacheableDeriveOptions;
 /// 1. `type Id` — set to the type of the field literally named `id`.
 /// 2. `type Fields` — set to `{Name}Fields` (companion struct produced
 ///    by [`generate_fields_struct`](super::fields_struct::generate_fields_struct)).
-/// 3. `fn id(&self) -> Self::Id` — clones `self.id`.
-/// 4. `fn fields() -> Self::Fields` — constructs the companion with
+/// 3. `fn cache_type_name()` — returns either `#[cacheable(type_name = "...")]`
+///    or `std::any::type_name::<Self>()`.
+/// 4. `fn id(&self) -> Self::Id` — clones `self.id`.
+/// 5. `fn fields() -> Self::Fields` — constructs the companion with
 ///    every accessor wired to its real extractor. Required as a trait
 ///    method (rather than inherent) so generic code can call
 ///    `T::fields()` without knowing the concrete type.
 pub fn generate_cacheable_impl(
     input: &DeriveInput,
+    options: &CacheableDeriveOptions,
     sassi_path: &TokenStream,
 ) -> Result<TokenStream, syn::Error> {
     let struct_name = &input.ident;
@@ -46,6 +49,12 @@ pub fn generate_cacheable_impl(
 
     let id_field = find_id_field(named, struct_name)?;
     let id_ty = &id_field.ty;
+    let cache_type_name = if let Some(type_name) = &options.type_name {
+        let type_name = syn::LitStr::new(&type_name.value, type_name.span);
+        quote! { #type_name }
+    } else {
+        quote! { std::any::type_name::<Self>() }
+    };
 
     // For each declared field, emit `name: Field::new("name", |s| &s.name)`.
     let field_constructors = named.iter().map(|f| {
@@ -60,6 +69,10 @@ pub fn generate_cacheable_impl(
         impl #sassi_path::Cacheable for #struct_name {
             type Id = #id_ty;
             type Fields = #fields_name;
+
+            fn cache_type_name() -> &'static str {
+                #cache_type_name
+            }
 
             fn id(&self) -> Self::Id {
                 ::core::clone::Clone::clone(&self.id)

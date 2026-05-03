@@ -10,6 +10,12 @@
 //! wrapper types, choose a tenant-qualified id when identity itself is
 //! tenant-qualified, or carry `TenantKey` alongside the pool/reference that
 //! is allowed to serve a request.
+//!
+//! Do not share one `Punnu<T>` across tenants while fetching by an unqualified
+//! primitive id and relying on `TenantKey` beside the handle. L1 storage and
+//! single-flight coalescing are keyed by `T::Id`, not by fetcher context. If two
+//! tenants can both ask for `id = 7`, encode the tenant into `T::Id`, use a
+//! tenant-specific wrapper type, or keep separate pools.
 
 /// Opaque tenant identifier.
 ///
@@ -17,6 +23,10 @@
 /// and no built-in authorization semantics. Sassi never inspects the contents.
 /// Consumers choose the encoding; typical patterns are tenant slugs (`"acme"`),
 /// stable external ids, or environment-prefixed labels (`"prod_acme"`).
+///
+/// `TenantKey` is useful application state, not an automatic cache-key
+/// dimension. Passing it around beside a shared pool does not change
+/// `get_or_fetch` or L1 identity semantics.
 ///
 /// # Construction
 ///

@@ -551,9 +551,17 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
 
         let membership_update =
             MembershipUpdate::<T::Id>::from_delta(kind, &delta, &recovery_snapshot);
+        let membership_before_prime = self.membership_snapshot();
         self.prime_membership_for_observed_items(&membership_update);
         let (applied, next_watermark) =
-            self.apply_delta_and_observed_watermark(delta, &recovery_snapshot);
+            match self.apply_delta_and_observed_watermark(delta, &recovery_snapshot) {
+                Ok(applied) => applied,
+                Err(err) => {
+                    self.restore_membership(membership_before_prime);
+                    self.restore_recovery_after_failed(recovery_snapshot, current_tick);
+                    return Err(err);
+                }
+            };
         self.queue_missing_observed_items(&membership_update);
         let watermark = self.advance_watermark(next_watermark);
         self.note_successful_tick(kind, observed_force_generation);
@@ -664,6 +672,20 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
         membership.extend(update.item_ids.iter().cloned());
     }
 
+    fn membership_snapshot(&self) -> HashSet<T::Id> {
+        self.membership
+            .lock()
+            .expect("delta refresh membership lock poisoned")
+            .clone()
+    }
+
+    fn restore_membership(&self, snapshot: HashSet<T::Id>) {
+        *self
+            .membership
+            .lock()
+            .expect("delta refresh membership lock poisoned") = snapshot;
+    }
+
     fn queue_missing_observed_items(&self, update: &MembershipUpdate<T::Id>) {
         let missing = update
             .item_ids
@@ -736,13 +758,19 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
         &self,
         delta: DeltaResult<T, T::Watermark>,
         recovery_snapshot: &RecoverySnapshot<T::Id>,
-    ) -> (usize, Option<T::Watermark>) {
+    ) -> Result<(usize, Option<T::Watermark>), FetchError> {
         let next_watermark = delta.observed_watermark();
         let recovered_ids = recovery_snapshot.ids();
         let stats = self
             .punnu
             .apply_delta_recovering(delta.without_high_watermark(), &recovered_ids);
-        (stats.applied_items, next_watermark)
+        if stats.backend_reserved_skips > 0 {
+            return Err(FetchError::Serialization(
+                "delta refresh deferred because a strict backend insert reserved one of its ids"
+                    .to_owned(),
+            ));
+        }
+        Ok((stats.applied_items, next_watermark))
     }
 
     fn advance_watermark(&self, next_watermark: Option<T::Watermark>) -> Option<T::Watermark> {

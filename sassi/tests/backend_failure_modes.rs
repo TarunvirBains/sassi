@@ -4,11 +4,15 @@ use async_trait::async_trait;
 use sassi::punnu::config::retry_delay_for_attempt;
 use sassi::{
     BackendError, BackendFailureMode, BackendInvalidation, BackendKeyspace, CacheBackend,
-    Cacheable, EventReason, Field, MemoryBackend, Punnu, PunnuConfig,
+    Cacheable, DeltaPunnuFetcher, DeltaQuery, DeltaResult, DeltaSyncCacheable, EventReason,
+    FetchError, Field, MemoryBackend, Punnu, PunnuConfig, PunnuFetcher, RefreshMode,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::Notify;
 
@@ -39,10 +43,23 @@ impl Cacheable for E {
     }
 }
 
+impl DeltaSyncCacheable for E {
+    type Watermark = i64;
+
+    fn watermark(&self) -> Self::Watermark {
+        self.id
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct F {
     id: i64,
     label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct StableBackendKey {
+    id: i64,
 }
 
 #[derive(Default)]
@@ -64,6 +81,21 @@ impl Cacheable for F {
             id: Field::new("id", |f| &f.id),
         }
     }
+}
+
+impl Cacheable for StableBackendKey {
+    type Id = i64;
+    type Fields = ();
+
+    fn cache_type_name() -> &'static str {
+        "sassi.test.StableBackendKey"
+    }
+
+    fn id(&self) -> Self::Id {
+        self.id
+    }
+
+    fn fields() -> Self::Fields {}
 }
 
 #[tokio::test]
@@ -457,6 +489,289 @@ async fn error_mode_reject_insert_does_not_conflict_with_lazy_fetch_during_backe
 }
 
 #[tokio::test]
+async fn error_mode_invalidate_waits_for_same_id_strict_insert_before_mutating_backend() {
+    let backend = BlockingStrictPutAfterStoreBackend::default();
+    let put_stored = backend.put_stored.clone();
+    let put_release = backend.put_release.clone();
+    let invalidate_entered = backend.invalidate_entered.clone();
+    let stored = backend.stored.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let insert = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 20,
+                    label: "fresh".into(),
+                })
+                .await
+        })
+    };
+    put_stored.notified().await;
+
+    assert_eq!(stored.lock().unwrap().as_deref(), Some("fresh"));
+    assert!(punnu.get(&20).is_none());
+
+    let invalidate = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .invalidate(&20, sassi::InvalidationReason::OnDelete)
+                .await
+        })
+    };
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), invalidate_entered.notified())
+            .await
+            .is_err(),
+        "strict invalidation reached the backend while the same-id insert was still reserved"
+    );
+
+    put_release.notify_one();
+    let inserted = insert.await.unwrap().unwrap();
+    assert_eq!(inserted.label, "fresh");
+    invalidate.await.unwrap().unwrap();
+
+    assert!(punnu.get(&20).is_none());
+    assert_eq!(stored.lock().unwrap().as_deref(), None);
+}
+
+#[tokio::test]
+async fn error_mode_apply_delta_skips_id_reserved_by_strict_insert_in_flight() {
+    let backend = BlockingStrictPutAfterStoreBackend::default();
+    let put_stored = backend.put_stored.clone();
+    let put_release = backend.put_release.clone();
+    let stored = backend.stored.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            on_conflict: sassi::OnConflict::Reject,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let insert = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 21,
+                    label: "strict".into(),
+                })
+                .await
+        })
+    };
+    put_stored.notified().await;
+
+    let stats = punnu.apply_delta(DeltaResult::new(
+        vec![E {
+            id: 21,
+            label: "delta".into(),
+        }],
+        HashSet::new(),
+    ));
+
+    assert_eq!(stats.applied_items, 0);
+    assert_eq!(stats.backend_reserved_skips, 1);
+    assert!(punnu.get(&21).is_none());
+    assert_eq!(stored.lock().unwrap().as_deref(), Some("strict"));
+
+    put_release.notify_one();
+    let inserted = insert.await.unwrap().unwrap();
+    assert_eq!(inserted.label, "strict");
+    assert_eq!(punnu.get(&21).unwrap().label, "strict");
+}
+
+#[tokio::test]
+async fn error_mode_refresh_skips_id_reserved_by_strict_insert_in_flight() {
+    let backend = BlockingStrictPutAfterStoreBackend::default();
+    let put_stored = backend.put_stored.clone();
+    let put_release = backend.put_release.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            on_conflict: sassi::OnConflict::Reject,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let insert = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 22,
+                    label: "strict".into(),
+                })
+                .await
+        })
+    };
+    put_stored.notified().await;
+
+    let refresh = punnu.start_periodic_refresh(
+        Duration::from_secs(3600),
+        StaticRefreshFetcher {
+            items: vec![E {
+                id: 22,
+                label: "refresh".into(),
+            }],
+        },
+        RefreshMode::UpsertOnly,
+    );
+    let refresh_now = refresh.refresh_now();
+    tokio::pin!(refresh_now);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), refresh_now.as_mut())
+            .await
+            .is_err(),
+        "refresh completed while a strict insert still reserved the same id"
+    );
+
+    put_release.notify_one();
+    refresh_now.await.unwrap();
+    refresh.cancel();
+
+    let inserted = insert.await.unwrap().unwrap();
+    assert_eq!(inserted.label, "strict");
+    assert_eq!(punnu.get(&22).unwrap().label, "strict");
+}
+
+#[tokio::test]
+async fn error_mode_delta_refresh_does_not_advance_watermark_for_reserved_tombstone() {
+    let backend = BlockingStrictPutAfterStoreBackend::default();
+    let put_stored = backend.put_stored.clone();
+    let put_release = backend.put_release.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            on_conflict: sassi::OnConflict::Reject,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+    let fetcher = StaticDeltaFetcher {
+        outcomes: Arc::new(Mutex::new(vec![
+            DeltaResult::with_high_watermark(Vec::new(), HashSet::from([23]), 90),
+            DeltaResult::with_high_watermark(Vec::new(), HashSet::from([23]), 90),
+        ])),
+    };
+    let handle = punnu.start_delta_refresh(Duration::from_secs(3600), fetcher);
+
+    let insert = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 23,
+                    label: "strict".into(),
+                })
+                .await
+        })
+    };
+    put_stored.notified().await;
+
+    let err = handle.update().await.unwrap_err();
+    assert!(matches!(err, FetchError::Serialization(_)));
+    assert_eq!(handle.watermark(), None);
+    assert!(punnu.get(&23).is_none());
+
+    put_release.notify_one();
+    let inserted = insert.await.unwrap().unwrap();
+    assert_eq!(inserted.label, "strict");
+
+    let retry = handle.update().await.unwrap();
+    handle.cancel();
+
+    assert_eq!(retry.watermark, Some(90));
+    assert!(punnu.get(&23).is_none());
+}
+
+#[tokio::test]
+async fn error_mode_delta_refresh_rolls_back_membership_when_strict_reservation_defers_apply() {
+    let backend = BlockingStrictPutAfterStoreBackend::default();
+    let put_stored = backend.put_stored.clone();
+    let put_release = backend.put_release.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            on_conflict: sassi::OnConflict::Reject,
+            lru_size: 1,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+    let fetcher = StaticDeltaFetcher {
+        outcomes: Arc::new(Mutex::new(vec![DeltaResult::with_high_watermark(
+            vec![E {
+                id: 24,
+                label: "delta".into(),
+            }],
+            HashSet::new(),
+            100,
+        )])),
+    };
+    let handle = punnu
+        .start_delta_refresh(Duration::from_secs(3600), fetcher)
+        .with_eviction_recovery(true);
+
+    let insert = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 24,
+                    label: "strict".into(),
+                })
+                .await
+        })
+    };
+    put_stored.notified().await;
+
+    let err = handle.update().await.unwrap_err();
+    assert!(matches!(err, FetchError::Serialization(_)));
+    assert_eq!(handle.pending_eviction_recovery_count(), 0);
+
+    put_release.notify_one();
+    insert.await.unwrap().unwrap();
+
+    put_release.notify_one();
+    punnu
+        .insert(E {
+            id: 25,
+            label: "evictor".into(),
+        })
+        .await
+        .unwrap();
+
+    let recovery_was_queued = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if handle.pending_eviction_recovery_count() != 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    handle.cancel();
+
+    assert!(
+        !recovery_was_queued,
+        "failed delta apply should not leave membership that queues later LRU recovery"
+    );
+}
+
+#[tokio::test]
 async fn get_async_rejects_backend_identity_mismatch_without_inserting() {
     let punnu = Punnu::<E>::builder().backend(WrongIdBackend).build();
 
@@ -545,6 +860,22 @@ async fn punnu_backend_keyspace_uses_config_namespace_and_type_name() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].namespace.as_deref(), Some("tenant-a"));
     assert_eq!(seen[0].type_name, std::any::type_name::<E>());
+}
+
+#[tokio::test]
+async fn punnu_backend_keyspace_uses_cacheable_type_name_not_rust_type_path() {
+    let backend = RecordingBackendForStableKey::default();
+    let seen = backend.seen.clone();
+    let punnu = Punnu::<StableBackendKey>::builder()
+        .backend(backend)
+        .build();
+
+    punnu.insert(StableBackendKey { id: 4 }).await.unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].type_name, "sassi.test.StableBackendKey");
+    assert_ne!(seen[0].type_name, std::any::type_name::<StableBackendKey>());
 }
 
 #[tokio::test]
@@ -641,6 +972,24 @@ async fn backend_invalidation_all_is_type_scoped_per_punnu() {
     assert_eq!(punnu_f.get(&1).unwrap().label, "f");
 }
 
+#[tokio::test]
+async fn backend_invalidation_listener_exits_after_owner_drop_even_when_stream_is_idle() {
+    let backend = IdleStreamBackend::default();
+    let subscribed = backend.subscribed.clone();
+    let stream_dropped = backend.stream_dropped.clone();
+    let punnu = Punnu::<E>::builder().backend(backend).build();
+
+    tokio::time::timeout(Duration::from_secs(1), subscribed.notified())
+        .await
+        .expect("listener should subscribe to backend stream");
+
+    drop(punnu);
+
+    tokio::time::timeout(Duration::from_millis(300), stream_dropped.notified())
+        .await
+        .expect("listener should drop an idle backend stream after owner-loss");
+}
+
 fn keyspace<T: Cacheable>(namespace: Option<&str>) -> BackendKeyspace {
     BackendKeyspace {
         namespace: namespace.map(Arc::from),
@@ -650,6 +999,33 @@ fn keyspace<T: Cacheable>(namespace: Option<&str>) -> BackendKeyspace {
 
 fn drain_ready_events(rx: &mut tokio::sync::broadcast::Receiver<sassi::PunnuEvent<E>>) {
     while rx.try_recv().is_ok() {}
+}
+
+struct StaticRefreshFetcher {
+    items: Vec<E>,
+}
+
+#[async_trait]
+impl PunnuFetcher<E> for StaticRefreshFetcher {
+    async fn fetch(&self) -> Result<Vec<E>, FetchError> {
+        Ok(self.items.clone())
+    }
+}
+
+struct StaticDeltaFetcher {
+    outcomes: Arc<Mutex<Vec<DeltaResult<E, i64>>>>,
+}
+
+#[async_trait]
+impl DeltaPunnuFetcher<E> for StaticDeltaFetcher {
+    async fn fetch_delta(&self, _query: DeltaQuery<E>) -> Result<DeltaResult<E, i64>, FetchError> {
+        let mut outcomes = self.outcomes.lock().unwrap();
+        if outcomes.is_empty() {
+            Ok(DeltaResult::new(Vec::new(), HashSet::new()))
+        } else {
+            Ok(outcomes.remove(0))
+        }
+    }
 }
 
 #[derive(Default)]
@@ -838,6 +1214,44 @@ impl CacheBackend<E> for BlockingStrictPutBackend {
     }
 }
 
+#[derive(Default)]
+struct BlockingStrictPutAfterStoreBackend {
+    put_stored: Arc<Notify>,
+    put_release: Arc<Notify>,
+    invalidate_entered: Arc<Notify>,
+    stored: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl CacheBackend<E> for BlockingStrictPutAfterStoreBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<Option<E>, BackendError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        _id: &i64,
+        value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        *self.stored.lock().unwrap() = Some(value.label.clone());
+        self.put_stored.notify_one();
+        self.put_release.notified().await;
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        self.invalidate_entered.notify_one();
+        *self.stored.lock().unwrap() = None;
+        Ok(())
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
 struct WrongIdBackend;
 
 #[async_trait]
@@ -921,6 +1335,41 @@ impl CacheBackend<E> for RecordingBackend {
         keyspace: &BackendKeyspace,
         _id: &i64,
         _value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        self.seen.lock().unwrap().push(keyspace.into());
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct RecordingBackendForStableKey {
+    seen: Arc<Mutex<Vec<BackendKeyspaceSnapshot>>>,
+}
+
+#[async_trait]
+impl CacheBackend<StableBackendKey> for RecordingBackendForStableKey {
+    async fn get(
+        &self,
+        _keyspace: &BackendKeyspace,
+        _id: &i64,
+    ) -> Result<Option<StableBackendKey>, BackendError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        keyspace: &BackendKeyspace,
+        _id: &i64,
+        _value: &StableBackendKey,
         _ttl: Option<Duration>,
     ) -> Result<(), BackendError> {
         self.seen.lock().unwrap().push(keyspace.into());
@@ -1031,5 +1480,64 @@ impl CacheBackend<E> for StreamingBackend {
                 .take()
                 .expect("stream should be subscribed once"),
         )
+    }
+}
+
+#[derive(Default)]
+struct IdleStreamBackend {
+    subscribed: Arc<Notify>,
+    stream_dropped: Arc<Notify>,
+}
+
+struct PendingInvalidationStream {
+    dropped: Arc<Notify>,
+}
+
+impl Drop for PendingInvalidationStream {
+    fn drop(&mut self) {
+        self.dropped.notify_waiters();
+    }
+}
+
+impl futures::Stream for PendingInvalidationStream {
+    type Item = Result<BackendInvalidation<i64>, BackendError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
+#[async_trait]
+impl CacheBackend<E> for IdleStreamBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<Option<E>, BackendError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        _id: &i64,
+        _value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn invalidation_stream(
+        &self,
+        _keyspace: BackendKeyspace,
+    ) -> sassi::BackendInvalidationStream<i64> {
+        self.subscribed.notify_one();
+        Box::pin(PendingInvalidationStream {
+            dropped: self.stream_dropped.clone(),
+        })
     }
 }

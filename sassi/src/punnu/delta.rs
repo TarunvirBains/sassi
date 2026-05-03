@@ -86,4 +86,10 @@ pub struct DeltaApplyStats {
     pub tombstones_evicted: usize,
     /// Number of previously resident IDs removed by sampled-LRU.
     pub lru_evictions: usize,
+    /// Number of delta ids skipped because a strict L2 write-through
+    /// insert had reserved the same id.
+    ///
+    /// A non-zero value means the batch was not applied and should be
+    /// retried later if the delta source is authoritative.
+    pub backend_reserved_skips: usize,
 }

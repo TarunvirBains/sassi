@@ -43,6 +43,8 @@ These are intentionally not release claims for v0.1.0-alpha:
 - Automatic tenant, auth, or row-level-security inference from cached values.
 - A serde-encoded predicate wire protocol.
 - Certified framework adapters.
+- Automatic cross-process coherence for Redis `put`/`insert` writes without explicit
+  invalidation publication.
 
 Those deferrals are not dismissals. They are places where Sassi needs real
 integration pressure before it should freeze an abstraction.

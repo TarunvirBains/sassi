@@ -118,6 +118,9 @@ Redis companion, Bardownski TUI example, benchmark harness, and adopter docs are
 in place, with the usual caution that alpha APIs can still move as real adopters
 put pressure on the design.
 
+The current alpha minimum supported Rust version is 1.95 (set in
+`[workspace.package].rust-version`).
+
 Adopter feedback is welcome. If Sassi looks useful but a workflow is unclear,
 an API feels awkward, or an integration path is missing, please
 [open a GitHub issue](https://github.com/TarunvirBains/sassi/issues). Early
