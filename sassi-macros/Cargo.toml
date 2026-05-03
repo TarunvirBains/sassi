@@ -9,6 +9,8 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+keywords = ["cache", "derive", "macros"]
+categories = ["caching", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true
@@ -18,7 +20,7 @@ proc-macro2 = { workspace = true }
 proc-macro-crate = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
-sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-alpha.1" }
+sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-alpha.2" }
 
 [dev-dependencies]
 sassi = { path = "../sassi" }

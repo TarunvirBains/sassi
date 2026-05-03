@@ -10,7 +10,7 @@ The default feature set enables `serde` and the native Tokio runtime path:
 
 ```toml
 [dependencies]
-sassi = "0.1.0-alpha.1"
+sassi = "0.1.0-alpha.2"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -99,13 +99,17 @@ Use `get_or_fetch_many` when the source naturally resolves a set of canonical
 ids in one round trip. It is not a query/page helper; every returned id must be
 one of the requested missing ids.
 
+The returned vector is not input-order preserving: resident hits and newly
+fetched values are combined according to cache/fetch order. Build a map by id
+when the caller needs positional lookup.
+
 ## Feature Selection
 
 `serde` enables the wire envelope and `CacheBackend` integration. Disable it
 only when you want an L1-only in-process cache with the smallest surface:
 
 ```toml
-sassi = { version = "0.1.0-alpha.1", default-features = false }
+sassi = { version = "0.1.0-alpha.2", default-features = false }
 ```
 
 `runtime-tokio` is the native background-work path. It is selected by default
@@ -118,7 +122,7 @@ explicitly for browser/WASM targets:
 
 ```toml
 sassi = {
-    version = "0.1.0-alpha.1",
+    version = "0.1.0-alpha.2",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }
@@ -129,7 +133,7 @@ for selected `time` and `chrono` timestamp types. They are useful when a delta
 sync cursor is already represented by one of those libraries:
 
 ```toml
-sassi = { version = "0.1.0-alpha.1", features = ["watermark-time"] }
+sassi = { version = "0.1.0-alpha.2", features = ["watermark-time"] }
 ```
 
 ## Where Next

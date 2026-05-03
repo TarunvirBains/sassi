@@ -153,14 +153,17 @@ pub fn retry_delay_for_attempt(attempt_number: u8) -> Duration {
     Duration::from_millis((25u64.saturating_mul(1u64 << exponent)).min(1_000))
 }
 
-/// Behaviour when an L2 backend write-through fails.
+/// Behaviour when an L2 backend operation fails.
 ///
 /// Defaults to [`BackendFailureMode::L1Only`] — the most permissive
 /// mode, suitable for caches that are an optimisation rather than a
 /// correctness boundary. Consumers with stricter consistency
 /// requirements should pick [`BackendFailureMode::Error`] (propagate)
 /// or [`BackendFailureMode::Retry`] (retry-with-backoff before falling
-/// through).
+/// through). The policy applies to operations that actually touch the backend:
+/// `insert`, `get_async`, and `invalidate`. Fetch and refresh helpers apply
+/// fetched values to the in-process L1 map and do not write those values through
+/// to L2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendFailureMode {
     /// Log the backend error, fall back to L1-only. Insert / get /
@@ -171,8 +174,8 @@ pub enum BackendFailureMode {
     /// Propagate the backend error to the caller.
     /// `insert` returns `Err(InsertError::BackendFailed(...))`,
     /// `get_async` and `invalidate` return `Err(BackendError)`. Use
-    /// when the L2 tier is a correctness requirement, not an
-    /// optimisation.
+    /// when those backend-touching operations should treat L2 as a
+    /// correctness requirement, not an optimisation.
     Error,
 
     /// Retry the backend operation up to `attempts` total attempts

@@ -1,4 +1,9 @@
 //! `#[derive(Cacheable)]` proc-macro entry point.
+//!
+//! The derive emits a companion `{Type}Fields` struct for predicate accessors.
+//! The companion struct mirrors the model's visibility, and each accessor field
+//! mirrors the visibility of the source field. This preserves Rust field privacy:
+//! a public model with private fields still has private generated accessors.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;

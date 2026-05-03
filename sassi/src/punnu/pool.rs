@@ -24,7 +24,12 @@ use crate::punnu::config::{
     BackendFailureMode, CacheTier, OnConflict, PunnuConfig, record_metric_safely,
 };
 use crate::punnu::delta::{DeltaApplyStats, DeltaResult};
-use crate::punnu::delta_refresh::{DeltaPunnuFetcher, DeltaRefreshHandle, RefreshSubscription};
+#[cfg(any(
+    all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+    all(feature = "runtime-wasm", target_arch = "wasm32"),
+))]
+use crate::punnu::delta_refresh::RefreshSubscription;
+use crate::punnu::delta_refresh::{DeltaPunnuFetcher, DeltaRefreshHandle};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::eviction::choose_sampled_lru_victim;
 use crate::punnu::refresh::{PunnuFetcher, RefreshHandle, RefreshMode};
@@ -598,9 +603,10 @@ impl<T: Cacheable> Punnu<T> {
     /// # Panics
     ///
     /// Panics if `interval` is zero. On native `runtime-tokio` builds,
-    /// panics if called outside an active Tokio runtime. If no runtime
-    /// feature is enabled, the configured executor will panic with a
-    /// clear runtime-feature diagnostic when the task is spawned.
+    /// panics if called outside an active Tokio runtime. If no target-
+    /// compatible runtime feature is enabled, panics with a runtime-feature
+    /// diagnostic. The required feature is `runtime-tokio` on native and
+    /// `runtime-wasm` on wasm32.
     pub fn start_periodic_refresh<F>(
         &self,
         interval: Duration,
@@ -614,23 +620,40 @@ impl<T: Cacheable> Punnu<T> {
             !interval.is_zero(),
             "periodic refresh interval must be non-zero"
         );
-        #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
-        if tokio::runtime::Handle::try_current().is_err() {
-            panic!("Punnu::start_periodic_refresh requires an active Tokio runtime");
+        #[cfg(not(any(
+            all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+            all(feature = "runtime-wasm", target_arch = "wasm32"),
+        )))]
+        {
+            let _ = (&fetcher, mode);
+            panic!(
+                "Punnu::start_periodic_refresh requires `runtime-tokio` on native targets or \
+                 `runtime-wasm` on wasm32"
+            );
         }
+        #[cfg(any(
+            all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+            all(feature = "runtime-wasm", target_arch = "wasm32"),
+        ))]
+        {
+            #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
+            if tokio::runtime::Handle::try_current().is_err() {
+                panic!("Punnu::start_periodic_refresh requires an active Tokio runtime");
+            }
 
-        let fetcher = Arc::new(fetcher);
-        let weak = Arc::downgrade(&self.inner);
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        let (trigger_tx, trigger_rx) = mpsc::channel(8);
+            let fetcher = Arc::new(fetcher);
+            let weak = Arc::downgrade(&self.inner);
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            let (trigger_tx, trigger_rx) = mpsc::channel(8);
 
-        self.inner.executor.spawn(Box::pin(run_periodic_refresh(
-            weak, fetcher, interval, mode, cancel_rx, trigger_rx,
-        )));
+            self.inner.executor.spawn(Box::pin(run_periodic_refresh(
+                weak, fetcher, interval, mode, cancel_rx, trigger_rx,
+            )));
 
-        RefreshHandle {
-            cancel: cancel_tx,
-            trigger: trigger_tx,
+            RefreshHandle {
+                cancel: cancel_tx,
+                trigger: trigger_tx,
+            }
         }
     }
 
@@ -654,9 +677,10 @@ impl<T: Cacheable> Punnu<T> {
     /// # Panics
     ///
     /// Panics if `interval` is zero. On native `runtime-tokio` builds,
-    /// panics if called outside an active Tokio runtime. If no runtime
-    /// feature is enabled, the configured executor will panic with a
-    /// clear runtime-feature diagnostic when the task is spawned.
+    /// panics if called outside an active Tokio runtime. If no target-
+    /// compatible runtime feature is enabled, panics with a runtime-feature
+    /// diagnostic. The required feature is `runtime-tokio` on native and
+    /// `runtime-wasm` on wasm32.
     pub fn start_delta_refresh<F>(&self, interval: Duration, fetcher: F) -> DeltaRefreshHandle<T>
     where
         T: crate::DeltaSyncCacheable,
@@ -666,12 +690,29 @@ impl<T: Cacheable> Punnu<T> {
             !interval.is_zero(),
             "delta refresh interval must be non-zero"
         );
-        #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
-        if tokio::runtime::Handle::try_current().is_err() {
-            panic!("Punnu::start_delta_refresh requires an active Tokio runtime");
+        #[cfg(not(any(
+            all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+            all(feature = "runtime-wasm", target_arch = "wasm32"),
+        )))]
+        {
+            let _ = &fetcher;
+            panic!(
+                "Punnu::start_delta_refresh requires `runtime-tokio` on native targets or \
+                 `runtime-wasm` on wasm32"
+            );
         }
+        #[cfg(any(
+            all(feature = "runtime-tokio", not(target_arch = "wasm32")),
+            all(feature = "runtime-wasm", target_arch = "wasm32"),
+        ))]
+        {
+            #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
+            if tokio::runtime::Handle::try_current().is_err() {
+                panic!("Punnu::start_delta_refresh requires an active Tokio runtime");
+            }
 
-        RefreshSubscription::spawn(self.clone(), interval, fetcher)
+            RefreshSubscription::spawn(self.clone(), interval, fetcher)
+        }
     }
 
     /// Get-or-fetch convenience for the lazy-fetch-on-miss pattern.

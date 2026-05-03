@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working in the 
 
 **Sassi** is a typed in-memory pool with composable predicate algebra and cross-runtime trait queries. Standalone Rust crate; intentionally **decoupled** from any specific web framework, ORM, or storage layer. The sibling [djogi](https://github.com/TarunvirBains/djogi) framework consumes sassi as one of several integrated siblings (alongside HeeRanjID), but sassi must remain useful to Rust consumers who have never heard of djogi.
 
-The design spec lives at `docs/superpowers/specs/2026-04-30-sassi-design.md` (gitignored; brainstorming-stage). Once implementation begins, the spec promotes to `docs/spec/design.md` (tracked).
+The design spec lives at `docs/superpowers/specs/2026-04-30-sassi-design.md`.
+Current adopter-facing documentation lives under `docs/`; `docs/superpowers/`
+keeps implementation plans and review artifacts for maintainers and agents.
 
 ## Workspace layout
 
@@ -49,7 +51,7 @@ Internal code routes spawn / sleep through `pub(crate) trait PunnuExecutor` so t
    - §3 Sassi public API surface (the meat)
    - §4 Djogi additions (the consumer surface; useful to know what we're being called from but **not part of sassi proper**)
    - §6.4 Wire-format envelope (cross-runtime compat)
-4. `docs/spec/` — once implementation begins, the finalized spec lives here. Currently empty (skeleton phase).
+4. `docs/` — current adopter-facing documentation and release-readiness notes.
 
 ## What this project is NOT
 
@@ -59,4 +61,8 @@ Internal code routes spawn / sleep through `pub(crate) trait PunnuExecutor` so t
 
 ## Status
 
-**Pre-v0.1.0 alpha skeleton.** Workspace compiles to a no-op `pub fn version()` placeholder. Implementation lands per the design spec; v0.1.0 ships in lockstep with djogi v0.1.0 (sassi publishes first; djogi flips its `path = "../sassi"` dep to `sassi = "0.1"` and re-tests; both then go live).
+**v0.1.0 alpha release preparation.** The core cache substrate, proc macros,
+Redis companion crate, Bardownski TUI example, benchmark harness, and adopter
+docs are implemented in this repository. Keep future work justified for vanilla
+Rust adopters first; djogi remains a downstream consumer, not the design
+authority for sassi.

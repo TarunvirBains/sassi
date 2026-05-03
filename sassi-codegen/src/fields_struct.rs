@@ -9,6 +9,10 @@ use syn::{Data, DeriveInput, Fields};
 /// Emit `{StructName}Fields` — one accessor per declared field of
 /// `input`, plus a `#[derive(Default)]` so callers can construct
 /// placeholder accessors via `T::Fields::default()`.
+/// Generated accessor fields keep the visibility of the source fields. That
+/// means a `pub` model with private fields still derives private accessors; make
+/// the source field visible or hand-write `Cacheable` when external crates need
+/// direct access to `UserFields::name`.
 ///
 /// `sassi_path` is the path prefix at which the consumer reaches
 /// sassi's public types — typically `::sassi` when called from

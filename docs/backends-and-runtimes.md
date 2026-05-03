@@ -52,10 +52,13 @@ local resident cache even when all durable truth stays in a database or API.
 With the `serde` feature enabled, the core crate includes:
 
 - `MemoryBackend`: an in-memory L2 implementation useful for tests and local
-  wiring of the backend path.
+  wiring of the backend path. It does not publish invalidation streams.
 - `FileBackend`: a filesystem-backed L2 implementation that stores Sassi wire
   envelopes with inline TTL metadata. It still understands older TTL sidecars
-  for compatibility with earlier alpha builds.
+  for compatibility with earlier alpha builds. It uses blocking filesystem calls
+  inside the async backend trait and is intended for development, tests, and
+  simple local persistence rather than request-path production load.
+  Like `MemoryBackend`, it does not currently publish distributed invalidations.
 
 Example:
 
@@ -83,6 +86,29 @@ async fn main() {
 Build this with Sassi's `serde` and `runtime-tokio` features enabled. They are
 included in the default feature set.
 
+### Custom CacheBackend
+
+The backend trait is small and focused:
+
+- `get(&self, keyspace, id) -> Result<Option<T>, BackendError>`
+- `put(&self, keyspace, id, value, ttl) -> Result<(), BackendError>`
+- `invalidate(&self, keyspace, id) -> Result<(), BackendError>`
+- `invalidate_all(&self, keyspace) -> Result<(), BackendError>`
+- `invalidation_stream(&self, keyspace) -> BackendInvalidationStream<T::Id>`
+
+`invalidation_stream` has a no-op default, so backends can opt out of
+distributed notifications by using the default behavior.
+
+`MemoryBackend` and `FileBackend` intentionally do not override that method,
+so they do not emit distributed invalidations.
+
+`BackendKeyspace` comes from:
+
+- `PunnuConfig::namespace`
+- `Cacheable::cache_type_name()`
+
+Backends must treat this pair as the authoritative storage boundary.
+
 ## Redis Companion Crate
 
 Redis lives outside the core crate in `sassi-cache-redis`. The companion crate
@@ -109,14 +135,23 @@ also prune stale index members. In mixed persistent/TTL keyspaces, reads prune
 expired TTL members even when a persistent member keeps the index key alive.
 
 `invalidate_all` is still not a quiescence barrier: a concurrent writer in the
-same keyspace can publish after the current drain observes an empty index.
-Applications that need a global write barrier should coordinate writes outside
-Sassi or use a backend design with generation tokens.
+same keyspace can write a value during the drain, and that value can survive in
+Redis and be read back later. Applications that need a global write barrier
+should coordinate writes outside Sassi, move to a new namespace, or use a backend
+design with generation tokens.
+
+`RedisBackend` drains index keys in bounded chunks, so `invalidate_all` may run
+for a long time under sustained concurrent writes.
+
+The Lua scripts call Redis `TIME` to score TTL-backed index members. For
+replicated Redis deployments, test this against the Redis version and
+replication mode you operate; Redis 7.x deployments are the clearest path for
+script effects replication.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-alpha.1"
-sassi-cache-redis = "0.1.0-alpha.1"
+sassi = "0.1.0-alpha.2"
+sassi-cache-redis = "0.1.0-alpha.2"
 ```
 
 ## Backend Failure Modes
@@ -130,9 +165,47 @@ operation succeeds against L1. This is appropriate when L2 is an optimization.
 `BackendFailureMode::Retry { attempts }` retries before falling back to L1-only
 behavior for retryable failures.
 
-`BackendFailureMode::Error` propagates backend errors. Strict deployments can
-use it when a successful cache operation must include L2 write-through or
-backend invalidation.
+`BackendFailureMode::Error` propagates errors for operations that actually
+touch the backend. Today that means `insert` write-through, `get_async` backend
+reads, and `invalidate` backend invalidation. Fetch and refresh helpers such as
+`get_or_fetch`, `get_or_fetch_many`, `apply_delta`, `start_periodic_refresh`,
+and `start_delta_refresh` apply fetched values to the in-process L1 map; they do
+not write those fetched values through to L2 or publish L2 invalidations for
+query membership changes.
+
+### L1/L2 Access Boundaries
+
+`get` is L1-only.
+
+`get_async` checks L1 first, then backend, and finally inserts the backend value
+into L1 if canonical.
+
+`get_or_fetch` and `get_or_fetch_many` are canonical-id fetch helpers. They do
+not `put` back to L2, and they should not be used as query/page-style membership
+sources.
+
+`get_or_fetch_many` does not promise input-order output.
+
+### Wire Ingress and TTL
+
+`insert_serialized` expects wire-envelope bytes from `sassi::wire::to_vec`:
+
+```rust
+let bytes = sassi::wire::to_vec(&value)?;
+let decoded = sassi::wire::from_slice::<User>(&bytes)?;
+pool.insert_serialized(&bytes).await?;
+```
+
+The wire envelope carries only `__sassi_v` and payload data, not TTL policy. TTL
+remains local (`insert`, `insert_with_ttl`, `PunnuConfig::default_ttl`, etc.).
+
+### Pool-wide Reset
+
+There is no public `Punnu::clear` or `Punnu::invalidate_all`.
+
+- For local process memory reset, create a new `Punnu<T>` and drop the old pool.
+- For cross-process intent, call backend `invalidate_all` and keep a
+  listener-attached process subscribed to it so local pools can react.
 
 ```rust
 use sassi::{BackendFailureMode, PunnuConfig};
@@ -142,6 +215,22 @@ let config = PunnuConfig {
     ..Default::default()
 };
 ```
+
+## Runtime and Builder Guardrails
+
+- `lru_size` must be non-zero.
+- `event_channel_capacity` must be greater than zero.
+- `retry` mode requires `attempts >= 1`.
+- non-empty string is required when `namespace = Some(...)`.
+- `ttl_sweep_interval = Some(Duration::ZERO)` is rejected.
+- attaching a backend or configuring a sweep requires an active runtime-aware build
+  and target-compatible runtime feature when `build` is called.
+- the default feature set uses `runtime-tokio`; for `wasm32-unknown-unknown` builds
+  disable defaults and enable `runtime-wasm`.
+
+Native default behavior uses `runtime-tokio`.
+
+For `wasm32-unknown-unknown`, enable `runtime-wasm`.
 
 ## Native Runtime
 
@@ -164,7 +253,7 @@ For `wasm32-unknown-unknown`, enable `runtime-wasm`:
 
 ```toml
 sassi = {
-    version = "0.1.0-alpha.1",
+    version = "0.1.0-alpha.2",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }

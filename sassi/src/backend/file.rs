@@ -1,4 +1,10 @@
-//! Filesystem-backed L2 backend for development and tests.
+//! Filesystem-backed L2 backend for development, tests, and simple local
+//! persistence.
+//!
+//! This backend implements the async [`CacheBackend`](crate::CacheBackend) trait
+//! with blocking `std::fs` calls. It keeps the core crate dependency-light, but
+//! it is not designed for production request paths where filesystem latency
+//! should be moved off the async executor.
 
 use crate::backend::{BackendKeyspace, CacheBackend, encode_hex, keyspace_storage_key};
 use crate::cacheable::Cacheable;
@@ -18,6 +24,11 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// embedded in the same envelope so value and expiry are published with one
 /// atomic file rename. Older `.ttl` sidecars are read for compatibility but are
 /// ignored once inline expiry metadata is present.
+///
+/// This backend uses blocking filesystem operations inside async trait methods.
+/// Use it for development, tests, and simple local persistence. For request-path
+/// production traffic, prefer a backend that performs non-blocking I/O or moves
+/// filesystem work to a blocking thread pool.
 #[derive(Debug, Clone)]
 pub struct FileBackend {
     root: PathBuf,

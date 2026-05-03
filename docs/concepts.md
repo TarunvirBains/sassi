@@ -45,6 +45,17 @@ struct Invoice {
 That generates `DeltaSyncCacheable` when the watermark type implements
 `MonotonicWatermark`.
 
+Composite cursors are also supported for tuple shapes via `MonotonicWatermark`
+marker impls:
+
+```rust
+type Cursor2 = (i64, u64);
+type Cursor3 = (i64, u64, std::time::SystemTime);
+type Cursor4 = (i64, u64, std::time::SystemTime, std::time::SystemTime);
+```
+
+One-element and >4-element tuples are not marker-compatible in this release.
+
 ## Punnu<T>
 
 `Punnu<T>` is the typed in-process pool. It is a resident union identity map:
@@ -63,6 +74,17 @@ publish a new snapshot after preparing the change.
 separate in-process L1 map. If two tenants share one `Punnu<User>` and both use
 `id = 1`, they are the same cached identity unless the type or id encodes the
 tenant.
+
+Tenant-aware process wiring should stay explicit:
+
+- Use tenant-qualified ids when identity itself is tenant-scoped.
+- Use wrapper types when each model family has a distinct tenant policy.
+- Carry `TenantKey` only as request context. It does not change L1 identity or
+  single-flight behavior.
+
+`PunnuConfig::namespace` changes only backend keys/channels, never L1 isolation.
+If two tenants can share a concrete id in one process, encode that tenant in the
+cache id or keep tenant-separate pools.
 
 ## BasicPredicate<T>
 
@@ -107,6 +129,29 @@ when the fetcher returns the complete truth set for the whole resident pool.
 For partial, tenant-filtered, auth-filtered, or paginated pollers, prefer
 `UpsertOnly` or isolate the cache identity with a wrapper type or qualified id.
 
+### Delta Refresh Handle
+
+`start_delta_refresh` returns a `DeltaRefreshHandle<T>` you can drive from
+application flow:
+
+```rust
+use std::num::NonZeroUsize;
+
+let handle = users.start_delta_refresh(std::time::Duration::from_secs(10), fetcher);
+let _ = handle.update().await?;
+let _ = handle.update_full().await?;
+let handle = handle
+    .with_eviction_recovery(true)
+    .with_periodic_full_refresh(Some(NonZeroUsize::new(100).unwrap()));
+```
+
+- `update()` runs a regular delta tick.
+- `update_full()` forces a full-refresh tick (`since = None`), and is queued if a
+  delta tick is already in flight.
+- `pending_eviction_recovery_count()` and
+  `periodic_full_refresh_progress()` expose recovery and periodic scheduling.
+- `watermark()` returns the subscription cursor.
+
 ## Delta Sync And Watermarks
 
 `DeltaSyncCacheable` extends `Cacheable` with a monotonic watermark. A delta
@@ -128,6 +173,21 @@ shared identity map, so they should mean "deleted from the source of truth",
 not "left this query". For delete-only progress, use
 `DeltaResult::with_high_watermark`.
 
+You can apply a batch directly with `Punnu::apply_delta` when the same process is
+already producing a delta source result:
+
+```rust
+use std::collections::HashSet;
+
+let stats = users.apply_delta(DeltaResult::new(changed_users, HashSet::new()));
+if stats.backend_reserved_skips > 0 {
+    // one or more ids were blocked by strict L2 in-flight insert reservations
+}
+```
+
+`backend_reserved_skips` means that authoritative delta application should be
+retried after backend reservations clear.
+
 ## Backends
 
 The core crate has an L1 in-process map and optional L2 `CacheBackend`.
@@ -142,7 +202,112 @@ cross-process invalidation is worth the operational cost.
 
 Backend failures are policy-controlled. The default `BackendFailureMode::L1Only`
 keeps the cache useful when L2 is down. Strict deployments can choose
-`BackendFailureMode::Error` when L2 is part of the correctness boundary.
+`BackendFailureMode::Error` when backend-touching operations should fail rather
+than quietly degrading to L1. That policy covers operations that actually call
+the backend, such as `insert`, `get_async`, and `invalidate`; fetch and refresh
+helpers apply their fetched values to L1 and keep query membership changes out
+of the L2 invalidation channel.
+
+## Events and Invalidation Reasons
+
+`Punnu::events()` returns a broadcast receiver for local observability.
+It is intentionally lossy: if one subscriber falls behind the configured
+`event_channel_capacity`, it gets `RecvError::Lagged`, and only newer events
+remain. The producer side never blocks.
+
+```rust
+use tokio::sync::broadcast::error::RecvError;
+
+let mut rx = users.events();
+loop {
+    match rx.recv().await {
+        Ok(sassi::PunnuEvent::Invalidate { id, reason }) => {
+            tracing::debug!(id = ?id, reason = ?reason, "cache evicted");
+        }
+        Ok(_) => {}
+        Err(RecvError::Lagged(skipped)) => {
+            tracing::warn!(skipped = skipped, "event observer lagged");
+        }
+        Err(_) => break,
+    }
+}
+```
+
+`Punnu::invalidate(..., InvalidationReason::Manual)` uses the narrow public
+reason set and appears on `EventReason::Manual`. The event stream is wider and
+can also report `LruEvict`, `TtlExpired`, and `BackendInvalidation` internally.
+
+## Metrics
+
+Observability hooks are opt-in via `PunnuConfig::metrics`:
+
+```rust
+struct Metrics;
+impl sassi::PunnuMetrics for Metrics {
+    fn record_hit(&self, type_name: &'static str, tier: sassi::CacheTier) {
+        tracing::debug!("{type_name} hit in {tier:?}");
+    }
+    fn record_miss(&self, type_name: &'static str) {
+        tracing::debug!("{type_name} miss");
+    }
+    fn record_eviction(&self, type_name: &'static str, reason: sassi::EventReason) {
+        tracing::debug!("{type_name} eviction: {reason:?}");
+    }
+    fn record_backend_error(&self, type_name: &'static str, err: &sassi::BackendError) {
+        tracing::warn!("{type_name} backend error: {err}");
+    }
+    fn record_fetch_latency(&self, type_name: &'static str, duration: std::time::Duration) {
+        tracing::debug!("{type_name} fetch latency: {duration:?}");
+    }
+    fn record_lru_size(&self, type_name: &'static str, size: usize) {
+        tracing::debug!("{type_name} size: {size}");
+    }
+}
+
+let _users = Punnu::<User>::builder()
+    .config(PunnuConfig {
+        metrics: Some(std::sync::Arc::new(Metrics)),
+        ..Default::default()
+    })
+    .build();
+```
+
+Callbacks run synchronously on the operation path, so keep them cheap and avoid
+re-entering `Punnu` calls from inside a callback; panic callbacks are trapped and
+logged as non-fatal.
+
+## L1/L2 Access Boundaries
+
+- `get` is L1-only.
+- `get_async` checks L1 first, then backend, then inserts into L1.
+- `get_or_fetch` and `get_or_fetch_many` are canonical-id fetchers and do not
+  write through to L2 on success.
+
+`get_or_fetch_many` returns `Vec<Arc<T>>` without preserving input order; it
+combines in-memory hits with fetched values for matched IDs.
+
+If you ingest wire payloads, use `sassi::wire` plus `insert_serialized`:
+
+```rust
+let payload = sassi::wire::to_vec(&value)?;
+let _entry = users.insert_serialized(&payload).await?;
+let _value = sassi::wire::from_slice::<User>(&payload)?;
+```
+
+`wire` contains only the envelope/tag plus the payload; TTL is a local pool policy
+and is not embedded in the wire bytes.
+
+## TTL and Size Semantics
+
+TTL is lazily enforced on read:
+
+- `get` returns `None` for expired entries.
+- the expired entry may remain in `L1` until a writer path or sweep cleans it.
+- no removal event is emitted for this lazy read path.
+
+`Punnu::len()` is a snapshot and can include expired-but-not-yet-collected
+entries. Configure `ttl_sweep_interval` when you want resident size and event
+timing to track physical cleanup more closely.
 
 ## Sassi Orchestrator
 
@@ -153,3 +318,28 @@ It is not a multi-tenant registry for several pools of the same `T`.
 Re-registering a type replaces the previous pool. Use separate `Sassi`
 instances, wrapper types, or tenant-qualified ids when the application needs
 those boundaries to be distinct.
+
+```rust
+use std::sync::Arc;
+
+trait Nameable: Send + Sync {
+    fn display_name(&self) -> &str;
+}
+
+#[sassi::trait_impl]
+impl Nameable for User {
+    fn display_name(&self) -> &str {
+        &self.name
+    }
+}
+
+let mut orchestrator = Sassi::new();
+orchestrator.register::<User>(Arc::new(user_pool));
+orchestrator.register::<Team>(Arc::new(team_pool));
+
+let nameables: Vec<Arc<dyn Nameable>> = orchestrator.all_impl::<dyn Nameable>();
+```
+
+`all_impl` is constrained to traits that are `Send + Sync + 'static`; that
+bound is surfaced as a compile-time error if missing. Re-registering a concrete
+type replaces the prior pool for that `TypeId` in this `Sassi` instance.

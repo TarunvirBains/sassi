@@ -121,6 +121,27 @@ async fn memory_backend_round_trips_and_expires_wire_envelope() {
     assert_eq!(backend.get(&keyspace, &1_i64).await.unwrap(), Some(value));
 }
 
+#[tokio::test(start_paused = true)]
+async fn memory_backend_ttl_honors_paused_runtime_clock() {
+    let backend = MemoryBackend::default();
+    let keyspace = keyspace::<E>(None);
+    let value = E {
+        id: 2,
+        label: "two".into(),
+    };
+
+    backend
+        .put(&keyspace, &value.id(), &value, Some(Duration::from_secs(5)))
+        .await
+        .unwrap();
+
+    assert_eq!(backend.get(&keyspace, &2_i64).await.unwrap(), Some(value));
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+
+    assert_eq!(backend.get(&keyspace, &2_i64).await.unwrap(), None::<E>);
+}
+
 #[test]
 fn retry_delay_uses_capped_exponential_backoff() {
     assert_eq!(retry_delay_for_attempt(1), Duration::ZERO);

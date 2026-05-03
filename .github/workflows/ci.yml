@@ -52,6 +52,12 @@ jobs:
       - name: Test (no-default-features minimal)
         run: cargo test -p sassi --no-default-features
 
+      - name: Test (no-default + serde)
+        run: cargo test -p sassi --no-default-features --features "serde"
+
+      - name: Test (no-default + serde + runtime-tokio)
+        run: cargo test -p sassi --no-default-features --features "serde,runtime-tokio"
+
   wasm-target:
     name: WASM target build
     runs-on: ubuntu-latest
@@ -74,11 +80,16 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-wasm-
 
-      # Builds sassi against `wasm32-unknown-unknown` with the
-      # `runtime-wasm` feature so any regression in the cfg-gated
-      # executor / time / TTL paths fails CI. Per-test wasm execution
-      # (wasm-bindgen-test) is deferred to a future CI matrix expansion.
+      # Builds sassi against `wasm32-unknown-unknown` to catch cfg-gated
+      # runtime behavior regressions before packaging.
       - name: Build sassi for wasm32
+        run: cargo build -p sassi --target wasm32-unknown-unknown
+
+      # Runtime marker builds exercise explicit feature combinations.
+      - name: Build sassi for wasm32 with explicit runtime-marker combo
+        run: cargo build -p sassi --target wasm32-unknown-unknown --no-default-features --features "runtime-tokio,runtime-wasm"
+
+      - name: Build sassi for wasm32 with serde/runtime-wasm runtime marker
         run: cargo build -p sassi --target wasm32-unknown-unknown --no-default-features --features "serde,runtime-wasm"
 
   msrv:
@@ -141,10 +152,9 @@ jobs:
           key: ${{ runner.os }}-cargo-redis-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-redis-
 
-      # sassi-cache-redis is a future companion crate; until it lands this job is a
-      # no-op. Detect via `cargo metadata` rather than gating on a
-      # path filter so re-adding the crate later requires no workflow
-      # edit.
+      # Detect via `cargo metadata` instead of a path filter so this job
+      # remains stable if the Redis companion crate is temporarily removed
+      # or renamed during future release work.
       - name: Detect sassi-cache-redis presence
         id: redis-crate
         run: |

@@ -68,6 +68,12 @@ pub enum RefreshMode {
     /// Treat the fetched result as the complete authoritative set for
     /// the whole `Punnu<T>`. Resident ids absent from the fetch are
     /// invalidated with [`crate::punnu::InvalidationReason::Manual`].
+    ///
+    /// Use only when the fetcher returns the complete truth set for this
+    /// resident pool. For partial, tenant-filtered, auth-filtered, paginated, or
+    /// query-specific polling, use [`RefreshMode::UpsertOnly`] or isolate the
+    /// identity map with a wrapper type, tenant-qualified id, or separate
+    /// `Punnu<T>`.
     Replace,
 }
 

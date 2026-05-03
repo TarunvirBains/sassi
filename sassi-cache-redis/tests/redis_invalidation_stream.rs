@@ -694,7 +694,7 @@ async fn redis_get_prunes_expired_ttl_members_when_persistent_index_keeps_key_al
 }
 
 #[tokio::test]
-async fn redis_duration_max_ttl_stores_persistent_value() {
+async fn redis_ttl_overflow_returns_error_without_persistent_storage() {
     let Some(client) = redis_client() else {
         eprintln!("skipping redis test because REDIS_URL is not set");
         return;
@@ -702,7 +702,7 @@ async fn redis_duration_max_ttl_stores_persistent_value() {
     let backend = RedisBackend::<E>::new(client.clone());
     let keyspace = keyspace::<E>(namespace("ttl-duration-max"));
 
-    backend
+    let err = backend
         .put(
             &keyspace,
             &1,
@@ -713,23 +713,20 @@ async fn redis_duration_max_ttl_stores_persistent_value() {
             Some(Duration::MAX),
         )
         .await
-        .unwrap();
+        .expect_err("TTL overflow should be rejected instead of stored permanently");
+    assert!(
+        matches!(err, sassi::BackendError::Other(_)),
+        "expected overflow to use BackendError::Other, got {err:?}"
+    );
 
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     let key = format!("{}:id_31", redis_key_prefix(&keyspace));
-    let ttl_ms: i64 = redis::cmd("PTTL")
+    let exists: bool = redis::cmd("EXISTS")
         .arg(&key)
         .query_async(&mut conn)
         .await
         .unwrap();
-    assert_eq!(
-        ttl_ms, -1,
-        "Duration::MAX should map to persistent Redis storage"
-    );
-    assert_eq!(
-        backend.get(&keyspace, &1).await.unwrap().unwrap().label,
-        "persistent"
-    );
+    assert!(!exists, "overflowing TTL must not fall through to SET");
 }
 
 #[tokio::test]

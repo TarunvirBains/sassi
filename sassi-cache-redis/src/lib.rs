@@ -224,7 +224,7 @@ where
         let key_index = Self::key_index(keyspace);
         let script = redis::Script::new(PUT_WITH_INDEX_SCRIPT);
         let redis_ttl = match ttl {
-            Some(ttl) => redis_ttl_millis(ttl, unix_now_millis()?),
+            Some(ttl) => Some(redis_ttl_millis(ttl, unix_now_millis()?)?),
             None => None,
         };
         match redis_ttl {
@@ -381,9 +381,9 @@ fn unix_now_millis() -> Result<u128, BackendError> {
         .as_millis())
 }
 
-fn redis_ttl_millis(ttl: Duration, now_ms: u128) -> Option<u64> {
+fn redis_ttl_millis(ttl: Duration, now_ms: u128) -> Result<u64, BackendError> {
     if ttl.is_zero() {
-        return Some(0);
+        return Ok(0);
     }
 
     let ttl_ms = ttl.as_millis().max(1);
@@ -391,9 +391,11 @@ fn redis_ttl_millis(ttl: Duration, now_ms: u128) -> Option<u64> {
         .saturating_sub(now_ms)
         .saturating_sub(1_000);
     if ttl_ms > max_redis_ttl_ms {
-        None
+        Err(BackendError::Other(
+            "Redis TTL exceeds configured Redis absolute time window; pass a smaller duration or no TTL".into(),
+        ))
     } else {
-        Some(ttl_ms as u64)
+        Ok(ttl_ms as u64)
     }
 }
 
@@ -463,8 +465,11 @@ mod tests {
     fn redis_ttl_normalization_preserves_public_punnu_ttl_contract() {
         let now_ms = 1_800_000_000_000_u128;
 
-        assert_eq!(redis_ttl_millis(Duration::from_nanos(1), now_ms), Some(1));
-        assert_eq!(redis_ttl_millis(Duration::ZERO, now_ms), Some(0));
-        assert_eq!(redis_ttl_millis(Duration::MAX, now_ms), None);
+        assert_eq!(
+            redis_ttl_millis(Duration::from_nanos(1), now_ms).unwrap(),
+            1
+        );
+        assert_eq!(redis_ttl_millis(Duration::ZERO, now_ms).unwrap(), 0);
+        assert!(redis_ttl_millis(Duration::MAX, now_ms).is_err());
     }
 }

@@ -67,6 +67,11 @@ struct User {
 }
 ```
 
+For durable or shared L2 backends, give the type an application-owned stable
+name with `#[cacheable(type_name = "myapp.User")]`. Treat that name as part of
+the backend schema: it should be unique inside a namespace and reused only for
+wire-compatible payloads keyed by the same ids.
+
 `BasicPredicate<T>` is the shared predicate algebra. It is walkable and
 data-layer-projectable, so a fetcher can understand the same constraints that
 Sassi can replay in memory. It is not a serde-serializable wire format in
@@ -113,7 +118,7 @@ of the WASM build, not a separately certified integration here.
 
 ## Status
 
-Sassi is preparing its first public alpha: `0.1.0-alpha.1`. The core API,
+Sassi is preparing its first public alpha: `0.1.0-alpha.2`. The core API,
 Redis companion, Bardownski TUI example, benchmark harness, and adopter docs are
 in place, with the usual caution that alpha APIs can still move as real adopters
 put pressure on the design.
@@ -142,18 +147,18 @@ examples/bardownski/ # dependency-light TUI showcase
 
 ## Documentation
 
-- [Getting Started](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/getting-started.md)
-- [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/concepts.md)
-- [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/query-refresh-boundaries.md)
-- [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/backends-and-runtimes.md)
-- [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/release-readiness.md)
-- [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/examples/bardownski/README.md)
-- [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/sassi/benches/README.md)
-- [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/CHANGELOG.md)
+- [Getting Started](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/getting-started.md)
+- [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/concepts.md)
+- [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/query-refresh-boundaries.md)
+- [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/backends-and-runtimes.md)
+- [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/release-readiness.md)
+- [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/examples/bardownski/README.md)
+- [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/sassi/benches/README.md)
+- [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/CHANGELOG.md)
 
 ## License
 
 Dual-licensed under
-[MIT](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/LICENSE-MIT)
+[MIT](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/LICENSE-MIT)
 or
-[Apache-2.0](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/LICENSE-APACHE).
+[Apache-2.0](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/LICENSE-APACHE).

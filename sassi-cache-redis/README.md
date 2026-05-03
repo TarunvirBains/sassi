@@ -7,8 +7,8 @@ providing shared L2 storage plus an explicit invalidation pub/sub path.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-alpha.1"
-sassi-cache-redis = "0.1.0-alpha.1"
+sassi = "0.1.0-alpha.2"
+sassi-cache-redis = "0.1.0-alpha.2"
 ```
 
 The backend uses the `BackendKeyspace` supplied by `PunnuConfig::namespace` and
@@ -29,10 +29,18 @@ Sassi namespace/type share a Cluster hash tag so multi-key scripts stay in one
 slot. TTL-only index entries expire with their data keys, and reads prune
 expired TTL index members in mixed persistent/TTL keyspaces.
 
+The Lua scripts call Redis `TIME` to score TTL-backed index members. For
+replicated Redis deployments, test this against the Redis version and
+replication mode you operate; Redis 7.x deployments are the clearest path for
+script effects replication.
+
 `invalidate_all` is namespace/type scoped, but it is not a global write barrier
-against concurrent writers in the same keyspace.
+against concurrent writers in the same keyspace. A value written during the
+drain can survive in Redis and be read back later. Coordinate writers outside
+Sassi or move to a new namespace when a deployment needs a true generation
+boundary.
 
 See the Sassi repository docs for the broader cache model and release notes:
 
-- https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/backends-and-runtimes.md
-- https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/release-readiness.md
+- https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/backends-and-runtimes.md
+- https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/release-readiness.md

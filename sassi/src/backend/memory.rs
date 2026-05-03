@@ -1,15 +1,16 @@
-//! In-memory L2 backend used for round-trip tests.
+//! In-memory L2 backend used for round-trip tests and local backend wiring.
 
 use crate::backend::{
     BackendKeyspace, CacheBackend, keyspace_storage_key, keyspace_storage_key_prefix,
 };
 use crate::cacheable::Cacheable;
 use crate::error::BackendError;
+use crate::time::Instant;
 use crate::wire;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use serde::{Serialize, de::DeserializeOwned};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Clone)]
 struct MemoryCell {
@@ -20,7 +21,9 @@ struct MemoryCell {
 /// Separate in-memory backend that stores wire-envelope bytes.
 ///
 /// This backend is not a replacement for L1; it exists to test the
-/// `CacheBackend` path without a Redis or filesystem dependency.
+/// `CacheBackend` path without a Redis or filesystem dependency. It does not
+/// publish invalidation streams, so it should not be used as a coherence test
+/// double for distributed invalidation behavior.
 #[derive(Default)]
 pub struct MemoryBackend {
     entries: DashMap<String, MemoryCell>,

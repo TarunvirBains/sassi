@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0-alpha.1] - 2026-05-03
+## [0.1.0-alpha.2] - 2026-05-03
 
 ### Added
 
@@ -25,6 +25,30 @@
 - Dependency-light `examples/bardownski` TUI showcase.
 - Criterion benchmark harness for same-host release baselines.
 - Public adopter docs under `docs/`.
+
+### Fixed
+
+- Aligned release metadata and public documentation links with the reviewed
+  release commit rather than the older `v0.1.0-alpha.1` tag.
+- Made `MemoryBackend` TTL expiry use Sassi's runtime-aware monotonic clock so
+  paused Tokio time drives backend TTL tests the same way it drives L1 TTL
+  tests.
+- Rejected Redis TTL values that overflow Redis' absolute millisecond window
+  instead of silently storing them as persistent values.
+- Moved missing-runtime diagnostics for periodic and delta refresh startup to
+  the public `Punnu` methods.
+
+### Documentation
+
+- Clarified that `BackendFailureMode::Error` applies to operations that touch
+  L2; fetch and refresh helpers apply fetched values to L1 and do not publish
+  query membership changes through L2 invalidation.
+- Clarified that `FileBackend` uses blocking filesystem calls and is intended
+  for development, tests, and simple local persistence rather than production
+  request-path load.
+- Added adopter guide coverage for events, metrics, custom backends, delta
+  handles, direct delta application, wire ingress, TTL cleanup semantics,
+  tenant identity boundaries, and runtime guardrails.
 
 ### Notes
 
