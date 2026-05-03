@@ -83,6 +83,11 @@ inventory = "0.3"
 # Property testing
 proptest = "1"
 trybuild = "1"
+
+# Benchmarks
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Bardownski example
 clap = { version = "4.5", features = ["derive"] }
 csv = "1.3"
 crossterm = "0.28"
