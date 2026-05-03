@@ -20,7 +20,17 @@
 //! throughput claims are derived from these numbers.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
+use std::path::{Path, PathBuf};
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
 use std::process;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,13 +38,20 @@ use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::{future::join_all, join};
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
+use sassi::FileBackend;
+#[cfg(feature = "serde")]
+use sassi::wire::{from_slice, to_vec};
 use sassi::{Cacheable, DeltaResult, Field, MemQ, Punnu, PunnuConfig, Sassi};
-#[cfg(feature = "serde")]
-use sassi::{
-    FileBackend,
-    wire::{from_slice, to_vec},
-};
-#[cfg(feature = "serde")]
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
 use std::sync::atomic::AtomicU64;
 use tokio::runtime::{Builder, Runtime};
 
@@ -110,7 +127,11 @@ fn build_items(start: u64, count: usize) -> Vec<BenchItem> {
     (start..start + count as u64).map(BenchItem::new).collect()
 }
 
-#[cfg(feature = "serde")]
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
 static BACKEND_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn runtime() -> Runtime {
@@ -128,6 +149,7 @@ fn populate_cache(runtime: &Runtime, pool: &Punnu<BenchItem>, start: u64, count:
     }
 }
 
+#[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
 fn populate_cache_with_ttl(
     runtime: &Runtime,
     pool: &Punnu<BenchItem>,
@@ -142,7 +164,11 @@ fn populate_cache_with_ttl(
     }
 }
 
-#[cfg(feature = "serde")]
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
 fn unique_backend_path(prefix: &str) -> PathBuf {
     let sequence = BACKEND_DIR_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     let mut out = std::env::temp_dir();
@@ -150,19 +176,50 @@ fn unique_backend_path(prefix: &str) -> PathBuf {
     out
 }
 
-#[cfg(feature = "serde")]
-fn remove_backend_dir(dir: &PathBuf) {
-    std::fs::remove_dir_all(dir).expect("temp backend dir should be removed");
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
+struct BackendDir {
+    path: PathBuf,
+}
+
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
+impl BackendDir {
+    fn new(prefix: &str) -> Self {
+        let path = unique_backend_path(prefix);
+        std::fs::create_dir_all(&path).expect("temp backend dir should create");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(all(
+    feature = "serde",
+    feature = "runtime-tokio",
+    not(target_arch = "wasm32")
+))]
+impl Drop for BackendDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 fn bench_gating_group(c: &mut Criterion) {
-    let mut group = c.benchmark_group("gating");
-
     let runtime = runtime();
-
-    group.throughput(Throughput::Elements(SAMPLE_INSERT_COUNT as u64));
     let samples = build_items(0, SAMPLE_INSERT_COUNT);
-    group.bench_function("insert_no_eviction", |b| {
+
+    let mut insert_group = c.benchmark_group("gating/insert");
+    insert_group.throughput(Throughput::Elements(SAMPLE_INSERT_COUNT as u64));
+    insert_group.bench_function("insert_no_eviction", |b| {
         b.iter_batched(
             || Punnu::<BenchItem>::builder().build(),
             |pool| {
@@ -176,8 +233,11 @@ fn bench_gating_group(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    insert_group.finish();
 
-    group.bench_function("hot_get", |b| {
+    let mut get_group = c.benchmark_group("gating/hot_get");
+    get_group.throughput(Throughput::Elements(HOT_SCOPE_COUNT as u64));
+    get_group.bench_function("all_ids", |b| {
         let pool = Punnu::<BenchItem>::builder()
             .config(PunnuConfig {
                 lru_size: 10_000,
@@ -199,8 +259,11 @@ fn bench_gating_group(c: &mut Criterion) {
             black_box(hits);
         });
     });
+    get_group.finish();
 
-    group.bench_function("scope_basic_predicate", |b| {
+    let mut scope_group = c.benchmark_group("gating/scope");
+    scope_group.throughput(Throughput::Elements(HOT_SCOPE_COUNT as u64));
+    scope_group.bench_function("basic_predicate", |b| {
         let pool = Punnu::<BenchItem>::builder().build();
         populate_cache(&runtime, &pool, 0, HOT_SCOPE_COUNT);
         let fields = BenchItem::fields();
@@ -215,7 +278,7 @@ fn bench_gating_group(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("scope_closure_mixed_memq", |b| {
+    scope_group.bench_function("closure_mixed_memq", |b| {
         let pool = Punnu::<BenchItem>::builder().build();
         populate_cache(&runtime, &pool, 0, HOT_SCOPE_COUNT);
         let fields = BenchItem::fields();
@@ -232,8 +295,11 @@ fn bench_gating_group(c: &mut Criterion) {
             black_box(values.len());
         });
     });
+    scope_group.finish();
 
-    group.bench_function("apply_delta_direct", |b| {
+    let mut delta_group = c.benchmark_group("gating/apply_delta");
+    delta_group.throughput(Throughput::Elements((SAMPLE_INSERT_COUNT / 2) as u64));
+    delta_group.bench_function("direct", |b| {
         let tombstones = HashSet::from([3_u64, 11_u64]);
         let tombstone_count = tombstones.len();
         b.iter_batched(
@@ -254,8 +320,11 @@ fn bench_gating_group(c: &mut Criterion) {
             BatchSize::SmallInput,
         );
     });
+    delta_group.finish();
 
-    group.bench_function("get_or_fetch_hit", |b| {
+    let mut fetch_group = c.benchmark_group("gating/get_or_fetch");
+    fetch_group.throughput(Throughput::Elements(1));
+    fetch_group.bench_function("hit", |b| {
         let pool = Punnu::<BenchItem>::builder().build();
         populate_cache(&runtime, &pool, 0, HOT_SCOPE_COUNT);
         let requested = 73_u64;
@@ -277,8 +346,7 @@ fn bench_gating_group(c: &mut Criterion) {
             assert_eq!(fetch_invocations.load(Ordering::SeqCst), 0);
         });
     });
-
-    group.finish();
+    fetch_group.finish();
 }
 
 fn bench_nongating_group(c: &mut Criterion) {
@@ -334,7 +402,11 @@ fn bench_nongating_group(c: &mut Criterion) {
         });
     }
 
-    #[cfg(feature = "serde")]
+    #[cfg(all(
+        feature = "serde",
+        feature = "runtime-tokio",
+        not(target_arch = "wasm32")
+    ))]
     {
         group.bench_function("backend_file_roundtrip_get_async", |b| {
             let mut warm: u64 = 0;
@@ -342,8 +414,7 @@ fn bench_nongating_group(c: &mut Criterion) {
                 || {
                     let namespace = format!("ns-{warm}");
                     warm += 1;
-                    let dir = unique_backend_path("bench_get_async");
-                    std::fs::create_dir_all(&dir).expect("temp backend dir should create");
+                    let dir = BackendDir::new("bench_get_async");
 
                     let seed_pool = {
                         let _guard = runtime.enter();
@@ -352,7 +423,7 @@ fn bench_nongating_group(c: &mut Criterion) {
                                 namespace: Some(namespace.clone()),
                                 ..PunnuConfig::default()
                             })
-                            .backend(FileBackend::new(&dir))
+                            .backend(FileBackend::new(dir.path()))
                             .build()
                     };
                     runtime
@@ -366,11 +437,11 @@ fn bench_nongating_group(c: &mut Criterion) {
                             namespace: Some(namespace),
                             ..PunnuConfig::default()
                         })
-                        .backend(FileBackend::new(&dir))
+                        .backend(FileBackend::new(dir.path()))
                         .build();
                     (pool, dir)
                 },
-                |(pool, dir)| {
+                |(pool, _dir)| {
                     let fetched = runtime.block_on(async {
                         let value = pool
                             .get_async(&1_234)
@@ -380,7 +451,6 @@ fn bench_nongating_group(c: &mut Criterion) {
                         value
                     });
                     black_box(fetched.is_some());
-                    remove_backend_dir(&dir);
                 },
                 BatchSize::SmallInput,
             );
@@ -389,32 +459,31 @@ fn bench_nongating_group(c: &mut Criterion) {
         group.bench_function("backend_file_roundtrip_insert", |b| {
             b.iter_batched(
                 || {
-                    let dir = unique_backend_path("bench_insert");
+                    let dir = BackendDir::new("bench_insert");
                     let namespace = process::id().to_string();
-                    std::fs::create_dir_all(&dir).expect("temp backend dir should create");
                     let _guard = runtime.enter();
                     let pool = Punnu::<BenchItem>::builder()
                         .config(PunnuConfig {
                             namespace: Some(namespace),
                             ..PunnuConfig::default()
                         })
-                        .backend(FileBackend::new(&dir))
+                        .backend(FileBackend::new(dir.path()))
                         .build();
                     (pool, dir)
                 },
-                |(pool, dir)| {
+                |(pool, _dir)| {
                     let inserted = runtime
                         .block_on(pool.insert(BenchItem::new(1)))
                         .expect("backend insert should work");
                     assert_eq!(inserted.id(), 1);
                     black_box(inserted.id());
-                    remove_backend_dir(&dir);
                 },
                 BatchSize::SmallInput,
             );
         });
     }
 
+    #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
     group.bench_function("ttl_scheduler_like_path", |b| {
         b.iter_batched(
             || {
@@ -445,24 +514,48 @@ fn bench_nongating_group(c: &mut Criterion) {
     });
 
     group.bench_function("get_or_fetch_many", |b| {
-        let pool = Punnu::<BenchItem>::builder().build();
-        populate_cache(&runtime, &pool, 0, 200);
-        let requested = (0..400_u64).collect::<Vec<_>>();
+        let expected_misses = 200usize;
+        let iteration = AtomicUsize::new(0);
 
-        b.iter(|| {
-            let got = runtime
-                .block_on(
-                    pool.get_or_fetch_many(&requested, move |missing| async move {
-                        Ok(missing.into_iter().map(BenchItem::new).collect())
-                    }),
-                )
-                .expect("get_or_fetch_many should work");
-            assert_eq!(got.len(), requested.len());
-            black_box(got.len());
-        });
+        b.iter_batched(
+            || {
+                let round = iteration.fetch_add(1, Ordering::Relaxed) as u64;
+                let start = 1_000_000 + (round * 1_000);
+                let pool = Punnu::<BenchItem>::builder().build();
+                populate_cache(&runtime, &pool, start, expected_misses);
+                let requested = (start..start + (expected_misses as u64 * 2)).collect::<Vec<_>>();
+                let first_missing = start + expected_misses as u64;
+                (pool, requested, first_missing)
+            },
+            |(pool, requested, first_missing)| {
+                let fetch_calls = Arc::new(AtomicUsize::new(0));
+                let requested_len = requested.len();
+                let got = runtime
+                    .block_on({
+                        let fetch_calls = Arc::clone(&fetch_calls);
+                        async move {
+                            pool.get_or_fetch_many(&requested, move |missing| {
+                                let fetch_calls = Arc::clone(&fetch_calls);
+                                async move {
+                                    fetch_calls.fetch_add(1, Ordering::SeqCst);
+                                    assert_eq!(missing.len(), expected_misses);
+                                    assert!(missing.iter().all(|id| *id >= first_missing));
+                                    Ok(missing.into_iter().map(BenchItem::new).collect())
+                                }
+                            })
+                            .await
+                        }
+                    })
+                    .expect("get_or_fetch_many should work");
+                assert_eq!(fetch_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(got.len(), requested_len);
+                black_box(got.len());
+            },
+            BatchSize::SmallInput,
+        );
     });
 
-    group.bench_function("get_or_fetch_many_coalesced_single_item", |b| {
+    group.bench_function("get_or_fetch_coalesced_single_item", |b| {
         let target = 777_777_u64;
 
         b.iter_batched(

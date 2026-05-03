@@ -20,7 +20,7 @@ release baselines and regression signals, not hard performance guarantees.
 This harness is meant for repeatable, same-host software-change tracking:
 
 - compare commit-to-commit deltas on the same machine and runtime,
-- compare feature-flag combinations (`serde`, `runtime-tokio`) in the same environment,
+- compare feature-flag combinations in the same environment,
 - compare scheduling/machine load changes you control.
 
 The intent is to detect regressions and major direction changes in public
@@ -42,6 +42,15 @@ For a quick compile-and-execute smoke check without collecting measurements:
 ```bash
 cargo bench -p sassi --bench punnu_bench --features serde,runtime-tokio -- --test
 ```
+
+The full release baseline uses `serde,runtime-tokio`. The harness also compiles
+under smaller feature sets, but runtime-dependent groups are skipped when
+`runtime-tokio` is absent:
+
+- without `serde`, wire and backend benches are skipped;
+- with `serde` but without `runtime-tokio`, wire benches run and file-backend
+  benches are skipped;
+- without `runtime-tokio`, TTL sweep/background-runtime benches are skipped.
 
 Compare a later change on the same machine/config:
 
