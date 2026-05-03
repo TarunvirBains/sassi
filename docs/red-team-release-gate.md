@@ -79,12 +79,46 @@ blocker when there is a plausible repro path and meaningful impact.
 
 ## Agent Mix
 
-Use independent agents with different prompts and models when available:
+Use independent agents with different prompts and models when available. The
+standing Sassi-style red team is:
 
-- Codex: code-aware root cause analysis, focused repros, TDD fixes.
-- Gemini: adversarial architecture and broad release-gate review.
-- Claude: adopter-docs and API misuse review.
-- Kimi / DeepSeek or similar: independent subsystem bug hunts once configured.
+- Codex at `xhigh`: code-aware root cause analysis, focused repros, TDD fixes,
+  and final integration judgment.
+- Gemini at its highest available reasoning mode: adversarial architecture and
+  broad release-gate review.
+- Claude Opus via Claude Code CLI at max effort: adopter-docs, API misuse,
+  architecture coherence, and release-risk review.
+- DeepSeek v4 Pro via OpenRouter/opencode at max variant: independent subsystem
+  bug hunts and implementation-risk review.
+- Kimi K2.6 via OpenRouter/opencode at max variant: independent bug hunts,
+  design blind spots, and alternative-reasoning review.
+
+Treat this as a reviewer panel, not a vote. One well-evidenced blocker from any
+model is enough to stop the release until the claim is fixed, disproven, or
+consciously rescoped.
+
+Known local invocation patterns:
+
+```bash
+# Codex subagent from the current session
+# Use an xhigh reviewer prompt with the same issue-register format.
+
+# Gemini CLI
+GEMINI_CLI_TRUST_WORKSPACE=true gemini -p "$PROMPT"
+
+# Claude Code CLI
+claude --model claude-opus-4-7 --effort max \
+  --no-session-persistence --tools "" -p "$PROMPT"
+
+# OpenRouter through opencode
+opencode run "$PROMPT" \
+  --model openrouter/deepseek/deepseek-v4-pro \
+  --variant max
+
+opencode run "$PROMPT" \
+  --model openrouter/moonshotai/kimi-k2.6 \
+  --variant max
+```
 
 For each model family, preserve independence:
 
