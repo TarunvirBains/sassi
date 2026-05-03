@@ -80,9 +80,10 @@ pub use error::WireFormatError;
 pub use error::{BackendError, FetchError, InsertError};
 pub use predicate::{BasicPredicate, FieldPredicate, LookupOp, MemQ};
 pub use punnu::{
-    BackendFailureMode, CacheTier, DeltaApplyStats, DeltaResult, EventReason, InvalidationReason,
-    OnConflict, Punnu, PunnuBuilder, PunnuConfig, PunnuEvent, PunnuFetcher, PunnuMetrics,
-    PunnuScope, RefreshHandle, RefreshMode, TenantKey,
+    BackendFailureMode, CacheTier, DeltaApplyStats, DeltaPunnuFetcher, DeltaQuery,
+    DeltaRefreshHandle, DeltaResult, EventReason, InvalidationReason, OnConflict, Punnu,
+    PunnuBuilder, PunnuConfig, PunnuEvent, PunnuFetcher, PunnuMetrics, PunnuScope, RefreshHandle,
+    RefreshMode, TenantKey, UpdateResult,
 };
 pub use sassi::Sassi;
 pub use time::Instant;

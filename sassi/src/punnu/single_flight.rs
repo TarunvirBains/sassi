@@ -170,7 +170,7 @@ impl std::fmt::Display for RenderedError {
 
 impl std::error::Error for RenderedError {}
 
-fn into_clone(err: FetchError) -> FetchErrorClone {
+pub(crate) fn into_clone(err: FetchError) -> FetchErrorClone {
     use crate::error::BackendError;
     match err {
         FetchError::Backend(BackendError::NotFound) => FetchErrorClone::BackendNotFound,

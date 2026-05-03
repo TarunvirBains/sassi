@@ -50,12 +50,18 @@ fn assert_watermark<T: MonotonicWatermark>() {}
 
 #[test]
 fn std_integer_watermark_implements_marker_trait() {
+    assert_watermark::<i8>();
+    assert_watermark::<i16>();
     assert_watermark::<i32>();
     assert_watermark::<i64>();
     assert_watermark::<i128>();
+    assert_watermark::<isize>();
+    assert_watermark::<u8>();
+    assert_watermark::<u16>();
     assert_watermark::<u32>();
     assert_watermark::<u64>();
     assert_watermark::<u128>();
+    assert_watermark::<usize>();
 }
 
 #[test]

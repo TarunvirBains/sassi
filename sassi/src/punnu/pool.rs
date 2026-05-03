@@ -24,6 +24,7 @@ use crate::punnu::config::{
     BackendFailureMode, CacheTier, OnConflict, PunnuConfig, record_metric_safely,
 };
 use crate::punnu::delta::{DeltaApplyStats, DeltaResult};
+use crate::punnu::delta_refresh::{DeltaPunnuFetcher, DeltaRefreshHandle, RefreshSubscription};
 use crate::punnu::events::{EventReason, InvalidationReason, PunnuEvent};
 use crate::punnu::eviction::choose_sampled_lru_victim;
 use crate::punnu::refresh::{PunnuFetcher, RefreshHandle, RefreshMode};
@@ -529,9 +530,10 @@ impl<T: Cacheable> Punnu<T> {
     ///
     /// # Panics
     ///
-    /// Panics if `interval` is zero. If no runtime feature is enabled,
-    /// the configured executor will panic with a clear runtime-feature
-    /// diagnostic when the task is spawned.
+    /// Panics if `interval` is zero. On native `runtime-tokio` builds,
+    /// panics if called outside an active Tokio runtime. If no runtime
+    /// feature is enabled, the configured executor will panic with a
+    /// clear runtime-feature diagnostic when the task is spawned.
     pub fn start_periodic_refresh<F>(
         &self,
         interval: Duration,
@@ -545,6 +547,10 @@ impl<T: Cacheable> Punnu<T> {
             !interval.is_zero(),
             "periodic refresh interval must be non-zero"
         );
+        #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
+        if tokio::runtime::Handle::try_current().is_err() {
+            panic!("Punnu::start_periodic_refresh requires an active Tokio runtime");
+        }
 
         let fetcher = Arc::new(fetcher);
         let weak = Arc::downgrade(&self.inner);
@@ -559,6 +565,46 @@ impl<T: Cacheable> Punnu<T> {
             cancel: cancel_tx,
             trigger: trigger_tx,
         }
+    }
+
+    /// Start a delta-sync refresh subscription for this pool.
+    ///
+    /// Each subscription owns its own watermark and in-flight slot. This
+    /// lets multiple query-shaped fetchers upsert into the same identity
+    /// map without a narrow query advancing another query's progress.
+    /// Fetchers must treat delta watermarks as inclusive source cursors:
+    /// query `>= since`, return boundary rows for identity deduplication,
+    /// return rows that leave a query filter as updated items rather than
+    /// tombstones, and use [`DeltaResult::with_high_watermark`] for
+    /// delete-only progress.
+    ///
+    /// The watermark records source progress, not whether every fetched
+    /// row remains resident in L1 after sampled-LRU or conflict policy.
+    /// If the delta stream is authoritative for cached values, prefer
+    /// [`OnConflict::LastWriteWins`] or [`OnConflict::Update`] over
+    /// [`OnConflict::Reject`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `interval` is zero. On native `runtime-tokio` builds,
+    /// panics if called outside an active Tokio runtime. If no runtime
+    /// feature is enabled, the configured executor will panic with a
+    /// clear runtime-feature diagnostic when the task is spawned.
+    pub fn start_delta_refresh<F>(&self, interval: Duration, fetcher: F) -> DeltaRefreshHandle<T>
+    where
+        T: crate::DeltaSyncCacheable,
+        F: DeltaPunnuFetcher<T>,
+    {
+        assert!(
+            !interval.is_zero(),
+            "delta refresh interval must be non-zero"
+        );
+        #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
+        if tokio::runtime::Handle::try_current().is_err() {
+            panic!("Punnu::start_delta_refresh requires an active Tokio runtime");
+        }
+
+        RefreshSubscription::spawn(self.clone(), interval, fetcher)
     }
 
     /// Get-or-fetch convenience for the lazy-fetch-on-miss pattern.
@@ -959,6 +1005,10 @@ impl<T: Cacheable> Punnu<T> {
         &self.inner.config
     }
 
+    pub(crate) fn executor(&self) -> Arc<dyn PunnuExecutor> {
+        self.inner.executor.clone()
+    }
+
     /// Build an owned query scope over this pool.
     ///
     /// The scope captures a cloned `Punnu<T>` handle, not a borrow, so
@@ -1288,7 +1338,9 @@ impl<T: Cacheable> Punnu<T> {
         let original_state = state.clone();
         let mut events = Vec::new();
         let mut stats = DeltaApplyStats::default();
-        let DeltaResult { items, tombstones } = delta;
+        let DeltaResult {
+            items, tombstones, ..
+        } = delta;
         let mut normalized_items = BTreeMap::new();
 
         for value in items {

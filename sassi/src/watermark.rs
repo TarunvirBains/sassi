@@ -23,8 +23,8 @@ macro_rules! impl_numeric_watermark {
     };
 }
 
-impl_numeric_watermark!(i32, i64, i128);
-impl_numeric_watermark!(u32, u64, u128);
+impl_numeric_watermark!(i8, i16, i32, i64, i128, isize);
+impl_numeric_watermark!(u8, u16, u32, u64, u128, usize);
 
 impl MonotonicWatermark for std::time::SystemTime {}
 

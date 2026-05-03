@@ -164,11 +164,11 @@ impl PunnuExecutor for DefaultExecutor {
 // is enabled (e.g., `cargo test --no-default-features` without
 // `runtime-tokio`). The fallback panics on spawn / sleep — these
 // methods are only called when the user asked for a background sweep
-// (`PunnuConfig::ttl_sweep_interval = Some(...)`); the panic is a
-// loud failure that points at the missing feature. `now` still works
-// — the same target-aware alias as the runtime impls keeps the
-// lazy-expiry path on `Punnu::get` usable without any executor
-// feature.
+// (`PunnuConfig::ttl_sweep_interval = Some(...)`), periodic refresh, or
+// delta refresh; the panic is a loud failure that points at the missing
+// feature. `now` still works — the same target-aware alias as the
+// runtime impls keeps the lazy-expiry path on `Punnu::get` usable
+// without any executor feature.
 #[cfg(not(any(
     all(feature = "runtime-tokio", not(target_arch = "wasm32")),
     all(feature = "runtime-wasm", target_arch = "wasm32"),
@@ -178,7 +178,7 @@ impl PunnuExecutor for DefaultExecutor {
         panic!(
             "PunnuExecutor::spawn called without a runtime feature; \
              enable `runtime-tokio` (native) or `runtime-wasm` (wasm32) \
-             to use ttl_sweep_interval / periodic refresh"
+             to use ttl_sweep_interval / periodic refresh / delta refresh"
         );
     }
 
@@ -186,7 +186,7 @@ impl PunnuExecutor for DefaultExecutor {
         panic!(
             "PunnuExecutor::sleep called without a runtime feature; \
              enable `runtime-tokio` (native) or `runtime-wasm` (wasm32) \
-             to use ttl_sweep_interval / periodic refresh"
+             to use ttl_sweep_interval / periodic refresh / delta refresh"
         );
     }
 

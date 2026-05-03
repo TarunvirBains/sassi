@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod delta;
+pub mod delta_refresh;
 pub mod events;
 pub(crate) mod eviction;
 pub mod pool;
@@ -21,6 +22,7 @@ pub(crate) mod write;
 
 pub use config::{BackendFailureMode, CacheTier, OnConflict, PunnuConfig, PunnuMetrics};
 pub use delta::{DeltaApplyStats, DeltaResult};
+pub use delta_refresh::{DeltaPunnuFetcher, DeltaQuery, DeltaRefreshHandle, UpdateResult};
 pub use events::{EventReason, InvalidationReason, PunnuEvent};
 pub use pool::{Punnu, PunnuBuilder};
 pub use refresh::{PunnuFetcher, RefreshHandle, RefreshMode};
