@@ -1,0 +1,73 @@
+id,period,x,y,xg,shot_type,on_rebound,team,goal
+1,1,-82,31,0.02,Slap Shot,false,CGY,false
+2,1,-64,-22,0.04,Wrist Shot,false,EDM,false
+3,1,-28,12,0.19,Wrist Shot,false,CGY,true
+4,1,-18,-9,0.24,One-Timer,true,EDM,true
+5,1,-7,4,0.31,Tip-In,true,CGY,true
+6,1,14,-13,0.17,Backhand,false,EDM,false
+7,1,36,8,0.11,Wrist Shot,false,CGY,false
+8,1,58,-26,0.05,Slap Shot,false,EDM,false
+9,1,82,33,0.03,Snap Shot,false,CGY,false
+10,1,24,16,0.14,Wrist Shot,true,EDM,false
+11,1,3,-3,0.36,One Timer,true,CGY,true
+12,1,-44,6,0.08,Deflection,false,EDM,false
+13,2,-91,-35,0.01,Slap Shot,false,CGY,false
+14,2,-70,18,0.04,Wrist Shot,false,EDM,false
+15,2,-31,0,0.16,Snap Shot,false,CGY,false
+16,2,-30,15,0.22,One-Timer,false,EDM,true
+17,2,-19,-15,0.28,Wrist Shot,true,CGY,true
+18,2,-2,10,0.18,Backhand,true,EDM,false
+19,2,11,-6,0.21,Tip-In,false,CGY,true
+20,2,29,14,0.15,Wrist Shot,false,EDM,false
+21,2,30,-14,0.23,One-Timer,true,CGY,true
+22,2,31,0,0.26,Wrist Shot,true,EDM,false
+23,2,48,21,0.09,Snap Shot,false,CGY,false
+24,2,76,-30,0.04,Slap Shot,false,EDM,false
+25,3,-88,25,0.03,Slap Shot,false,CGY,false
+26,3,-52,-18,0.07,Wrist Shot,false,EDM,false
+27,3,-25,11,0.20,One timer,false,CGY,true
+28,3,-12,-4,0.34,Wrist Shot,true,EDM,true
+29,3,-1,0,0.42,Backhand,true,CGY,true
+30,3,8,15,0.16,Tip-In,true,EDM,false
+31,3,23,-11,0.18,Wrist Shot,false,CGY,false
+32,3,35,7,0.12,Snap Shot,false,EDM,false
+33,3,62,-24,0.06,Slap Shot,false,CGY,false
+34,3,90,34,0.02,Wrist Shot,false,EDM,false
+35,1,-96,-40,0.01,Dump-In,false,VAN,false
+36,1,-40,28,0.06,Slap Shot,false,SEA,false
+37,1,-26,-14,0.18,Wrist Shot,true,VAN,false
+38,1,-16,7,0.27,One-Timer,false,SEA,true
+39,1,-5,-10,0.29,Deflection,true,VAN,true
+40,1,7,9,0.19,Snap Shot,false,SEA,false
+41,1,18,-3,0.22,Wrist Shot,true,VAN,true
+42,1,33,13,0.13,Backhand,false,SEA,false
+43,1,49,-29,0.05,Slap Shot,false,VAN,false
+44,1,72,20,0.04,Wrist Shot,false,SEA,false
+45,2,-85,37,0.02,Slap Shot,false,VAN,false
+46,2,-61,-21,0.05,Snap Shot,false,SEA,false
+47,2,-29,3,0.15,Wrist Shot,false,VAN,false
+48,2,-20,-8,0.33,One-Timer,true,SEA,true
+49,2,-9,14,0.17,Tip-In,true,VAN,false
+50,2,2,-15,0.25,Backhand,false,SEA,true
+51,2,16,5,0.20,Wrist Shot,true,VAN,false
+52,2,27,-12,0.16,One Timer,false,SEA,false
+53,2,45,18,0.10,Snap Shot,false,VAN,false
+54,2,67,-34,0.03,Slap Shot,false,SEA,false
+55,3,-78,-30,0.03,Wrist Shot,false,VAN,false
+56,3,-55,22,0.06,Slap Shot,false,SEA,false
+57,3,-30,-15,0.15,Wrist Shot,true,VAN,false
+58,3,-22,6,0.24,One-Timer,false,SEA,true
+59,3,-13,-7,0.32,Deflection,true,VAN,true
+60,3,0,12,0.18,Snap Shot,false,SEA,false
+61,3,12,-2,0.29,Wrist Shot,true,VAN,true
+62,3,28,15,0.15,Backhand,true,SEA,false
+63,3,41,-17,0.12,Wrist Shot,false,VAN,false
+64,3,84,36,0.02,Slap Shot,false,SEA,false
+65,1,-74,12,0.05,Wrist Shot,false,TOR,false
+66,1,-24,-5,0.21,One-Timer,true,MTL,true
+67,1,-8,13,0.16,Snap Shot,false,TOR,false
+68,2,5,-9,0.27,Wrist Shot,true,MTL,true
+69,2,25,5,0.18,Tip-In,false,TOR,false
+70,2,54,31,0.05,Slap Shot,false,MTL,false
+71,3,-18,2,0.30,One Timer,true,TOR,true
+72,3,82,-28,0.03,Wrist Shot,false,MTL,false

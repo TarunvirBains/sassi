@@ -1,0 +1,13 @@
+[package]
+name = "bardownski"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+clap = { workspace = true }
+csv = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+sassi = { path = "../../sassi", default-features = false }
+serde = { workspace = true }

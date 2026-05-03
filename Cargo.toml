@@ -1,5 +1,11 @@
 [workspace]
-members = ["sassi", "sassi-codegen", "sassi-macros", "sassi-cache-redis"]
+members = [
+    "sassi",
+    "sassi-codegen",
+    "sassi-macros",
+    "sassi-cache-redis",
+    "examples/bardownski",
+]
 resolver = "2"
 
 [workspace.package]
@@ -77,3 +83,7 @@ inventory = "0.3"
 # Property testing
 proptest = "1"
 trybuild = "1"
+clap = { version = "4.5", features = ["derive"] }
+csv = "1.3"
+crossterm = "0.28"
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
