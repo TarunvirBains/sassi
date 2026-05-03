@@ -1,0 +1,5 @@
+error: Cacheable: `watermark_field` cannot be empty
+ --> tests/compile_fail/cacheable_empty_watermark_field.rs:6:31
+  |
+6 | #[cacheable(watermark_field = "")]
+  |                               ^^

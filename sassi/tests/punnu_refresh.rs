@@ -1,3 +1,5 @@
+#![cfg(feature = "runtime-tokio")]
+
 use sassi::{
     BackendFailureMode, Cacheable, FetchError, Field, InvalidationReason, OnConflict, Punnu,
     PunnuConfig, PunnuFetcher, RefreshMode,

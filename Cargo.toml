@@ -54,6 +54,12 @@ web-time = "1"
 wasm-bindgen-futures = "0.4"
 gloo-timers = { version = "0.4", features = ["futures"] }
 
+# Optional delta-sync watermark timestamp types. Keep defaults off:
+# marker impls only need type definitions and ordering, not local-clock
+# or formatting/parsing support.
+time = { version = "0.3", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
 # Macro substrate
 proc-macro2 = "1"
 quote = "1"
@@ -70,3 +76,4 @@ inventory = "0.3"
 
 # Property testing
 proptest = "1"
+trybuild = "1"

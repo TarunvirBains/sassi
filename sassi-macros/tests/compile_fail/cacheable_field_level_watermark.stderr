@@ -1,0 +1,5 @@
+error: Cacheable: field-level #[cacheable(...)] options are not supported; place `watermark_field` on the struct
+ --> tests/compile_fail/cacheable_field_level_watermark.rs:8:5
+  |
+8 |     #[cacheable(watermark_field = "updated_at")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -21,4 +21,4 @@ sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-alpha.0" }
 
 [dev-dependencies]
 sassi = { path = "../sassi", version = "0.1.0-alpha.0" }
-trybuild = "1"
+trybuild = { workspace = true }

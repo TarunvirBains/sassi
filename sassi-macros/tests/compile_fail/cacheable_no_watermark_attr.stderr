@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `NoWatermarkAttr: DeltaSyncCacheable` is not satisfied
+  --> tests/compile_fail/cacheable_no_watermark_attr.rs:14:25
+   |
+14 |     assert_delta_sync::<NoWatermarkAttr>();
+   |                         ^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `DeltaSyncCacheable` is not implemented for `NoWatermarkAttr`
+  --> tests/compile_fail/cacheable_no_watermark_attr.rs:6:1
+   |
+ 6 | struct NoWatermarkAttr {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `assert_delta_sync`
+  --> tests/compile_fail/cacheable_no_watermark_attr.rs:11:25
+   |
+11 | fn assert_delta_sync<T: DeltaSyncCacheable>() {}
+   |                         ^^^^^^^^^^^^^^^^^^ required by this bound in `assert_delta_sync`

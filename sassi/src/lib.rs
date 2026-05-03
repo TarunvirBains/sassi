@@ -65,6 +65,7 @@ pub mod predicate;
 pub mod punnu;
 pub mod sassi;
 mod time;
+pub mod watermark;
 #[cfg(feature = "serde")]
 pub mod wire;
 
@@ -85,6 +86,7 @@ pub use punnu::{
 };
 pub use sassi::Sassi;
 pub use time::Instant;
+pub use watermark::{DeltaSyncCacheable, MonotonicWatermark};
 
 // Derive macro re-export. The trait and the derive share the name
 // `Cacheable` (different namespaces — type namespace for the trait,

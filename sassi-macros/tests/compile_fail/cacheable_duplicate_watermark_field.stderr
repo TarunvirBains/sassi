@@ -1,0 +1,5 @@
+error: Cacheable: duplicate `watermark_field` option
+ --> tests/compile_fail/cacheable_duplicate_watermark_field.rs:6:45
+  |
+6 | #[cacheable(watermark_field = "updated_at", watermark_field = "version")]
+  |                                             ^^^^^^^^^^^^^^^

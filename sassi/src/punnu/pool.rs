@@ -900,6 +900,10 @@ impl<T: Cacheable> Punnu<T> {
     }
 
     #[cfg(test)]
+    #[cfg_attr(
+        not(all(feature = "serde", feature = "runtime-tokio")),
+        allow(dead_code)
+    )]
     fn set_before_fetch_l1_commit_hook(&self, hook: Option<BeforeFetchL1CommitHook>) {
         *self
             .inner
@@ -1065,6 +1069,7 @@ impl<T: Cacheable> Punnu<T> {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(feature = "serde"), allow(dead_code))]
     fn set_before_l1_store_hook(&self, hook: Option<BeforeL1StoreHook>) {
         *self
             .inner

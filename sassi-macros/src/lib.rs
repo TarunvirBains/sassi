@@ -26,12 +26,17 @@ use proc_macro::TokenStream;
 ///    - `fields()` trait method wiring every accessor to its real
 ///      extractor (so generic `T: Cacheable` callers can construct
 ///      wired Fields without knowing the concrete type).
+/// 3. When `#[cacheable(watermark_field = "...")]` is present, an
+///    `impl sassi::DeltaSyncCacheable` whose `Watermark` is the named
+///    field's type and whose `watermark()` clones that field.
 ///
 /// Requirements:
 /// - Input must be a struct with named fields.
 /// - One of the fields must be literally named `id`.
 /// - `id`'s type must implement `Hash + Eq + Clone + Ord + Send + Sync + 'static`.
-#[proc_macro_derive(Cacheable)]
+/// - `watermark_field`, when present, must name a field whose type
+///   implements `sassi::MonotonicWatermark`.
+#[proc_macro_derive(Cacheable, attributes(cacheable))]
 pub fn derive_cacheable(input: TokenStream) -> TokenStream {
     cacheable::derive_cacheable(input)
 }
