@@ -1,7 +1,7 @@
 //! [`PunnuScope<T>`] - owned query handle over a typed pool.
 //!
-//! A scope snapshots live `Arc<T>` entries from a [`Punnu`](crate::punnu::Punnu)
-//! and then applies a lazy [`MemQ`](crate::predicate::MemQ) pipeline.
+//! A scope snapshots live `Arc<T>` entries from a [`Punnu`]
+//! and then applies a lazy [`MemQ`] pipeline.
 //! The handle owns a cloned pool handle instead of borrowing from the
 //! pool, so callers can build scopes freely and move them across
 //! function boundaries without lifetime plumbing.
@@ -63,7 +63,7 @@ impl<T: Cacheable> PunnuScope<T> {
     /// Append a shared field-predicate filter.
     ///
     /// This keeps pure field predicates on the common
-    /// [`BasicPredicate`](crate::predicate::BasicPredicate) path while
+    /// [`BasicPredicate`] path while
     /// still executing in-memory through `MemQ`.
     pub fn filter_basic<F>(self, build: F) -> Self
     where

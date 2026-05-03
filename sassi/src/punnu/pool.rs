@@ -155,8 +155,7 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     pub(crate) executor: Arc<dyn PunnuExecutor>,
 
     /// Optional L2 backend adapter. `None` is the default L1-only
-    /// shape; `NoBackend` is available when callers want an explicit
-    /// no-op backend value.
+    /// shape.
     #[cfg(feature = "serde")]
     pub(crate) backend: Option<Arc<dyn BackendRuntime<T>>>,
 

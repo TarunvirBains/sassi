@@ -1,6 +1,8 @@
 //! In-memory L2 backend used for round-trip tests.
 
-use crate::backend::{BackendKeyspace, CacheBackend, keyspace_storage_key};
+use crate::backend::{
+    BackendKeyspace, CacheBackend, keyspace_storage_key, keyspace_storage_key_prefix,
+};
 use crate::cacheable::Cacheable;
 use crate::error::BackendError;
 use crate::wire;
@@ -84,16 +86,4 @@ where
         self.entries.retain(|key, _| !key.starts_with(&prefix));
         Ok(())
     }
-}
-
-pub(crate) fn keyspace_storage_key_prefix(keyspace: &BackendKeyspace) -> String {
-    let namespace = match &keyspace.namespace {
-        Some(ns) => format!("ns_{}", crate::backend::encode_hex(ns.as_bytes())),
-        None => "ns_none".to_owned(),
-    };
-    let type_part = format!(
-        "ty_{}",
-        crate::backend::encode_hex(keyspace.type_name.as_bytes())
-    );
-    format!("{namespace}/{type_part}/")
 }

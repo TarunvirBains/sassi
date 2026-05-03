@@ -9,7 +9,7 @@
 //! and grouping keys that cannot be lowered to SQL or a wire format.
 //! Pure field predicates still enter the pipeline through
 //! [`MemQ::filter_basic`], which evaluates the shared
-//! [`BasicPredicate`](crate::predicate::BasicPredicate) tree.
+//! [`BasicPredicate`] tree.
 
 use crate::cacheable::Cacheable;
 use crate::predicate::BasicPredicate;
@@ -203,7 +203,7 @@ impl<T: Cacheable> MemQ<T> {
     /// algebra.
     ///
     /// This is the bridge from SQL-projectable
-    /// [`BasicPredicate`](crate::predicate::BasicPredicate) into the
+    /// [`BasicPredicate`] into the
     /// Rust-only `MemQ` pipeline.
     pub fn filter_basic(predicate: BasicPredicate<T>) -> Self {
         Self::Filter(Filter {

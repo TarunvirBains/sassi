@@ -156,6 +156,144 @@ async fn retry_mode_exhaustion_keeps_l1_success_after_total_attempts() {
 }
 
 #[tokio::test]
+async fn retry_mode_get_async_succeeds_after_retry_and_caches_l2_hit() {
+    let backend = RetryGetBackend::new(GetMode::SucceedAfterNetworkFailures(1));
+    let attempts = backend.attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Retry { attempts: 3 },
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let loaded = punnu.get_async(&11).await.unwrap().unwrap();
+
+    assert_eq!(loaded.id, 11);
+    assert_eq!(loaded.label, "loaded");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(punnu.get(&11).unwrap().label, "loaded");
+}
+
+#[tokio::test]
+async fn retry_mode_get_async_exhaustion_falls_back_to_miss_after_total_attempts() {
+    let backend = RetryGetBackend::new(GetMode::AlwaysNetwork);
+    let attempts = backend.attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Retry { attempts: 3 },
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let loaded = punnu.get_async(&12).await.unwrap();
+
+    assert!(loaded.is_none());
+    assert!(punnu.get(&12).is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn retry_mode_get_async_does_not_retry_non_retryable_errors() {
+    let backend = RetryGetBackend::new(GetMode::Serialization);
+    let attempts = backend.attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Retry { attempts: 3 },
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let loaded = punnu.get_async(&13).await.unwrap();
+
+    assert!(loaded.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn retry_mode_invalidate_succeeds_after_retry() {
+    let backend = RetryInvalidateBackend::new(InvalidateMode::SucceedAfterNetworkFailures(1));
+    let attempts = backend.attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Retry { attempts: 3 },
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 14,
+            label: "fourteen".into(),
+        })
+        .await
+        .unwrap();
+    punnu
+        .invalidate(&14, sassi::InvalidationReason::OnDelete)
+        .await;
+
+    assert!(punnu.get(&14).is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn retry_mode_invalidate_exhaustion_stops_after_total_attempts() {
+    let backend = RetryInvalidateBackend::new(InvalidateMode::AlwaysNetwork);
+    let attempts = backend.attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Retry { attempts: 3 },
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 15,
+            label: "fifteen".into(),
+        })
+        .await
+        .unwrap();
+    punnu
+        .invalidate(&15, sassi::InvalidationReason::OnDelete)
+        .await;
+
+    assert!(punnu.get(&15).is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn retry_mode_invalidate_does_not_retry_non_retryable_errors() {
+    let backend = RetryInvalidateBackend::new(InvalidateMode::Serialization);
+    let attempts = backend.attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Retry { attempts: 3 },
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 16,
+            label: "sixteen".into(),
+        })
+        .await
+        .unwrap();
+    punnu
+        .invalidate(&16, sassi::InvalidationReason::OnDelete)
+        .await;
+
+    assert!(punnu.get(&16).is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn get_async_rejects_backend_identity_mismatch_without_inserting() {
     let punnu = Punnu::<E>::builder().backend(WrongIdBackend).build();
 
@@ -375,6 +513,119 @@ impl CacheBackend<E> for FailingPutBackend {
 
     async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GetMode {
+    SucceedAfterNetworkFailures(usize),
+    AlwaysNetwork,
+    Serialization,
+}
+
+struct RetryGetBackend {
+    attempts: Arc<AtomicUsize>,
+    mode: GetMode,
+}
+
+impl RetryGetBackend {
+    fn new(mode: GetMode) -> Self {
+        Self {
+            attempts: Arc::new(AtomicUsize::new(0)),
+            mode,
+        }
+    }
+}
+
+#[async_trait]
+impl CacheBackend<E> for RetryGetBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, id: &i64) -> Result<Option<E>, BackendError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        match self.mode {
+            GetMode::SucceedAfterNetworkFailures(failures) if attempt <= failures => {
+                Err(BackendError::Network("temporary outage".into()))
+            }
+            GetMode::SucceedAfterNetworkFailures(_) => Ok(Some(E {
+                id: *id,
+                label: "loaded".into(),
+            })),
+            GetMode::AlwaysNetwork => Err(BackendError::Network("down".into())),
+            GetMode::Serialization => Err(BackendError::Serialization("bad payload".into())),
+        }
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        _id: &i64,
+        _value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InvalidateMode {
+    SucceedAfterNetworkFailures(usize),
+    AlwaysNetwork,
+    Serialization,
+}
+
+struct RetryInvalidateBackend {
+    attempts: Arc<AtomicUsize>,
+    mode: InvalidateMode,
+}
+
+impl RetryInvalidateBackend {
+    fn new(mode: InvalidateMode) -> Self {
+        Self {
+            attempts: Arc::new(AtomicUsize::new(0)),
+            mode,
+        }
+    }
+}
+
+#[async_trait]
+impl CacheBackend<E> for RetryInvalidateBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<Option<E>, BackendError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        _id: &i64,
+        _value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        match self.mode {
+            InvalidateMode::SucceedAfterNetworkFailures(failures) if attempt <= failures => {
+                Err(BackendError::Network("temporary outage".into()))
+            }
+            InvalidateMode::SucceedAfterNetworkFailures(_) => Ok(()),
+            InvalidateMode::AlwaysNetwork => Err(BackendError::Network("down".into())),
+            InvalidateMode::Serialization => {
+                Err(BackendError::Serialization("bad invalidation".into()))
+            }
+        }
     }
 
     async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {

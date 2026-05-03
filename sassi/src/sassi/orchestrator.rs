@@ -1,8 +1,8 @@
 //! [`Sassi`] - owner of typed pools and cross-type trait queries.
 //!
-//! Each cached model type keeps its own [`Punnu`](crate::punnu::Punnu)
+//! Each cached model type keeps its own [`Punnu`]
 //! instance. `Sassi` stores those pools behind `TypeId` and delegates
-//! trait-object collection to [`TraitRegistry`](super::TraitRegistry),
+//! trait-object collection to [`TraitRegistry`],
 //! which is populated by `#[sassi::trait_impl]` expansions.
 
 use crate::cacheable::Cacheable;

@@ -68,7 +68,7 @@ pub struct TraitImplEntry {
 
 inventory::collect!(TraitImplEntry);
 
-/// Handle used by [`Sassi`](crate::Sassi) to query trait
+/// Handle used by [`Sassi`] to query trait
 /// registrations.
 ///
 /// The underlying storage is the process-global [`inventory`]

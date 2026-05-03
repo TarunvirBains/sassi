@@ -71,7 +71,7 @@ pub mod wire;
 #[cfg(feature = "serde")]
 pub use backend::{
     BackendInvalidation, BackendInvalidationStream, BackendKeyspace, CacheBackend, FileBackend,
-    MemoryBackend, NoBackend,
+    MemoryBackend,
 };
 pub use cacheable::{Cacheable, Field};
 #[cfg(feature = "serde")]

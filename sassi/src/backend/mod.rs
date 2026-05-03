@@ -7,7 +7,6 @@
 
 mod file;
 mod memory;
-mod no_backend;
 
 use crate::Cacheable;
 use crate::error::BackendError;
@@ -20,7 +19,6 @@ use std::time::Duration;
 
 pub use file::FileBackend;
 pub use memory::MemoryBackend;
-pub use no_backend::NoBackend;
 
 /// Stream type used by [`CacheBackend::invalidation_stream`].
 pub type BackendInvalidationStream<Id> =
@@ -178,14 +176,22 @@ where
     T: Cacheable,
     T::Id: Serialize,
 {
+    let id_json = serde_json::to_vec(id)?;
+    let id_part = format!("id_{}", encode_hex(&id_json));
+    Ok(format!(
+        "{}{}",
+        keyspace_storage_key_prefix(keyspace),
+        id_part
+    ))
+}
+
+pub(crate) fn keyspace_storage_key_prefix(keyspace: &BackendKeyspace) -> String {
     let namespace = match &keyspace.namespace {
         Some(ns) => format!("ns_{}", encode_hex(ns.as_bytes())),
         None => "ns_none".to_owned(),
     };
     let type_part = format!("ty_{}", encode_hex(keyspace.type_name.as_bytes()));
-    let id_json = serde_json::to_vec(id)?;
-    let id_part = format!("id_{}", encode_hex(&id_json));
-    Ok(format!("{namespace}/{type_part}/{id_part}"))
+    format!("{namespace}/{type_part}/")
 }
 
 pub(crate) fn encode_hex(bytes: &[u8]) -> String {

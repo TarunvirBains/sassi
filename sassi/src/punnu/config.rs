@@ -56,11 +56,12 @@ pub struct PunnuConfig {
     /// receive. Producer-side `send` calls never block.
     pub event_channel_capacity: usize,
 
-    /// What to do when an L2 backend write-through fails during
-    /// [`crate::punnu::Punnu::insert`]. Default
+    /// What to do when an attached L2 backend operation fails.
+    /// Applies to insert write-through, [`crate::punnu::Punnu::get_async`],
+    /// and backend invalidation publishing from
+    /// [`crate::punnu::Punnu::invalidate`]. Default
     /// [`BackendFailureMode::L1Only`] — log the error, succeed against
-    /// L1 alone. Applies when a backend is attached with
-    /// [`crate::punnu::PunnuBuilder::backend`].
+    /// L1 alone.
     pub backend_failure_mode: BackendFailureMode,
 
     /// What to do when [`crate::punnu::Punnu::insert`] is called for an
