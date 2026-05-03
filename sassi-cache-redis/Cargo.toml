@@ -1,0 +1,24 @@
+[package]
+name = "sassi-cache-redis"
+description = "Redis CacheBackend implementation for sassi with pub/sub invalidation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sassi = { path = "../sassi", version = "0.1.0-alpha.0" }
+async-trait = { workspace = true }
+async-stream = "0.3"
+futures = { workspace = true }
+redis = { version = "0.32", default-features = false, features = ["tokio-comp", "tokio-rustls-comp"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1.48", default-features = false, features = ["sync", "rt", "time", "macros"] }

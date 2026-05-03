@@ -52,7 +52,7 @@ impl BackendKeyspace {
 }
 
 /// Backend-driven invalidation message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum BackendInvalidation<Id> {
     /// Invalidate one id in the scoped type keyspace.
     Id(Id),

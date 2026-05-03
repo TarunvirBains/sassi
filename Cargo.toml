@@ -1,5 +1,5 @@
 [workspace]
-members = ["sassi", "sassi-codegen", "sassi-macros"]
+members = ["sassi", "sassi-codegen", "sassi-macros", "sassi-cache-redis"]
 resolver = "2"
 
 [workspace.package]
