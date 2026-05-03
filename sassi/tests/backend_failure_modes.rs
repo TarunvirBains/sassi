@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct E {
@@ -155,6 +156,14 @@ async fn retry_mode_exhaustion_keeps_l1_success_after_total_attempts() {
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
 
+#[test]
+#[should_panic(expected = "PunnuBuilder::build requires an active Tokio runtime")]
+fn backend_build_without_active_tokio_runtime_panics_with_clear_message() {
+    let _punnu: Punnu<E> = Punnu::<E>::builder()
+        .backend(MemoryBackend::default())
+        .build();
+}
+
 #[tokio::test]
 async fn retry_mode_get_async_succeeds_after_retry_and_caches_l2_hit() {
     let backend = RetryGetBackend::new(GetMode::SucceedAfterNetworkFailures(1));
@@ -233,7 +242,8 @@ async fn retry_mode_invalidate_succeeds_after_retry() {
         .unwrap();
     punnu
         .invalidate(&14, sassi::InvalidationReason::OnDelete)
-        .await;
+        .await
+        .unwrap();
 
     assert!(punnu.get(&14).is_none());
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -260,7 +270,8 @@ async fn retry_mode_invalidate_exhaustion_stops_after_total_attempts() {
         .unwrap();
     punnu
         .invalidate(&15, sassi::InvalidationReason::OnDelete)
-        .await;
+        .await
+        .unwrap();
 
     assert!(punnu.get(&15).is_none());
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
@@ -287,10 +298,162 @@ async fn retry_mode_invalidate_does_not_retry_non_retryable_errors() {
         .unwrap();
     punnu
         .invalidate(&16, sassi::InvalidationReason::OnDelete)
-        .await;
+        .await
+        .unwrap();
 
     assert!(punnu.get(&16).is_none());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn error_mode_invalidate_failure_returns_error_and_keeps_l1() {
+    let backend = RetryInvalidateBackend::new(InvalidateMode::AlwaysNetwork);
+    let attempts = backend.attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 17,
+            label: "seventeen".into(),
+        })
+        .await
+        .unwrap();
+
+    let err = punnu
+        .invalidate(&17, sassi::InvalidationReason::OnDelete)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, BackendError::Network(_)));
+    assert_eq!(punnu.get(&17).unwrap().label, "seventeen");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn error_mode_reject_insert_does_not_let_concurrent_writer_win_during_backend_put() {
+    let backend = BlockingStrictPutBackend::default();
+    let first_put_entered = backend.first_put_entered.clone();
+    let first_put_release = backend.first_put_release.clone();
+    let second_put_entered = backend.second_put_entered.clone();
+    let stored = backend.stored.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            on_conflict: sassi::OnConflict::Reject,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let first = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 18,
+                    label: "first".into(),
+                })
+                .await
+        })
+    };
+    first_put_entered.notified().await;
+
+    let second = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 18,
+                    label: "second".into(),
+                })
+                .await
+        })
+    };
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), second_put_entered.notified())
+            .await
+            .is_err(),
+        "second writer reached the backend while the first strict insert was in flight"
+    );
+
+    first_put_release.notify_one();
+    let first_result = first.await.unwrap().unwrap();
+    let second_result = second.await.unwrap().unwrap_err();
+
+    assert_eq!(first_result.label, "first");
+    assert!(matches!(second_result, sassi::InsertError::Conflict));
+    assert_eq!(punnu.get(&18).unwrap().label, "first");
+    assert_eq!(stored.lock().unwrap().as_slice(), ["first"]);
+}
+
+#[tokio::test]
+async fn error_mode_reject_insert_does_not_conflict_with_lazy_fetch_during_backend_put() {
+    let backend = BlockingStrictPutBackend::default();
+    let first_put_entered = backend.first_put_entered.clone();
+    let first_put_release = backend.first_put_release.clone();
+    let stored = backend.stored.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Error,
+            on_conflict: sassi::OnConflict::Reject,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    let first = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .insert(E {
+                    id: 19,
+                    label: "first".into(),
+                })
+                .await
+        })
+    };
+    first_put_entered.notified().await;
+
+    let fetch = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .get_or_fetch(&19, |id| async move {
+                    Ok::<_, sassi::FetchError>(Some(E {
+                        id,
+                        label: "fetched".into(),
+                    }))
+                })
+                .await
+        })
+    };
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), async {
+            while !fetch.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_err(),
+        "lazy fetch completed while a strict insert reserved the same id"
+    );
+
+    first_put_release.notify_one();
+    let first_result = first.await.unwrap().unwrap();
+    let fetch_result = fetch.await.unwrap().unwrap().unwrap();
+
+    assert_eq!(first_result.label, "first");
+    assert_eq!(fetch_result.label, "first");
+    assert_eq!(punnu.get(&19).unwrap().label, "first");
+    assert_eq!(stored.lock().unwrap().as_slice(), ["first"]);
 }
 
 #[tokio::test]
@@ -626,6 +789,48 @@ impl CacheBackend<E> for RetryInvalidateBackend {
                 Err(BackendError::Serialization("bad invalidation".into()))
             }
         }
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct BlockingStrictPutBackend {
+    put_attempts: AtomicUsize,
+    first_put_entered: Arc<Notify>,
+    first_put_release: Arc<Notify>,
+    second_put_entered: Arc<Notify>,
+    stored: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl CacheBackend<E> for BlockingStrictPutBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<Option<E>, BackendError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        _id: &i64,
+        value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        let attempt = self.put_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt == 1 {
+            self.first_put_entered.notify_one();
+            self.first_put_release.notified().await;
+        } else {
+            self.second_put_entered.notify_one();
+        }
+        self.stored.lock().unwrap().push(value.label.clone());
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        Ok(())
     }
 
     async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {

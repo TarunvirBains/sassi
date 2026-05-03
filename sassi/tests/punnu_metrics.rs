@@ -182,7 +182,7 @@ async fn metrics_records_lru_size_after_insert_and_invalidate() {
 
     p.insert(E { id: 1 }).await.unwrap();
     p.insert(E { id: 2 }).await.unwrap();
-    p.invalidate(&1, InvalidationReason::Manual).await;
+    p.invalidate(&1, InvalidationReason::Manual).await.unwrap();
 
     let sizes = m.lru_sizes.lock().unwrap().clone();
     assert!(
@@ -203,7 +203,7 @@ async fn metrics_records_eviction_on_manual_invalidate() {
     let p = punnu_with_metrics(m.clone());
 
     p.insert(E { id: 1 }).await.unwrap();
-    p.invalidate(&1, InvalidationReason::Manual).await;
+    p.invalidate(&1, InvalidationReason::Manual).await.unwrap();
 
     let evictions = m.evictions.lock().unwrap().clone();
     assert_eq!(evictions.len(), 1);
@@ -346,7 +346,7 @@ async fn metrics_none_means_no_calls() {
     p.insert(E { id: 1 }).await.unwrap();
     let _ = p.get(&1);
     let _ = p.get(&999);
-    p.invalidate(&1, InvalidationReason::Manual).await;
+    p.invalidate(&1, InvalidationReason::Manual).await.unwrap();
     let _ = p
         .get_or_fetch(&2, |id| async move { Ok::<_, FetchError>(Some(E { id })) })
         .await;

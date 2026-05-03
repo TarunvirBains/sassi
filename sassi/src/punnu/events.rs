@@ -148,7 +148,7 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidationReason {
     /// Caller explicitly invalidated the entry — e.g.,
-    /// `punnu.invalidate(&id, InvalidationReason::Manual).await`.
+    /// `punnu.invalidate(&id, InvalidationReason::Manual).await?`.
     Manual,
 
     /// Driven by a successful `Model::save` on the bound

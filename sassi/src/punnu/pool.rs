@@ -14,7 +14,6 @@
 #[cfg(feature = "serde")]
 use crate::backend::{BackendInvalidation, BackendKeyspace, BackendRuntime, CacheBackend};
 use crate::cacheable::Cacheable;
-#[cfg(feature = "serde")]
 use crate::error::BackendError;
 use crate::error::{FetchError, InsertError};
 use crate::executor::{DefaultExecutor, PunnuExecutor};
@@ -43,11 +42,14 @@ use futures::StreamExt;
 #[cfg(feature = "serde")]
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
+#[cfg(feature = "serde")]
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(any(
+    feature = "serde",
     all(feature = "runtime-tokio", not(target_arch = "wasm32")),
     all(feature = "runtime-wasm", target_arch = "wasm32"),
 ))]
@@ -56,6 +58,10 @@ use tokio::sync::broadcast;
 
 #[cfg(test)]
 type AfterPublishHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+type BeforeL1StoreHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(test)]
+type BeforeFetchL1CommitHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(all(
     test,
@@ -131,6 +137,10 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// synchronization surface.
     #[cfg(test)]
     after_publish_hook: Mutex<Option<AfterPublishHook>>,
+    #[cfg(test)]
+    before_l1_store_hook: Mutex<Option<BeforeL1StoreHook>>,
+    #[cfg(test)]
+    before_fetch_l1_commit_hook: Mutex<Option<BeforeFetchL1CommitHook>>,
 
     /// Monotonic access marker used by sampled-LRU eviction.
     pub(crate) access_clock: AtomicU64,
@@ -158,6 +168,18 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// shape.
     #[cfg(feature = "serde")]
     pub(crate) backend: Option<Arc<dyn BackendRuntime<T>>>,
+
+    /// Same-id reservation table for strict backend write-through.
+    ///
+    /// Used only while `BackendFailureMode::Error` is performing the
+    /// backend write before publishing to L1. It prevents a same-id
+    /// public insert from winning L1 while the first writer is waiting
+    /// on L2, which would otherwise let a returned `Conflict` leave a
+    /// mutated backend behind.
+    #[cfg(feature = "serde")]
+    backend_strict_insert_ids: Mutex<BTreeSet<T::Id>>,
+    #[cfg(feature = "serde")]
+    backend_strict_insert_released: Notify,
 
     /// Readiness signal fired on the sweep task's first poll, *before*
     /// the first sleep. Tests `await` this before
@@ -289,14 +311,15 @@ impl<T: Cacheable> Punnu<T> {
         #[cfg(feature = "serde")]
         if let Some(backend) = &self.inner.backend {
             let id = arc.id();
-            if self.live_conflict_for_reject(&id) {
-                return Err(InsertError::Conflict);
-            }
             let keyspace = self.backend_keyspace();
             if matches!(
                 self.inner.config.backend_failure_mode,
                 BackendFailureMode::Error
             ) {
+                let _guard = self.acquire_backend_strict_insert(&id).await;
+                if self.live_conflict_for_reject(&id) {
+                    return Err(InsertError::Conflict);
+                }
                 backend
                     .put(&keyspace, &id, arc.as_ref(), ttl)
                     .await
@@ -369,13 +392,35 @@ impl<T: Cacheable> Punnu<T> {
     ///
     /// `async` because L2 backend invalidation (a later task) is
     /// async; the L1-only path resolves immediately.
-    pub async fn invalidate(&self, id: &T::Id, reason: InvalidationReason) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError`] only when an attached backend is
+    /// configured with [`BackendFailureMode::Error`] and backend
+    /// invalidation fails. In that strict mode L1 is left unchanged.
+    /// In the default [`BackendFailureMode::L1Only`] and
+    /// [`BackendFailureMode::Retry`] modes, backend invalidation
+    /// failures are logged/recorded and the L1 invalidation remains
+    /// successful.
+    pub async fn invalidate(
+        &self,
+        id: &T::Id,
+        reason: InvalidationReason,
+    ) -> Result<(), BackendError> {
+        let reason = EventReason::from(reason);
+        #[cfg(feature = "serde")]
+        if self.strict_backend_errors_enabled() {
+            self.invalidate_backend_strict(id).await?;
+            self.invalidate_internal(id, reason).await;
+            return Ok(());
+        }
+
         #[cfg(feature = "serde")]
         let id_for_backend = id.clone();
-        self.invalidate_internal(id, EventReason::from(reason))
-            .await;
+        self.invalidate_internal(id, reason).await;
         #[cfg(feature = "serde")]
         self.invalidate_backend_after_l1(&id_for_backend).await;
+        Ok(())
     }
 
     /// Internal invalidation entry point — accepts the full
@@ -696,7 +741,7 @@ impl<T: Cacheable> Punnu<T> {
             return Ok(hits);
         }
 
-        let fetched_arcs = self.insert_many_for_fetch(deduped_fetched)?;
+        let fetched_arcs = self.insert_many_for_fetch(deduped_fetched).await?;
         hits.extend(fetched_arcs);
         Ok(hits)
     }
@@ -736,26 +781,87 @@ impl<T: Cacheable> Punnu<T> {
     /// at this id, return it," not "follow the configured insert
     /// policy."
     pub(crate) async fn insert_arc_or_existing(&self, arc: Arc<T>) -> Arc<T> {
-        let ttl = self.inner.config.default_ttl;
-        let expires_at = self.expiry_deadline(ttl);
-        let epoch = self.next_access_epoch();
-        self.with_write_coordinator(|state| {
-            self.prepare_insert_or_existing(state, arc, expires_at, epoch)
-        })
+        #[cfg(feature = "serde")]
+        self.wait_for_backend_strict_insert(&arc.id()).await;
+        loop {
+            #[cfg(test)]
+            self.run_before_fetch_l1_commit_hook();
+            let ttl = self.inner.config.default_ttl;
+            let expires_at = self.expiry_deadline(ttl);
+            let epoch = self.next_access_epoch();
+            match self.with_write_coordinator(|state| {
+                self.prepare_insert_or_existing(state, arc.clone(), expires_at, epoch)
+            }) {
+                FetchInsertResult::Ready(arc) => return arc,
+                FetchInsertResult::Blocked(id) => {
+                    #[cfg(feature = "serde")]
+                    self.wait_for_backend_strict_insert(&id).await;
+                    #[cfg(not(feature = "serde"))]
+                    {
+                        let _ = id;
+                    }
+                }
+            }
+        }
     }
 
-    fn insert_many_for_fetch(&self, values: Vec<T>) -> Result<Vec<Arc<T>>, InsertError> {
-        let prepared_values = values
-            .into_iter()
-            .map(|value| {
-                let ttl = self.inner.config.default_ttl;
-                let expires_at = self.expiry_deadline(ttl);
-                let epoch = self.next_access_epoch();
-                (Arc::new(value), expires_at, epoch)
-            })
-            .collect::<Vec<_>>();
+    async fn insert_many_for_fetch(&self, values: Vec<T>) -> Result<Vec<Arc<T>>, InsertError> {
+        let values = values.into_iter().map(Arc::new).collect::<Vec<_>>();
+        #[cfg(feature = "serde")]
+        for value in &values {
+            self.wait_for_backend_strict_insert(&value.id()).await;
+        }
 
-        self.with_write_coordinator(|state| self.prepare_insert_many(state, prepared_values))
+        loop {
+            #[cfg(test)]
+            self.run_before_fetch_l1_commit_hook();
+            let prepared_values = values
+                .iter()
+                .map(|value| {
+                    let value = value.clone();
+                    let ttl = self.inner.config.default_ttl;
+                    let expires_at = self.expiry_deadline(ttl);
+                    let epoch = self.next_access_epoch();
+                    (value, expires_at, epoch)
+                })
+                .collect::<Vec<_>>();
+
+            match self
+                .with_write_coordinator(|state| self.prepare_insert_many(state, prepared_values))
+            {
+                FetchManyInsertResult::Ready(result) => return result,
+                FetchManyInsertResult::Blocked(id) => {
+                    #[cfg(feature = "serde")]
+                    self.wait_for_backend_strict_insert(&id).await;
+                    #[cfg(not(feature = "serde"))]
+                    {
+                        let _ = id;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn set_before_fetch_l1_commit_hook(&self, hook: Option<BeforeFetchL1CommitHook>) {
+        *self
+            .inner
+            .before_fetch_l1_commit_hook
+            .lock()
+            .expect("Punnu before-fetch-L1-commit test hook lock poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    fn run_before_fetch_l1_commit_hook(&self) {
+        let hook = self
+            .inner
+            .before_fetch_l1_commit_hook
+            .lock()
+            .expect("Punnu before-fetch-L1-commit test hook lock poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     /// Number of entries currently in the L1.
@@ -878,6 +984,8 @@ impl<T: Cacheable> Punnu<T> {
             let prepared = prepare((*current).clone());
             #[cfg(debug_assertions)]
             prepared.state().assert_invariants();
+            #[cfg(test)]
+            self.run_before_l1_store_hook();
             let post_len = prepared.state().len();
             let (state, events, result) = prepared.into_parts();
             self.inner.l1.store(Arc::new(state));
@@ -897,6 +1005,28 @@ impl<T: Cacheable> Punnu<T> {
             .after_publish_hook
             .lock()
             .expect("Punnu after-publish test hook lock poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    fn set_before_l1_store_hook(&self, hook: Option<BeforeL1StoreHook>) {
+        *self
+            .inner
+            .before_l1_store_hook
+            .lock()
+            .expect("Punnu before-L1-store test hook lock poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    fn run_before_l1_store_hook(&self) {
+        let hook = self
+            .inner
+            .before_l1_store_hook
+            .lock()
+            .expect("Punnu before-L1-store test hook lock poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     #[cfg(test)]
@@ -953,7 +1083,7 @@ impl<T: Cacheable> Punnu<T> {
         &self,
         mut state: L1State<T>,
         values: Vec<(Arc<T>, Option<Instant>, u64)>,
-    ) -> PreparedWrite<T, Result<Vec<Arc<T>>, InsertError>> {
+    ) -> PreparedWrite<T, FetchManyInsertResult<T>> {
         let now = self.inner.executor.now();
         let original_state = state.clone();
         let mut events = Vec::new();
@@ -963,9 +1093,22 @@ impl<T: Cacheable> Punnu<T> {
             let id = value.id();
             Self::remove_expired_entry(&mut state, &id, now);
 
+            #[cfg(feature = "serde")]
+            if self.backend_strict_insert_reserved(&id) {
+                return PreparedWrite::new(
+                    original_state,
+                    Vec::new(),
+                    FetchManyInsertResult::Blocked(id),
+                );
+            }
+
             let existing = state.get(&id).cloned();
             if existing.is_some() && matches!(self.inner.config.on_conflict, OnConflict::Reject) {
-                return PreparedWrite::new(original_state, Vec::new(), Err(InsertError::Conflict));
+                return PreparedWrite::new(
+                    original_state,
+                    Vec::new(),
+                    FetchManyInsertResult::Ready(Err(InsertError::Conflict)),
+                );
             }
 
             let entry = Arc::new(Entry::new(value.clone(), expires_at, epoch));
@@ -997,7 +1140,7 @@ impl<T: Cacheable> Punnu<T> {
             .map(|(_id, value, _old)| value)
             .collect();
 
-        PreparedWrite::new(state, events, Ok(inserted))
+        PreparedWrite::new(state, events, FetchManyInsertResult::Ready(Ok(inserted)))
     }
 
     fn prepare_insert_or_existing(
@@ -1006,13 +1149,18 @@ impl<T: Cacheable> Punnu<T> {
         value: Arc<T>,
         expires_at: Option<Instant>,
         epoch: u64,
-    ) -> PreparedWrite<T, Arc<T>> {
+    ) -> PreparedWrite<T, FetchInsertResult<T>> {
         let id = value.id();
         let now = self.inner.executor.now();
         Self::remove_expired_entry(&mut state, &id, now);
 
         if let Some(existing) = state.get(&id).map(|entry| entry.value.clone()) {
-            return PreparedWrite::new(state, Vec::new(), existing);
+            return PreparedWrite::new(state, Vec::new(), FetchInsertResult::Ready(existing));
+        }
+
+        #[cfg(feature = "serde")]
+        if self.backend_strict_insert_reserved(&id) {
+            return PreparedWrite::new(state, Vec::new(), FetchInsertResult::Blocked(id));
         }
 
         let entry = Arc::new(Entry::new(value.clone(), expires_at, epoch));
@@ -1025,7 +1173,7 @@ impl<T: Cacheable> Punnu<T> {
             value: value.clone(),
         });
 
-        PreparedWrite::new(state, events, value)
+        PreparedWrite::new(state, events, FetchInsertResult::Ready(value))
     }
 
     fn prepare_invalidate(
@@ -1351,6 +1499,76 @@ impl<T: Cacheable> Punnu<T> {
     }
 
     #[cfg(feature = "serde")]
+    fn strict_backend_errors_enabled(&self) -> bool {
+        self.inner.backend.is_some()
+            && matches!(
+                self.inner.config.backend_failure_mode,
+                BackendFailureMode::Error
+            )
+    }
+
+    #[cfg(feature = "serde")]
+    async fn acquire_backend_strict_insert(&self, id: &T::Id) -> BackendStrictInsertGuard<T> {
+        loop {
+            let notified = self.inner.backend_strict_insert_released.notified();
+            if let Some(guard) = self.try_acquire_backend_strict_insert(id) {
+                return guard;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    fn try_acquire_backend_strict_insert(&self, id: &T::Id) -> Option<BackendStrictInsertGuard<T>> {
+        let _write_guard =
+            self.inner.write_coord.lock().expect(
+                "Punnu L1 write coordinator poisoned — a previous panic interrupted a write",
+            );
+        let mut active = self
+            .inner
+            .backend_strict_insert_ids
+            .lock()
+            .expect("Punnu backend strict-insert table lock poisoned");
+        if active.insert(id.clone()) {
+            return Some(BackendStrictInsertGuard {
+                inner: self.inner.clone(),
+                id: id.clone(),
+            });
+        }
+        None
+    }
+
+    #[cfg(all(test, feature = "serde"))]
+    fn acquire_backend_strict_insert_for_test(&self, id: &T::Id) -> BackendStrictInsertGuard<T> {
+        loop {
+            if let Some(guard) = self.try_acquire_backend_strict_insert(id) {
+                return guard;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    async fn wait_for_backend_strict_insert(&self, id: &T::Id) {
+        loop {
+            let notified = self.inner.backend_strict_insert_released.notified();
+            if !self.backend_strict_insert_reserved(id) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    fn backend_strict_insert_reserved(&self, id: &T::Id) -> bool {
+        self.inner
+            .backend_strict_insert_ids
+            .lock()
+            .expect("Punnu backend strict-insert table lock poisoned")
+            .contains(id)
+    }
+
+    #[cfg(feature = "serde")]
     async fn read_backend_with_policy(
         &self,
         backend: &dyn BackendRuntime<T>,
@@ -1451,6 +1669,15 @@ impl<T: Cacheable> Punnu<T> {
             self.log_backend_error(&err);
             self.metrics_record_backend_error(&err);
         }
+    }
+
+    #[cfg(feature = "serde")]
+    async fn invalidate_backend_strict(&self, id: &T::Id) -> Result<(), BackendError> {
+        let Some(backend) = &self.inner.backend else {
+            return Ok(());
+        };
+        let keyspace = self.backend_keyspace();
+        backend.invalidate(&keyspace, id).await
     }
 
     #[cfg(feature = "serde")]
@@ -1700,6 +1927,11 @@ impl<T: Cacheable> PunnuBuilder<T> {
     ///   would silently prefix L2 backend keys with a leading
     ///   separator and could collide with un-namespaced deployments.
     ///   Use `None` to disable namespacing.
+    /// - on native `runtime-tokio` builds, attaching a backend or
+    ///   enabling `ttl_sweep_interval` requires calling `build()`
+    ///   inside an active Tokio runtime. Both features spawn
+    ///   background tasks immediately so invalidation and sweep work
+    ///   cannot silently be dropped.
     pub fn build(self) -> Punnu<T> {
         if self.config.lru_size == 0 {
             panic!(
@@ -1769,6 +2001,21 @@ impl<T: Cacheable> PunnuBuilder<T> {
             );
         }
         let sweep_interval = self.config.ttl_sweep_interval;
+        #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
+        {
+            #[cfg(feature = "serde")]
+            let backend_attached = self.backend.is_some();
+            #[cfg(not(feature = "serde"))]
+            let backend_attached = false;
+            if (sweep_interval.is_some() || backend_attached)
+                && tokio::runtime::Handle::try_current().is_err()
+            {
+                panic!(
+                    "PunnuBuilder::build requires an active Tokio runtime when a backend \
+                     is attached or ttl_sweep_interval is configured"
+                );
+            }
+        }
         let (events, _) = broadcast::channel(self.config.event_channel_capacity);
         let executor: Arc<dyn PunnuExecutor> = Arc::new(DefaultExecutor);
         #[cfg(feature = "serde")]
@@ -1786,6 +2033,10 @@ impl<T: Cacheable> PunnuBuilder<T> {
             write_coord: Mutex::new(()),
             #[cfg(test)]
             after_publish_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_l1_store_hook: Mutex::new(None),
+            #[cfg(test)]
+            before_fetch_l1_commit_hook: Mutex::new(None),
             access_clock: AtomicU64::new(0),
             eviction_rng: Mutex::new(fastrand::Rng::new()),
             events,
@@ -1793,6 +2044,10 @@ impl<T: Cacheable> PunnuBuilder<T> {
             executor,
             #[cfg(feature = "serde")]
             backend,
+            #[cfg(feature = "serde")]
+            backend_strict_insert_ids: Mutex::new(BTreeSet::new()),
+            #[cfg(feature = "serde")]
+            backend_strict_insert_released: Notify::new(),
             #[cfg(any(
                 all(feature = "runtime-tokio", not(target_arch = "wasm32")),
                 all(feature = "runtime-wasm", target_arch = "wasm32"),
@@ -1911,6 +2166,36 @@ fn jittered_delay(base: Duration) -> Duration {
     base + Duration::from_micros(fastrand::u64(..=jitter_cap_micros))
 }
 
+#[cfg(feature = "serde")]
+struct BackendStrictInsertGuard<T: Cacheable> {
+    inner: Arc<PunnuInner<T>>,
+    id: T::Id,
+}
+
+#[cfg(feature = "serde")]
+impl<T: Cacheable> Drop for BackendStrictInsertGuard<T> {
+    fn drop(&mut self) {
+        self.inner
+            .backend_strict_insert_ids
+            .lock()
+            .expect("Punnu backend strict-insert table lock poisoned")
+            .remove(&self.id);
+        self.inner.backend_strict_insert_released.notify_waiters();
+    }
+}
+
+#[cfg_attr(not(feature = "serde"), allow(dead_code))]
+enum FetchInsertResult<T: Cacheable> {
+    Ready(Arc<T>),
+    Blocked(T::Id),
+}
+
+#[cfg_attr(not(feature = "serde"), allow(dead_code))]
+enum FetchManyInsertResult<T: Cacheable> {
+    Ready(Result<Vec<Arc<T>>, InsertError>),
+    Blocked(T::Id),
+}
+
 impl<T: Cacheable> Default for PunnuBuilder<T> {
     fn default() -> Self {
         Self::new()
@@ -1929,6 +2214,7 @@ mod commit_order_tests {
     use tokio::sync::Notify;
     use tokio::sync::broadcast::error::TryRecvError;
 
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Debug, Clone)]
     struct EventOrderItem {
         id: i64,
@@ -2067,6 +2353,75 @@ mod commit_order_tests {
         assert_eq!(insert_event_id(rx.try_recv().unwrap()), 2);
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn strict_reservation_acquisition_waits_for_in_flight_l1_store() {
+        let punnu = Punnu::<EventOrderItem>::builder().build();
+        let fired = Arc::new(AtomicBool::new(false));
+        let attempted = Arc::new(AtomicBool::new(false));
+        let acquired = Arc::new(AtomicBool::new(false));
+        let handle_slot = Arc::new(StdMutex::new(None));
+        let id = 3;
+
+        let punnu_for_hook = punnu.clone();
+        let fired_for_hook = fired.clone();
+        let attempted_for_hook = attempted.clone();
+        let acquired_for_hook = acquired.clone();
+        let handle_slot_for_hook = handle_slot.clone();
+        punnu.set_before_l1_store_hook(Some(Arc::new(move || {
+            if fired_for_hook.swap(true, Ordering::SeqCst) {
+                return;
+            }
+
+            let punnu_for_thread = punnu_for_hook.clone();
+            let attempted_for_thread = attempted_for_hook.clone();
+            let acquired_for_thread = acquired_for_hook.clone();
+            let handle = thread::spawn(move || {
+                attempted_for_thread.store(true, Ordering::SeqCst);
+                let _guard = punnu_for_thread.acquire_backend_strict_insert_for_test(&id);
+                acquired_for_thread.store(true, Ordering::SeqCst);
+            });
+            *handle_slot_for_hook
+                .lock()
+                .expect("handle slot lock poisoned") = Some(handle);
+
+            let deadline = StdInstant::now() + StdDuration::from_millis(100);
+            while !attempted_for_hook.load(Ordering::SeqCst) && StdInstant::now() < deadline {
+                thread::yield_now();
+            }
+            assert!(
+                attempted_for_hook.load(Ordering::SeqCst),
+                "reservation thread did not attempt to acquire the strict reservation"
+            );
+
+            thread::sleep(StdDuration::from_millis(50));
+            assert!(
+                !acquired_for_hook.load(Ordering::SeqCst),
+                "strict reservation was acquired while an L1 store held the write coordinator"
+            );
+        })));
+
+        futures::executor::block_on(async {
+            punnu.insert(EventOrderItem { id: 1 }).await.unwrap();
+        });
+
+        let deadline = StdInstant::now() + StdDuration::from_secs(1);
+        while !acquired.load(Ordering::SeqCst) && StdInstant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            acquired.load(Ordering::SeqCst),
+            "reservation should acquire after the L1 store releases the write coordinator"
+        );
+
+        let handle = handle_slot
+            .lock()
+            .expect("handle slot lock poisoned")
+            .take()
+            .expect("reservation thread should have been spawned");
+        handle.join().expect("reservation thread panicked");
+    }
+
     #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]
     #[tokio::test(start_paused = true)]
     async fn sweep_rechecks_expiry_before_removing_stale_candidate() {
@@ -2124,5 +2479,131 @@ mod commit_order_tests {
                 "stale candidate should not emit a TtlExpired event for the newer value"
             );
         }
+    }
+
+    #[cfg(all(
+        feature = "serde",
+        feature = "runtime-tokio",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn get_or_fetch_retries_when_strict_reservation_appears_before_l1_commit() {
+        let punnu = Punnu::<EventOrderItem>::builder().build();
+        let fired = Arc::new(AtomicBool::new(false));
+        let id = 30;
+
+        let punnu_for_hook = punnu.clone();
+        let fired_for_hook = fired.clone();
+        punnu.set_before_fetch_l1_commit_hook(Some(Arc::new(move || {
+            if !fired_for_hook.swap(true, Ordering::SeqCst) {
+                punnu_for_hook
+                    .inner
+                    .backend_strict_insert_ids
+                    .lock()
+                    .expect("strict insert table lock poisoned")
+                    .insert(id);
+            }
+        })));
+
+        let fetch = {
+            let punnu = punnu.clone();
+            tokio::spawn(async move {
+                punnu
+                    .get_or_fetch(&id, |id| async move {
+                        Ok::<_, FetchError>(Some(EventOrderItem { id }))
+                    })
+                    .await
+            })
+        };
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), async {
+                while !fetch.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "fetch returned before the strict reservation was released"
+        );
+        assert!(punnu.get(&id).is_none());
+
+        punnu
+            .inner
+            .backend_strict_insert_ids
+            .lock()
+            .expect("strict insert table lock poisoned")
+            .remove(&id);
+        punnu.inner.backend_strict_insert_released.notify_waiters();
+
+        let fetched = fetch.await.unwrap().unwrap().unwrap();
+        assert_eq!(fetched.id, id);
+        assert_eq!(punnu.get(&id).unwrap().id, id);
+    }
+
+    #[cfg(all(
+        feature = "serde",
+        feature = "runtime-tokio",
+        not(target_arch = "wasm32")
+    ))]
+    #[tokio::test]
+    async fn batch_fetch_retries_when_strict_reservation_appears_before_l1_commit() {
+        let punnu = Punnu::<EventOrderItem>::builder().build();
+        let fired = Arc::new(AtomicBool::new(false));
+        let blocked_id = 41;
+
+        let punnu_for_hook = punnu.clone();
+        let fired_for_hook = fired.clone();
+        punnu.set_before_fetch_l1_commit_hook(Some(Arc::new(move || {
+            if !fired_for_hook.swap(true, Ordering::SeqCst) {
+                punnu_for_hook
+                    .inner
+                    .backend_strict_insert_ids
+                    .lock()
+                    .expect("strict insert table lock poisoned")
+                    .insert(blocked_id);
+            }
+        })));
+
+        let fetch = {
+            let punnu = punnu.clone();
+            tokio::spawn(async move {
+                punnu
+                    .get_or_fetch_many(&[40, blocked_id], |ids| async move {
+                        Ok::<_, FetchError>(
+                            ids.into_iter()
+                                .map(|id| EventOrderItem { id })
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .await
+            })
+        };
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), async {
+                while !fetch.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "batch fetch returned before the strict reservation was released"
+        );
+        assert!(punnu.get(&40).is_none());
+        assert!(punnu.get(&blocked_id).is_none());
+
+        punnu
+            .inner
+            .backend_strict_insert_ids
+            .lock()
+            .expect("strict insert table lock poisoned")
+            .remove(&blocked_id);
+        punnu.inner.backend_strict_insert_released.notify_waiters();
+
+        let fetched = fetch.await.unwrap().unwrap();
+        assert_eq!(fetched.len(), 2);
+        assert!(punnu.get(&40).is_some());
+        assert!(punnu.get(&blocked_id).is_some());
     }
 }

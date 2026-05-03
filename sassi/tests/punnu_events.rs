@@ -118,7 +118,7 @@ async fn invalidate_emits_invalidate_with_reason() {
     p.insert(E { id: 1, label: "a" }).await.unwrap();
     let mut rx = p.events();
 
-    p.invalidate(&1, InvalidationReason::Manual).await;
+    p.invalidate(&1, InvalidationReason::Manual).await.unwrap();
     match rx.try_recv().expect("expected Invalidate event") {
         PunnuEvent::Invalidate { id, reason } => {
             assert_eq!(id, 1);
@@ -137,7 +137,7 @@ async fn invalidate_unknown_id_emits_no_event() {
     // invalidations would otherwise overcount).
     let p = Punnu::<E>::builder().build();
     let mut rx = p.events();
-    p.invalidate(&42, InvalidationReason::Manual).await;
+    p.invalidate(&42, InvalidationReason::Manual).await.unwrap();
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 }
 
@@ -267,6 +267,6 @@ async fn no_active_subscribers_does_not_break_insert() {
     let p = Punnu::<E>::builder().build();
     // No call to events() — zero subscribers.
     p.insert(E { id: 1, label: "a" }).await.unwrap();
-    p.invalidate(&1, InvalidationReason::Manual).await;
+    p.invalidate(&1, InvalidationReason::Manual).await.unwrap();
     assert_eq!(p.len(), 0);
 }

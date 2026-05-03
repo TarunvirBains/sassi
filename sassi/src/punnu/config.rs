@@ -173,8 +173,9 @@ pub enum BackendFailureMode {
 
     /// Propagate the backend error to the caller.
     /// `insert` returns `Err(InsertError::BackendFailed(...))`,
-    /// `get_async` returns `Err(BackendError)`. Use when the L2 tier
-    /// is a correctness requirement, not an optimisation.
+    /// `get_async` and `invalidate` return `Err(BackendError)`. Use
+    /// when the L2 tier is a correctness requirement, not an
+    /// optimisation.
     Error,
 
     /// Retry the backend operation up to `attempts` total attempts

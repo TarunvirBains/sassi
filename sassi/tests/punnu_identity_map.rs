@@ -93,7 +93,10 @@ async fn invalidate_drops_entry() {
         .unwrap();
     assert!(punnu.get(&1).is_some());
 
-    punnu.invalidate(&1, InvalidationReason::Manual).await;
+    punnu
+        .invalidate(&1, InvalidationReason::Manual)
+        .await
+        .unwrap();
     assert!(punnu.get(&1).is_none());
     assert_eq!(punnu.len(), 0);
     assert!(punnu.is_empty());
@@ -106,7 +109,10 @@ async fn invalidate_unknown_id_is_noop() {
     // "no event" half lives in `punnu_events.rs`; the "no panic"
     // half is here).
     let punnu = Punnu::<Item>::builder().build();
-    punnu.invalidate(&999, InvalidationReason::Manual).await;
+    punnu
+        .invalidate(&999, InvalidationReason::Manual)
+        .await
+        .unwrap();
     assert_eq!(punnu.len(), 0);
 }
 

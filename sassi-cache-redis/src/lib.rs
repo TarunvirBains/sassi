@@ -5,8 +5,12 @@ use futures::{StreamExt, stream::BoxStream};
 use redis::AsyncCommands;
 use sassi::{BackendError, BackendInvalidation, BackendKeyspace, CacheBackend, Cacheable};
 use serde::{Serialize, de::DeserializeOwned};
+use std::cmp;
 use std::marker::PhantomData;
 use std::time::Duration;
+
+const INITIAL_INVALIDATION_RECONNECT_DELAY: Duration = Duration::from_millis(10);
+const MAX_INVALIDATION_RECONNECT_DELAY: Duration = Duration::from_millis(100);
 
 /// Redis-backed Sassi L2 backend.
 ///
@@ -162,29 +166,45 @@ where
         let client = self.client.clone();
         let channel = Self::channel(&keyspace);
         Box::pin(async_stream::stream! {
-            let mut pubsub = match client.get_async_pubsub().await {
-                Ok(pubsub) => pubsub,
-                Err(err) => {
+            let mut reconnect_delay = INITIAL_INVALIDATION_RECONNECT_DELAY;
+            loop {
+                let mut pubsub = match client.get_async_pubsub().await {
+                    Ok(pubsub) => pubsub,
+                    Err(err) => {
+                        yield Err(redis_error(err));
+                        tokio::time::sleep(reconnect_delay).await;
+                        reconnect_delay = next_invalidation_reconnect_delay(reconnect_delay);
+                        continue;
+                    }
+                };
+                if let Err(err) = pubsub.subscribe(channel.as_str()).await {
                     yield Err(redis_error(err));
-                    return;
+                    tokio::time::sleep(reconnect_delay).await;
+                    reconnect_delay = next_invalidation_reconnect_delay(reconnect_delay);
+                    continue;
                 }
-            };
-            if let Err(err) = pubsub.subscribe(channel).await {
-                yield Err(redis_error(err));
-                return;
-            }
-            let mut messages = pubsub.into_on_message();
-            while let Some(message) = messages.next().await {
-                match message.get_payload::<Vec<u8>>() {
-                    Ok(raw) => match serde_json::from_slice::<BackendInvalidation<T::Id>>(&raw) {
-                        Ok(invalidation) => yield Ok(invalidation),
-                        Err(err) => yield Err(BackendError::Serialization(err.to_string())),
-                    },
-                    Err(err) => yield Err(redis_error(err)),
+                let mut messages = pubsub.into_on_message();
+                while let Some(message) = messages.next().await {
+                    match message.get_payload::<Vec<u8>>() {
+                        Ok(raw) => match serde_json::from_slice::<BackendInvalidation<T::Id>>(&raw) {
+                            Ok(invalidation) => {
+                                reconnect_delay = INITIAL_INVALIDATION_RECONNECT_DELAY;
+                                yield Ok(invalidation);
+                            }
+                            Err(err) => yield Err(BackendError::Serialization(err.to_string())),
+                        },
+                        Err(err) => yield Err(redis_error(err)),
+                    }
                 }
+                tokio::time::sleep(reconnect_delay).await;
+                reconnect_delay = next_invalidation_reconnect_delay(reconnect_delay);
             }
         })
     }
+}
+
+fn next_invalidation_reconnect_delay(current: Duration) -> Duration {
+    cmp::min(current.saturating_mul(2), MAX_INVALIDATION_RECONNECT_DELAY)
 }
 
 fn redis_error(err: redis::RedisError) -> BackendError {
