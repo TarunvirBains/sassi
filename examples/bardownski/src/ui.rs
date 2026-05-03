@@ -179,6 +179,15 @@ fn render_bottom(
             stats.one_timer_count,
             sample(stats.one_timer_sample)
         )),
+        Line::from(format!(
+            "Registry:    {} rows across {}",
+            stats.showcase_row_count,
+            stats.showcase_row_kinds.join("+")
+        )),
+        Line::from(format!(
+            "Sample:      {}",
+            stats.showcase_row_sample.as_deref().unwrap_or("none")
+        )),
     ];
     frame.render_widget(
         Paragraph::new(stats_text).block(
@@ -218,12 +227,21 @@ struct TerminalGuard {
 impl TerminalGuard {
     fn enter() -> Result<Self, Box<dyn Error>> {
         enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self { terminal })
+        match enter_terminal_after_raw_mode() {
+            Ok(terminal) => Ok(Self { terminal }),
+            Err(err) => {
+                let _ = disable_raw_mode();
+                Err(err)
+            }
+        }
     }
+}
+
+fn enter_terminal_after_raw_mode() -> Result<Terminal<CrosstermBackend<Stdout>>, Box<dyn Error>> {
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    Ok(Terminal::new(backend)?)
 }
 
 impl Drop for TerminalGuard {
