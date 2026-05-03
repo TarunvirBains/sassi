@@ -136,6 +136,87 @@ async fn file_backend_namespaces_do_not_collide() {
     assert_eq!(loaded_b.label, "b");
 }
 
+#[tokio::test]
+async fn file_backend_invalidate_removes_only_requested_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path());
+    let keyspace = keyspace(None);
+
+    backend
+        .put(
+            &keyspace,
+            &1,
+            &E {
+                id: 1,
+                label: "one".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    backend
+        .put(
+            &keyspace,
+            &2,
+            &E {
+                id: 2,
+                label: "two".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    <FileBackend as CacheBackend<E>>::invalidate(&backend, &keyspace, &1_i64)
+        .await
+        .unwrap();
+
+    let remaining: E = backend.get(&keyspace, &2_i64).await.unwrap().unwrap();
+    assert_eq!(backend.get(&keyspace, &1_i64).await.unwrap(), None::<E>);
+    assert_eq!(remaining.label, "two");
+}
+
+#[tokio::test]
+async fn file_backend_invalidate_all_is_namespace_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = FileBackend::new(dir.path());
+    let keep = keyspace(Some("keep"));
+    let drop = keyspace(Some("drop"));
+
+    backend
+        .put(
+            &keep,
+            &1,
+            &E {
+                id: 1,
+                label: "keep".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    backend
+        .put(
+            &drop,
+            &1,
+            &E {
+                id: 1,
+                label: "drop".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    <FileBackend as CacheBackend<E>>::invalidate_all(&backend, &drop)
+        .await
+        .unwrap();
+
+    let remaining: E = backend.get(&keep, &1_i64).await.unwrap().unwrap();
+    assert_eq!(backend.get(&drop, &1_i64).await.unwrap(), None::<E>);
+    assert_eq!(remaining.label, "keep");
+}
+
 fn walkdir(path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
     if path.is_dir() {
         std::fs::read_dir(path)

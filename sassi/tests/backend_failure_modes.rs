@@ -38,6 +38,33 @@ impl Cacheable for E {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct F {
+    id: i64,
+    label: String,
+}
+
+#[derive(Default)]
+struct FFields {
+    #[allow(dead_code)]
+    id: Field<F, i64>,
+}
+
+impl Cacheable for F {
+    type Id = i64;
+    type Fields = FFields;
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn fields() -> FFields {
+        FFields {
+            id: Field::new("id", |f| &f.id),
+        }
+    }
+}
+
 #[tokio::test]
 async fn memory_backend_round_trips_and_expires_wire_envelope() {
     let backend = MemoryBackend::default();
@@ -193,6 +220,126 @@ async fn backend_invalidation_stream_removes_l1_and_emits_backend_reason() {
     assert!(punnu.get(&2).is_none());
 }
 
+#[tokio::test]
+async fn punnu_backend_keyspace_uses_config_namespace_and_type_name() {
+    let backend = RecordingBackend::default();
+    let seen = backend.seen.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            namespace: Some("tenant-a".into()),
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 3,
+            label: "three".into(),
+        })
+        .await
+        .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].namespace.as_deref(), Some("tenant-a"));
+    assert_eq!(seen[0].type_name, std::any::type_name::<E>());
+}
+
+#[tokio::test]
+async fn backend_invalidation_all_is_namespace_scoped_per_punnu() {
+    let (backend_a, tx_a) = StreamingBackend::new();
+    let (backend_b, _tx_b) = StreamingBackend::new();
+    let punnu_a = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            namespace: Some("env-a".into()),
+            ..Default::default()
+        })
+        .backend(backend_a)
+        .build();
+    let punnu_b = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            namespace: Some("env-b".into()),
+            ..Default::default()
+        })
+        .backend(backend_b)
+        .build();
+
+    punnu_a
+        .insert(E {
+            id: 1,
+            label: "a".into(),
+        })
+        .await
+        .unwrap();
+    punnu_b
+        .insert(E {
+            id: 1,
+            label: "b".into(),
+        })
+        .await
+        .unwrap();
+
+    tx_a.unbounded_send(Ok(BackendInvalidation::All)).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while punnu_a.get(&1).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(punnu_a.get(&1).is_none());
+    assert_eq!(punnu_b.get(&1).unwrap().label, "b");
+}
+
+#[tokio::test]
+async fn backend_invalidation_all_is_type_scoped_per_punnu() {
+    let (backend_e, tx_e) = StreamingBackend::new();
+    let (backend_f, _tx_f) = StreamingBackendForF::new();
+    let punnu_e = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            namespace: Some("shared-env".into()),
+            ..Default::default()
+        })
+        .backend(backend_e)
+        .build();
+    let punnu_f = Punnu::<F>::builder()
+        .config(PunnuConfig {
+            namespace: Some("shared-env".into()),
+            ..Default::default()
+        })
+        .backend(backend_f)
+        .build();
+
+    punnu_e
+        .insert(E {
+            id: 1,
+            label: "e".into(),
+        })
+        .await
+        .unwrap();
+    punnu_f
+        .insert(F {
+            id: 1,
+            label: "f".into(),
+        })
+        .await
+        .unwrap();
+
+    tx_e.unbounded_send(Ok(BackendInvalidation::All)).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while punnu_e.get(&1).is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(punnu_e.get(&1).is_none());
+    assert_eq!(punnu_f.get(&1).unwrap().label, "f");
+}
+
 fn keyspace<T: Cacheable>(namespace: Option<&str>) -> BackendKeyspace {
     BackendKeyspace {
         namespace: namespace.map(Arc::from),
@@ -283,6 +430,112 @@ impl StreamingBackend {
                 rx: Mutex::new(Some(rx)),
             },
             tx,
+        )
+    }
+}
+
+#[derive(Default)]
+struct RecordingBackend {
+    seen: Arc<Mutex<Vec<BackendKeyspaceSnapshot>>>,
+}
+
+#[derive(Debug, Clone)]
+struct BackendKeyspaceSnapshot {
+    namespace: Option<String>,
+    type_name: &'static str,
+}
+
+impl From<&BackendKeyspace> for BackendKeyspaceSnapshot {
+    fn from(value: &BackendKeyspace) -> Self {
+        Self {
+            namespace: value.namespace.as_ref().map(ToString::to_string),
+            type_name: value.type_name,
+        }
+    }
+}
+
+#[async_trait]
+impl CacheBackend<E> for RecordingBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<Option<E>, BackendError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        keyspace: &BackendKeyspace,
+        _id: &i64,
+        _value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        self.seen.lock().unwrap().push(keyspace.into());
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+type InvalidationRxF =
+    futures::channel::mpsc::UnboundedReceiver<Result<BackendInvalidation<i64>, BackendError>>;
+
+struct StreamingBackendForF {
+    rx: Mutex<Option<InvalidationRxF>>,
+}
+
+impl StreamingBackendForF {
+    fn new() -> (
+        Self,
+        futures::channel::mpsc::UnboundedSender<Result<BackendInvalidation<i64>, BackendError>>,
+    ) {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        (
+            Self {
+                rx: Mutex::new(Some(rx)),
+            },
+            tx,
+        )
+    }
+}
+
+#[async_trait]
+impl CacheBackend<F> for StreamingBackendForF {
+    async fn get(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<Option<F>, BackendError> {
+        Ok(None)
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        _id: &i64,
+        _value: &F,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn invalidation_stream(
+        &self,
+        _keyspace: BackendKeyspace,
+    ) -> sassi::BackendInvalidationStream<i64> {
+        Box::pin(
+            self.rx
+                .lock()
+                .unwrap()
+                .take()
+                .expect("stream should be subscribed once"),
         )
     }
 }
