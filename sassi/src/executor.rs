@@ -1,9 +1,9 @@
 //! [`PunnuExecutor`] — internal abstraction over runtime spawn / sleep
 //! / now primitives.
 //!
-//! `pub(crate)` in v0.1; promoted to `pub` in v0.2 alongside an
-//! opt-in `PunnuConfig::executor` field. See spec §3.11 for the full
-//! contract and §3.11.1 for the v0.2 promotion plan.
+//! This is crate-internal in v0.1.0-alpha. The public runtime surface stays
+//! focused on feature selection (`runtime-tokio` or `runtime-wasm`) while the
+//! crate keeps scheduling and clock reads behind one internal trait.
 //!
 //! # Why an internal trait
 //!
@@ -11,10 +11,7 @@
 //! `spawn`, `sleep`, and a monotonic clock. Routing those through a
 //! trait lets sassi compile cleanly on **both** native (tokio) and
 //! `wasm32-unknown-unknown` (gloo-timers + wasm-bindgen-futures)
-//! targets without `cfg`-gating every call site. v0.2 then promotes
-//! the trait to `pub` and adds `PunnuConfig::executor: Option<Arc<dyn
-//! PunnuExecutor>>` so consumers can plug in smol, async-std, or
-//! embedded executors without sassi growing more knobs.
+//! targets without `cfg`-gating every call site.
 //!
 //! # Three primitives
 //!
@@ -24,8 +21,7 @@
 //!   primitive is part of the executor (rather than a separate
 //!   `Clock` trait) because executor-internal cancellation, sleep
 //!   anchoring, and TTL bookkeeping all read the same clock; keeping
-//!   them on one type avoids a "which clock is which?" confusion when
-//!   v0.2 lets adopters swap executors.
+//!   them on one type avoids a "which clock is which?" confusion.
 //!
 //! # Test determinism note
 //!
@@ -36,8 +32,8 @@
 //! preserves that determinism without exposing a tokio-specific knob
 //! to consumers. The wasm-target counterpart wraps
 //! [`web_time::Instant`] (which uses `Performance.now()` in the
-//! browser); WASM tests are out of scope for v0.1 (tracked at issue
-//! #3).
+//! browser). Direct WASM runtime tests are outside the current v0.1.0-alpha
+//! release gate.
 
 use crate::time::Instant;
 use std::time::Duration;
@@ -63,9 +59,7 @@ pub(crate) type BoxFut<'a> = futures::future::BoxFuture<'a, ()>;
 #[allow(dead_code)]
 pub(crate) type BoxFut<'a> = futures::future::LocalBoxFuture<'a, ()>;
 
-/// Internal abstraction over runtime primitives — `spawn`, `sleep`,
-/// `now`. Promoted to `pub` in v0.2 with a stable signature; v0.1
-/// users see no change.
+/// Internal abstraction over runtime primitives: `spawn`, `sleep`, and `now`.
 ///
 /// The trait is `Send + Sync` on native (the executor handle gets
 /// shared across threads). On wasm it's still `Send + Sync` — the
@@ -105,10 +99,8 @@ pub(crate) trait PunnuExecutor: Send + Sync {
 /// Default runtime impl. Selected at compile time based on which
 /// `runtime-*` feature is active and which target we're compiling for.
 ///
-/// The unit struct carries no state; sassi constructs an
-/// `Arc<DefaultExecutor>` at builder time. v0.2 adopters who want a
-/// custom executor will pass `Arc<MyExecutor>` through
-/// `PunnuConfig::executor`.
+/// The unit struct carries no state; sassi constructs an `Arc<DefaultExecutor>`
+/// at builder time.
 pub(crate) struct DefaultExecutor;
 
 #[cfg(all(feature = "runtime-tokio", not(target_arch = "wasm32")))]

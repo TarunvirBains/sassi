@@ -38,12 +38,12 @@ impl Sassi {
     /// Re-registering the same model type replaces the previous pool.
     /// That makes test setup and application bootstrapping explicit:
     /// the latest registration is the pool that cross-type queries
-    /// observe. `Sassi` is not a multi-tenant registry for multiple
-    /// pools of the same `T`; deployments that need tenant/substrate
-    /// isolation should own separate `Sassi` instances, carry
-    /// [`crate::punnu::TenantKey`] alongside tenant-scoped pools, use
-    /// distinct wrapper types, or deliberately choose a tenant-qualified
-    /// id type when the model identity itself is tenant-qualified.
+    /// observe. `Sassi` is not a multi-tenant registry for multiple pools of
+    /// the same `T`; deployments that need tenant/substrate isolation should
+    /// own separate `Sassi` instances, carry [`crate::punnu::TenantKey`]
+    /// alongside the selected pool, use distinct wrapper types, or deliberately
+    /// choose a tenant-qualified id type when the model identity itself is
+    /// tenant-qualified.
     pub fn register<T>(&mut self, pool: Arc<Punnu<T>>)
     where
         T: Cacheable + 'static,

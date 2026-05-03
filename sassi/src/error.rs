@@ -91,13 +91,11 @@ pub enum InsertError {
 /// fetcher panic surfaced via the single-flight follower path, or an
 /// arbitrary boxed error supplied by the consumer's fetcher closure.
 ///
-/// Spec §3.5.1 enumerates the four owner-loss cases the single-flight
-/// path must handle deterministically; `FetcherPanic` is the one that
-/// surfaces here. The other three (originator-drop-with-peers,
-/// all-awaiters-drop, caller-imposed-deadline) don't produce a
-/// `FetchError` — they either leave the fetch alive, drop it cleanly,
-/// or surface as a `tokio::time::error::Elapsed` from the caller's
-/// own `tokio::time::timeout` wrapper.
+/// Single-flight owner-loss is deterministic: `FetcherPanic` is the case that
+/// surfaces here. Originator-drop-with-peers, all-awaiters-drop, and
+/// caller-imposed deadlines do not produce a `FetchError`; they either leave
+/// the fetch alive, drop it cleanly, or surface as a timeout error from the
+/// caller's own wrapper.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum FetchError {

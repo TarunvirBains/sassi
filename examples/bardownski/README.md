@@ -18,4 +18,6 @@ For a non-interactive smoke test:
 cargo run -p bardownski -- --summary --on-rebound
 ```
 
-The future Dioxus Bardownski belongs to `../djogi` Phase 10. This in-repo example is intentionally native-only: no WASM, no Redis, and no Dioxus.
+A future Dioxus/full-stack version of Bardownski is planned outside this
+repository. This in-repo example is intentionally native-only: no WASM, no
+Redis, and no Dioxus.

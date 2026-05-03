@@ -1,6 +1,6 @@
 //! Periodic refresh helper for simple fixed-interval polling.
 //!
-//! This module covers the lightweight §3.9 path: fetch a full or
+//! This module covers the lightweight polling path: fetch a full or
 //! partial truth set on a timer and apply it to one [`Punnu`](crate::Punnu).
 //! More complex live-query and delta-sync machinery lives in later
 //! modules so the basic polling UX stays small.

@@ -18,9 +18,9 @@
 //! `.CRT$XCU`) inside its own crate. Adopter crates that set
 //! `#![forbid(unsafe_code)]` are not rejected because the unsafe
 //! attribute syntax never appears in the expansion of
-//! `#[sassi::trait_impl]`. `inventory` also has documented support
-//! for `wasm32-unknown-unknown`, so registration fires automatically
-//! on every supported sassi target.
+//! `#[sassi::trait_impl]`. `inventory` also documents support for
+//! `wasm32-unknown-unknown`; Sassi's current release gate verifies the
+//! WASM compile path, with direct WASM runtime tests tracked separately.
 //!
 //! Macro expansion routes through [`crate::__private::inventory`] so
 //! emitted code does not depend on the workspace's exact
@@ -29,14 +29,10 @@
 //! # WASM runtime registration
 //!
 //! `cargo build --target wasm32-unknown-unknown` finishes clean with
-//! the inventory-based registry, and `inventory` has documented
-//! support for the wasm32 startup-init slot. Full *runtime-test*
-//! coverage on `wasm32-unknown-unknown` requires the
-//! `wasm-bindgen-test` runner, which is tracked by sassi GitHub
-//! issue #3 (per-test wasm execution + full multi-target CI matrix).
-//! Until issue #3 lands, runtime registration on wasm32 is asserted
-//! transitively via inventory's documented WASM support (since 2019)
-//! rather than a direct sassi-side wasm-bindgen-test.
+//! the inventory-based registry, and `inventory` documents support for
+//! the wasm32 startup-init slot. Full runtime-test coverage on
+//! `wasm32-unknown-unknown` requires a `wasm-bindgen-test` runner and is
+//! outside the current v0.1.0-alpha release gate.
 
 use crate::sassi::orchestrator::Sassi;
 use std::any::{Any, TypeId};

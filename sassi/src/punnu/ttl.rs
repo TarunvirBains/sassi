@@ -1,6 +1,6 @@
 //! TTL background sweep helpers.
 //!
-//! # TTL semantics (spec §6.2.5)
+//! # TTL semantics
 //!
 //! Two mechanisms enforce expiry:
 //!

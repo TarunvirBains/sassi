@@ -1,15 +1,14 @@
 //! Single-flight fetch coalescing — the in-flight registry that
 //! deduplicates concurrent `get_or_fetch` calls for the same id.
 //!
-//! Spec §3.5.1 — without coalescing, a hot key (e.g., a user-id queried
-//! from N concurrent request handlers) generates N database
-//! round-trips on cold-start. With coalescing, exactly one fetch per
-//! id at any moment; subsequent callers `await` the same future via
-//! [`futures::future::Shared`].
+//! Without coalescing, a hot key (for example, a user id queried from N
+//! concurrent request handlers) generates N database round-trips on cold start.
+//! With coalescing, exactly one fetch runs per id at any moment; subsequent
+//! callers `await` the same future via [`futures::future::Shared`].
 //!
 //! # Cancellation contract (the four owner-loss cases)
 //!
-//! From spec §3.5.1, all four must behave deterministically:
+//! All four owner-loss cases behave deterministically:
 //!
 //! 1. **Originating caller dropped, peers polling.** [`Shared`] keeps
 //!    the underlying fetch alive as long as ≥1 cloned handle exists.

@@ -80,17 +80,17 @@ queries registered with `#[sassi::trait_impl]`.
 
 ## Design Notes For Adopters
 
-A `Punnu<T>` is a resident union for a type, not a hidden materialized result
-set for one query. Several subscriptions can feed the same pool. They share the
-identity map, but each subscription owns its fetcher, filter, watermark, and
-recovery state.
+A `Punnu<T>` is a resident union for a type, not a stored result set for one
+query. Several subscriptions can feed the same pool. They share the identity
+map, but each subscription owns its fetcher, filter, watermark, and recovery
+state.
 
 That tradeoff is intentional. Shared identity keeps memory use and cache
-coherence manageable, while query membership stays explicit at read and refresh
-boundaries. If a row no longer matches one query, return the updated row and let
-predicates stop selecting it. Use tombstones for true deletes from the identity
-map. Use `RefreshMode::Replace` only when the fetcher is authoritative for the
-whole resident set.
+coherence manageable, while per-query inclusion stays explicit at read and
+refresh boundaries. If a row no longer matches one query, return the updated row
+and let predicates stop selecting it. Use tombstones for true deletes from the
+identity map. Use `RefreshMode::Replace` only when the fetcher is authoritative
+for the whole resident set.
 
 Sassi also does not infer tenant, auth, pagination, or row-level-security rules
 from cached values. Put those boundaries in the type, in the id, in a wrapper
@@ -118,8 +118,8 @@ an API feels awkward, or an integration path is missing, please
 adopter friction is useful signal for the v0.1.x surface.
 
 The current release path is focused on the library crate, the Redis companion,
-and the dependency-light `bardownski` TUI example. The heavier Bardownski Dioxus
-implementation is planned outside this workspace.
+and the dependency-light `bardownski` TUI example. A heavier Dioxus/full-stack
+Bardownski implementation is planned outside this repository.
 
 ## Workspace
 
@@ -128,7 +128,18 @@ sassi/              # library crate
 sassi-codegen/      # shared code generation used by sassi and djogi macros
 sassi-macros/       # proc macros
 sassi-cache-redis/  # Redis CacheBackend companion crate
+examples/bardownski/ # dependency-light TUI showcase
 ```
+
+## Documentation
+
+- [Getting Started](docs/getting-started.md)
+- [Concepts](docs/concepts.md)
+- [Query And Refresh Boundaries](docs/query-refresh-boundaries.md)
+- [Backends And Runtimes](docs/backends-and-runtimes.md)
+- [Release Readiness](docs/release-readiness.md)
+- [Bardownski TUI Showcase](examples/bardownski/README.md)
+- [Benchmarks](sassi/benches/README.md)
 
 ## License
 

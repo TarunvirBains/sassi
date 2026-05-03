@@ -12,23 +12,22 @@
 //! so generic code like `PunnuScope<T: Cacheable>` can call `T::fields()`
 //! without knowing the concrete type.
 //!
-//! The three doctrines that govern correct use are documented in the
-//! design spec §3.1.1 (visage Punnus are independent; collection
-//! aggregates use a wrapper struct rather than a sentinel; tenant
-//! identity is part of the cache key, materialised by namespacing the
-//! `Punnu` instance).
+//! Correct use starts with explicit identity boundaries: view/projection
+//! types should get their own `Punnu<Projection>` instances, collection
+//! aggregates should use wrapper structs rather than sentinel values, and
+//! tenant/substrate identity should live in the type, id, wrapper, fetcher, or
+//! caller-owned pool selection logic that actually enforces that boundary.
 
 use std::hash::Hash;
 use std::marker::PhantomData;
 
 /// Identity contract for entries stored in a `Punnu`.
 ///
-/// Caches the **canonical shape** of `T`. Visage projections (auth-aware
-/// views of a model) get their own independent `Punnu<VisageT>` instance
-/// per the design spec's Doctrine A — the type system makes them
-/// disjoint at compile time, and the identity-map invariant ("one `id()`
-/// → one cached entry") holds trivially per `Punnu` because the type
-/// signature fixes the shape.
+/// Caches the **canonical shape** of `T`. Projection or view types should get
+/// their own independent `Punnu<ProjectionT>` instance so the type system keeps
+/// them disjoint at compile time. The identity-map invariant ("one `id()` → one
+/// cached entry") then holds per `Punnu` because the type signature fixes the
+/// shape.
 pub trait Cacheable: Send + Sync + 'static {
     /// Identity type. Must be cheap to clone (the cache copies it on
     /// every lookup), hashable + equality-comparable for the LRU key,

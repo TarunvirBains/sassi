@@ -83,8 +83,7 @@ pub struct PunnuConfig {
     /// Spawning requires a target-compatible runtime feature:
     /// `runtime-tokio` on native targets or `runtime-wasm` on wasm32.
     /// Without one, opting into a sweep panics at build time instead
-    /// of silently dropping the configured cleanup path. See spec
-    /// §6.2.5 for the contract.
+    /// of silently dropping the configured cleanup path.
     pub ttl_sweep_interval: Option<Duration>,
 
     /// Backend cache-key namespace prepended to all L2 backend keys.

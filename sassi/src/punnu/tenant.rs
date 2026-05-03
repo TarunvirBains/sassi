@@ -1,26 +1,22 @@
-//! [`TenantKey`] — multi-tenant identity for [`crate::punnu::Punnu`]
-//! instances.
+//! [`TenantKey`] — adopter-owned tenant labels for applications that keep
+//! tenant context beside Sassi handles.
 //!
-//! v0.1 of this cluster ships the type alone; cross-tenant access
-//! guards (Doctrine C in spec §3.1.1) wire up alongside the scope /
-//! orchestrator surface in a later task.
+//! Sassi does not infer tenant isolation from cached values and does not
+//! turn [`crate::punnu::PunnuConfig::namespace`] into an L1 tenancy boundary.
+//! `PunnuConfig::namespace` is for L2 backend keyspace separation.
 //!
-//! Sassi's tenant model is "tenant identity is part of the cache key" —
-//! materialised by **namespacing the `Punnu` instance**, not by adding
-//! a tenant column inside the cached value. Doctrine C: a
-//! single-tenant `Punnu` and a per-tenant `Punnu` are different types
-//! at construction. The pair `(TenantKey, Punnu<T>)` is the canonical
-//! shape; consumers carry the tenant key alongside the pool reference
-//! and never thread it through `T`.
+//! Applications that need tenant or substrate separation should make that
+//! boundary explicit: own separate pool handles per substrate, use distinct
+//! wrapper types, choose a tenant-qualified id when identity itself is
+//! tenant-qualified, or carry `TenantKey` alongside the pool/reference that
+//! is allowed to serve a request.
 
 /// Opaque tenant identifier.
 ///
-/// A `TenantKey` is just a wrapper around `String` — no parsing, no
-/// schema. Sassi never inspects the contents; it's a label that flows
-/// through the cache-key namespace and (in a later task) the
-/// cross-tenant access guards. Consumers choose the encoding —
-/// typical patterns are tenant slugs (`"acme"`), HeerId-rendered ids
-/// (`"H7K..."`), or environment-prefixed combos (`"prod_acme"`).
+/// A `TenantKey` is just a wrapper around `String`: no parsing, no schema,
+/// and no built-in authorization semantics. Sassi never inspects the contents.
+/// Consumers choose the encoding; typical patterns are tenant slugs (`"acme"`),
+/// stable external ids, or environment-prefixed labels (`"prod_acme"`).
 ///
 /// # Construction
 ///

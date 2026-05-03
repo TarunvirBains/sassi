@@ -21,8 +21,7 @@ use proc_macro::TokenStream;
 /// 1. A companion `{StructName}Fields` struct with one
 ///    `sassi::Field<Self, FieldType>` per declared field.
 /// 2. `impl sassi::Cacheable for {StructName}` with:
-///    - `Id` = the type of the field literally named `id` (v0.2 will
-///      accept `#[cacheable(id)]` on a custom-named field).
+///    - `Id` = the type of the field literally named `id`.
 ///    - `fields()` trait method wiring every accessor to its real
 ///      extractor (so generic `T: Cacheable` callers can construct
 ///      wired Fields without knowing the concrete type).

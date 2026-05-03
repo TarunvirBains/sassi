@@ -160,11 +160,8 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// [`Punnu::config`]; not mutated after construction.
     pub(crate) config: PunnuConfig,
 
-    /// Runtime primitives — `spawn`, `sleep`, `now`. Held as
-    /// `Arc<dyn PunnuExecutor>` so v0.2's
-    /// [`crate::punnu::PunnuConfig::executor`] field plugs in without
-    /// any internal refactor; v0.1 always populates this with
-    /// `Arc<DefaultExecutor>`. See spec §3.11 / §3.11.1.
+    /// Runtime primitives — `spawn`, `sleep`, `now`. Kept behind a trait so
+    /// native and WASM targets can share scheduling and clock call sites.
     pub(crate) executor: Arc<dyn PunnuExecutor>,
 
     /// Optional L2 backend adapter. `None` is the default L1-only
@@ -670,12 +667,12 @@ impl<T: Cacheable> Punnu<T> {
     /// canonical id. If it returns `Some(value)` where `value.id()`
     /// does not equal the requested id, Sassi returns
     /// [`FetchError::IdentityMismatch`] and does not cache the value.
-    /// Auth-filtered, paginated, tenant-filtered, or query-specific
-    /// fetchers should use a tenant-scoped `Punnu`, a distinct
-    /// wrapper type, a deliberately tenant-qualified id type, or the
-    /// refresh/subscription APIs that carry explicit query state.
+    /// Auth-filtered, paginated, tenant-filtered, or query-specific fetchers
+    /// should use caller-owned pool selection, a distinct wrapper type, a
+    /// deliberately tenant-qualified id type, or the refresh/subscription APIs
+    /// that carry explicit query state.
     ///
-    /// # Single-flight coalescing (spec §3.5.1)
+    /// # Single-flight coalescing
     ///
     /// Concurrent `get_or_fetch` calls for the same `id` deduplicate:
     /// exactly one fetcher runs per cold fetch, even when N callers
@@ -733,7 +730,7 @@ impl<T: Cacheable> Punnu<T> {
 
         // Time the fetch path end-to-end (registry attach + fetcher
         // run + L1 insert) so the latency includes coalescing
-        // overhead. Spec §3.5.1: `record_fetch_latency` fires for
+        // overhead. `record_fetch_latency` fires for
         // every `get_or_fetch` invocation that hits the slow path
         // (L1 miss). Hits don't pay fetch latency, so they don't
         // emit the histogram point.
@@ -788,18 +785,16 @@ impl<T: Cacheable> Punnu<T> {
     /// `batch_fetcher` as a single call). Avoids N round-trips when
     /// the consumer naturally has a list of ids to resolve.
     ///
-    /// # Single-flight semantics (v0.1)
+    /// # Single-flight semantics
     ///
     /// Within a single batch call, missing ids are deduplicated
     /// before the batch fetcher is invoked (input may contain dupes).
     /// Across concurrent batch calls, batch-level deduplication is
-    /// **not** implemented in v0.1 — two concurrent
+    /// **not** implemented in v0.1.0-alpha — two concurrent
     /// `get_or_fetch_many(&[1, 2, 3])` calls invoke the batch fetcher
     /// twice for the same set. Per-id single-flight coalescing across
     /// concurrent *individual* `get_or_fetch` calls still applies as
     /// usual; only the batch path skips the cross-batch dedup.
-    ///
-    /// Tracked as a v0.2 enhancement.
     ///
     /// # Result ordering
     ///
@@ -817,10 +812,10 @@ impl<T: Cacheable> Punnu<T> {
     /// set. If the fetcher returns an unsolicited id, Sassi returns
     /// [`FetchError::IdentityMismatch`] before mutating L1. Duplicate
     /// returned ids are deduplicated deterministically before insert.
-    /// Do not use this API to encode query/page/filter membership;
-    /// use a tenant-scoped `Punnu`, a distinct wrapper type, a
-    /// deliberately tenant-qualified id type, or the refresh APIs that
-    /// carry explicit query state.
+    /// Do not use this API to encode query/page/filter membership; use
+    /// caller-owned pool selection, a distinct wrapper type, a deliberately
+    /// tenant-qualified id type, or the refresh APIs that carry explicit query
+    /// state.
     ///
     /// # Example
     ///
@@ -869,8 +864,8 @@ impl<T: Cacheable> Punnu<T> {
             return Ok(hits);
         }
 
-        // One batch fetch covers every missing id. Cross-batch
-        // dedup is documented as a v0.2 enhancement above.
+        // One batch fetch covers every missing id in this call. Separate batch
+        // calls do not share in-flight work.
         let missing_set = seen_missing;
         let fetched = batch_fetcher(missing).await?;
         let mut deduped_fetched = Vec::with_capacity(fetched.len());
@@ -1733,9 +1728,9 @@ impl<T: Cacheable> Punnu<T> {
     //     `&self` with no error handling.
     //   - reads `type_name` once via `std::any::type_name::<T>()`
     //     (zero runtime cost; resolved at compile time per generic
-    //     instantiation). Spec §3.5.1 documents that `type_name` is
-    //     a metrics label, not a stable cross-version protocol id —
-    //     wire-format keys use a different identifier.
+    //     instantiation). `type_name` is a metrics label, not a stable
+    //     cross-version protocol id; wire-format keys use a different
+    //     identifier.
     //   - the `if let Some(m) = ...` guard ensures the no-op path
     //     compiles to a single null-check at the call site.
     // ---------------------------------------------------------------
@@ -2244,9 +2239,9 @@ fn reply_stopped_to_queued_triggers(
 
 /// Builder for [`Punnu<T>`]. Construct via [`Punnu::builder`].
 ///
-/// The builder pattern lets the v0.1 surface stay narrow while
-/// reserving room for future executor and tenant-specific setters.
-/// Active configuration paths are `.config(c)`, which captures a
+/// The builder pattern keeps construction explicit while leaving room for
+/// future configuration without widening [`Punnu::builder`] itself. Active
+/// configuration paths are `.config(c)`, which captures a
 /// fully-formed [`PunnuConfig`], and `.backend(b)` when the `serde`
 /// feature is enabled.
 pub struct PunnuBuilder<T: Cacheable> {

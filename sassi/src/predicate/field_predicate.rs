@@ -35,8 +35,8 @@ use std::sync::Arc;
 /// | `IsNull`, `IsNotNull` | `Arc<()>` (no operand) |
 /// | `Contains`, `IContains`, `StartsWith`, `IStartsWith`, `EndsWith`, `IEndsWith`, `IExact` | `Arc<String>` |
 ///
-/// Marked `#[non_exhaustive]` so adding new ops (e.g., `Like` for SQL
-/// raw-pattern, `Regex`) in v0.2+ doesn't break downstream matchers.
+/// Marked `#[non_exhaustive]` so adding new ops in a future release does not
+/// break downstream matchers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LookupOp {

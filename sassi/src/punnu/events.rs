@@ -139,11 +139,10 @@ where
 /// (LRU eviction, TTL expiry, backend-driven invalidation) live in the
 /// sibling [`EventReason`] enum; callers cannot synthesise those.
 ///
-/// The variants are stable wire-level identifiers — distributed
-/// backends fan invalidations across processes by reason, so adding a
-/// new variant is a minor-version event and removing one is a
-/// breaking change. Sassi reserves the right to add new variants in
-/// future minor releases (the type is `#[non_exhaustive]`).
+/// These variants are local event labels. Backend invalidation streams carry
+/// backend messages such as "this id changed" or "this keyspace changed"; Sassi
+/// maps those messages to [`EventReason::BackendInvalidation`] on the local
+/// event stream.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidationReason {
@@ -151,14 +150,12 @@ pub enum InvalidationReason {
     /// `punnu.invalidate(&id, InvalidationReason::Manual).await?`.
     Manual,
 
-    /// Driven by a successful `Model::save` on the bound
-    /// `DjogiContext` (the same-process invalidation path described
-    /// in spec §6.1). Sassi-side semantics: the consumer surfaces this
-    /// reason; sassi records it.
+    /// Caller uses this when an application save/update path invalidates the
+    /// cached entry.
     OnSave,
 
-    /// Driven by a successful `Model::delete` on the bound
-    /// `DjogiContext` (spec §6.1).
+    /// Caller uses this when an application delete path invalidates the
+    /// cached entry.
     OnDelete,
 }
 
@@ -185,11 +182,9 @@ pub enum InvalidationReason {
 /// way around any privacy boundary in Rust; this seal is a safe-code
 /// guarantee, not a hard impossibility.)
 ///
-/// The variants are stable wire-level identifiers — distributed
-/// backends fan invalidations across processes by reason, so adding a
-/// new variant is a minor-version event and removing one is a
-/// breaking change. Sassi reserves the right to add new variants in
-/// future minor releases (the type is `#[non_exhaustive]`).
+/// These variants are local event labels. They are not the backend wire format.
+/// Backends publish [`crate::backend::BackendInvalidation`] messages, and Sassi
+/// translates those messages into this taxonomy for subscribers.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventReason {
@@ -222,16 +217,13 @@ pub enum EventReason {
     /// System-internal: the entry's TTL elapsed and a physical cleanup
     /// path removed it. Lazy `get` observes expired entries as absent
     /// without emitting this event; the optional background sweep emits
-    /// it when it removes an expired entry mid-tick. See spec §6.2.5
-    /// for the TTL contract. Not reachable via
-    /// [`crate::punnu::Punnu::invalidate`]; sealed against external
-    /// construction.
+    /// it when it removes an expired entry mid-tick. Not reachable via
+    /// [`crate::punnu::Punnu::invalidate`]; sealed against external construction.
     #[non_exhaustive]
     TtlExpired,
 
-    /// System-internal: a distributed cache backend (Redis pub/sub,
-    /// Postgres LISTEN/NOTIFY, …) pushed an invalidation that the
-    /// [`crate::punnu::Punnu`] applied locally through
+    /// System-internal: a cache backend pushed an id/keyspace invalidation that
+    /// the [`crate::punnu::Punnu`] applied locally through
     /// [`crate::backend::CacheBackend::invalidation_stream`]. Not reachable via
     /// [`crate::punnu::Punnu::invalidate`]; sealed against external
     /// construction.
