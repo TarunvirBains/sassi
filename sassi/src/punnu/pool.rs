@@ -250,7 +250,7 @@ impl<T: Cacheable> Punnu<T> {
     ///   configured and a non-expired entry with the id already
     ///   exists.
     /// - [`InsertError::BackendFailed`] / [`InsertError::Serialization`]
-    ///   become reachable when L2 backends land in a later task.
+    ///   when an attached L2 backend fails under a strict failure mode.
     ///
     /// # TTL
     ///

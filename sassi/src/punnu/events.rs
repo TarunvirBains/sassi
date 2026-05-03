@@ -231,11 +231,8 @@ pub enum EventReason {
 
     /// System-internal: a distributed cache backend (Redis pub/sub,
     /// Postgres LISTEN/NOTIFY, …) pushed an invalidation that the
-    /// [`crate::punnu::Punnu`] applied locally. Forward-compat pin:
-    /// the `CacheBackend::invalidation_stream` consumer hooks into
-    /// this variant when the future backend integration ships.
-    /// Pinned today so subscribers can pattern-match against it from
-    /// v0.1.0-alpha.0 onward. Not reachable via
+    /// [`crate::punnu::Punnu`] applied locally through
+    /// [`crate::backend::CacheBackend::invalidation_stream`]. Not reachable via
     /// [`crate::punnu::Punnu::invalidate`]; sealed against external
     /// construction.
     #[non_exhaustive]

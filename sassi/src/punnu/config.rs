@@ -59,8 +59,8 @@ pub struct PunnuConfig {
     /// What to do when an L2 backend write-through fails during
     /// [`crate::punnu::Punnu::insert`]. Default
     /// [`BackendFailureMode::L1Only`] — log the error, succeed against
-    /// L1 alone. Forward-compat pin: routing logic lands when the
-    /// `CacheBackend` integration ships.
+    /// L1 alone. Applies when a backend is attached with
+    /// [`crate::punnu::PunnuBuilder::backend`].
     pub backend_failure_mode: BackendFailureMode,
 
     /// What to do when [`crate::punnu::Punnu::insert`] is called for an
@@ -93,8 +93,6 @@ pub struct PunnuConfig {
     /// production setups typically use `"prod_v1"` / `"staging_v1"`,
     /// and tests use a per-run UUID for parallel isolation. L1
     /// storage is unaffected — namespacing governs only L2 keys.
-    /// Forward-compat pin: load-bearing once the `CacheBackend`
-    /// integration ships.
     pub namespace: Option<String>,
 
     /// Optional observability hook. When `Some`, every event of
@@ -164,7 +162,7 @@ pub fn retry_delay_for_attempt(attempt_number: u8) -> Duration {
 /// correctness boundary. Consumers with stricter consistency
 /// requirements should pick [`BackendFailureMode::Error`] (propagate)
 /// or [`BackendFailureMode::Retry`] (retry-with-backoff before falling
-/// through). Loaded by the L2 wiring landing in a later task.
+/// through).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendFailureMode {
     /// Log the backend error, fall back to L1-only. Insert / get /

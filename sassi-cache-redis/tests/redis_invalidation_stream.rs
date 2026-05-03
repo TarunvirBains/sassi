@@ -32,6 +32,33 @@ impl Cacheable for E {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct F {
+    id: i64,
+    label: String,
+}
+
+#[derive(Default)]
+struct FFields {
+    #[allow(dead_code)]
+    id: Field<F, i64>,
+}
+
+impl Cacheable for F {
+    type Id = i64;
+    type Fields = FFields;
+
+    fn id(&self) -> i64 {
+        self.id
+    }
+
+    fn fields() -> FFields {
+        FFields {
+            id: Field::new("id", |f| &f.id),
+        }
+    }
+}
+
 fn redis_client() -> Option<redis::Client> {
     std::env::var("REDIS_URL")
         .ok()
@@ -135,4 +162,50 @@ async fn redis_invalidate_all_is_namespace_scoped() {
 
     assert_eq!(backend.get(&drop, &1).await.unwrap(), None);
     assert_eq!(backend.get(&keep, &1).await.unwrap().unwrap().label, "keep");
+}
+
+#[tokio::test]
+async fn redis_invalidate_all_is_type_scoped() {
+    let Some(client) = redis_client() else {
+        eprintln!("skipping redis test because REDIS_URL is not set");
+        return;
+    };
+    let e_backend = RedisBackend::<E>::new(client.clone());
+    let f_backend = RedisBackend::<F>::new(client);
+    let ns = namespace("type-scope");
+    let e_keyspace = keyspace::<E>(ns.clone());
+    let f_keyspace = keyspace::<F>(ns);
+
+    e_backend
+        .put(
+            &e_keyspace,
+            &1,
+            &E {
+                id: 1,
+                label: "drop".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    f_backend
+        .put(
+            &f_keyspace,
+            &1,
+            &F {
+                id: 1,
+                label: "keep".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    e_backend.invalidate_all(&e_keyspace).await.unwrap();
+
+    assert_eq!(e_backend.get(&e_keyspace, &1).await.unwrap(), None);
+    assert_eq!(
+        f_backend.get(&f_keyspace, &1).await.unwrap().unwrap().label,
+        "keep"
+    );
 }

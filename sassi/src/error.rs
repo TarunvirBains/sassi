@@ -10,9 +10,7 @@
 //! - [`FetchError`] — surfaced from [`crate::punnu::Punnu::get_or_fetch`]
 //!   and batch fetch helpers.
 //! - [`BackendError`] — surfaced from the [`CacheBackend`](crate) trait
-//!   (full trait lands in a later task; the variants are pinned now so
-//!   error types that compose with it are stable from v0.1.0-alpha.0
-//!   onward).
+//!   and from [`crate::punnu::Punnu::get_async`].
 //!
 //! Sassi's error doctrine matches the Rust ecosystem standard:
 //! `thiserror`-derived enums for library types, with `#[error("…")]`
@@ -50,10 +48,9 @@ pub enum WireFormatError {
 /// The default L1-only configuration only ever produces
 /// [`InsertError::Conflict`] (when the pool is configured with
 /// [`crate::punnu::OnConflict::Reject`] and an entry with the same id is
-/// already present). [`InsertError::Serialization`] and
-/// [`InsertError::BackendFailed`] become reachable when an L2 backend
-/// is wired up — the variants live here from day one so the error type
-/// is stable before backends land.
+/// already present). [`InsertError::Serialization`],
+/// [`InsertError::BackendFailed`], and [`InsertError::WireFormat`]
+/// become reachable when an L2 backend is attached.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum InsertError {
@@ -151,19 +148,16 @@ pub enum FetchError {
     /// [`crate::punnu::Punnu::get_or_fetch`] path uses
     /// `insert_arc_or_existing` and returns the already-cached value
     /// instead of surfacing a conflict. L2 write-through can also lift
-    /// [`InsertError`] into the fetch error space once backends land.
+    /// [`InsertError`] into the fetch error space.
     #[error("L1 insert failed during fetch: {0}")]
     Insert(#[from] InsertError),
 }
 
 /// Errors from the [`CacheBackend`](crate) trait surface.
 ///
-/// The full backend trait lands in a later task; the variants are
-/// pinned here so types that compose with it (notably
-/// [`InsertError::BackendFailed`]) have a stable shape from
-/// v0.1.0-alpha.0 onward. Backends choose the variant that best matches
-/// the underlying failure; consumers pattern-match on the variant
-/// rather than parsing the message.
+/// Backends choose the variant that best matches the underlying
+/// failure; consumers pattern-match on the variant rather than parsing
+/// the message.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BackendError {
