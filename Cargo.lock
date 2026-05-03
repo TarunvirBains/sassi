@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "sassi"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "sassi-cache-redis"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "sassi-codegen"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1609,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "sassi-macros"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",

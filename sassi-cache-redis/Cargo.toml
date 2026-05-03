@@ -1,6 +1,7 @@
 [package]
 name = "sassi-cache-redis"
 description = "Redis CacheBackend implementation for sassi with pub/sub invalidation."
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +9,11 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+keywords = ["cache", "redis", "invalidation"]
+categories = ["caching"]
 
 [dependencies]
-sassi = { path = "../sassi", version = "0.1.0-alpha.0" }
+sassi = { path = "../sassi", version = "0.1.0-alpha.1" }
 async-trait = { workspace = true }
 async-stream = "0.3"
 futures = { workspace = true }

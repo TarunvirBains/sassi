@@ -1,5 +1,9 @@
 # sassi
 
+[![Crates.io](https://img.shields.io/crates/v/sassi.svg)](https://crates.io/crates/sassi)
+[![Docs.rs](https://docs.rs/sassi/badge.svg)](https://docs.rs/sassi)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 > Named after Sassi and Punnu, the central figures of a classic Punjabi folk
 > tale.
 
@@ -109,8 +113,10 @@ of the WASM build, not a separately certified integration here.
 
 ## Status
 
-Sassi is pre-v0.1.0. The public shape is close, but the first release cut is
-still going through implementation, review, examples, benchmarks, and docs.
+Sassi is preparing its first public alpha: `0.1.0-alpha.1`. The core API,
+Redis companion, Bardownski TUI example, benchmark harness, and adopter docs are
+in place, with the usual caution that alpha APIs can still move as real adopters
+put pressure on the design.
 
 Adopter feedback is welcome. If Sassi looks useful but a workflow is unclear,
 an API feels awkward, or an integration path is missing, please
@@ -125,7 +131,7 @@ Bardownski implementation is planned outside this repository.
 
 ```text
 sassi/              # library crate
-sassi-codegen/      # shared code generation used by sassi and djogi macros
+sassi-codegen/      # shared code generation used by sassi macros
 sassi-macros/       # proc macros
 sassi-cache-redis/  # Redis CacheBackend companion crate
 examples/bardownski/ # dependency-light TUI showcase
@@ -133,14 +139,18 @@ examples/bardownski/ # dependency-light TUI showcase
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [Concepts](docs/concepts.md)
-- [Query And Refresh Boundaries](docs/query-refresh-boundaries.md)
-- [Backends And Runtimes](docs/backends-and-runtimes.md)
-- [Release Readiness](docs/release-readiness.md)
-- [Bardownski TUI Showcase](examples/bardownski/README.md)
-- [Benchmarks](sassi/benches/README.md)
+- [Getting Started](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/getting-started.md)
+- [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/concepts.md)
+- [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/query-refresh-boundaries.md)
+- [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/backends-and-runtimes.md)
+- [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/docs/release-readiness.md)
+- [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/examples/bardownski/README.md)
+- [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/sassi/benches/README.md)
+- [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/CHANGELOG.md)
 
 ## License
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+Dual-licensed under
+[MIT](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/LICENSE-MIT)
+or
+[Apache-2.0](https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.1/LICENSE-APACHE).

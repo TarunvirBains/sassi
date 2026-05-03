@@ -66,8 +66,8 @@ the single source of backend keyspace separation.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-alpha.0"
-sassi-cache-redis = "0.1.0-alpha.0"
+sassi = "0.1.0-alpha.1"
+sassi-cache-redis = "0.1.0-alpha.1"
 ```
 
 ## Backend Failure Modes
@@ -115,7 +115,7 @@ For `wasm32-unknown-unknown`, enable `runtime-wasm`:
 
 ```toml
 sassi = {
-    version = "0.1.0-alpha.0",
+    version = "0.1.0-alpha.1",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }

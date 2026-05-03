@@ -1,6 +1,6 @@
 [package]
 name = "sassi-codegen"
-description = "Shared codegen primitives for sassi-macros and downstream proc-macro consumers (e.g., djogi-macros). Library crate, NOT a proc-macro crate."
+description = "Shared codegen primitives for sassi-macros and downstream proc-macro consumers."
 readme = "../README.md"
 version.workspace = true
 edition.workspace = true

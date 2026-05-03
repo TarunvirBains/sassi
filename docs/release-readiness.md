@@ -82,6 +82,12 @@ cargo publish --dry-run -p sassi --locked
 cargo publish --dry-run -p sassi-cache-redis --locked
 ```
 
+For the first publish of a new version, downstream dry-runs cannot resolve until
+the upstream crate exists on crates.io. Publish or dry-run in dependency order:
+`sassi-codegen`, then `sassi-macros`, then `sassi`, then `sassi-cache-redis`.
+After each upstream publish is visible in the registry index, rerun the next
+dry-run cleanly before publishing it.
+
 Benchmark documentation lives in
 [sassi/benches/README.md](../sassi/benches/README.md). The current expectation
 is that benchmarks are release baselines for comparing same-host changes, not
