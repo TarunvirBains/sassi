@@ -265,8 +265,8 @@ impl<T: Cacheable> Punnu<T> {
     /// [`EventReason::LruEvict`] event fires before the
     /// `Insert` / `Update` event.
     ///
-    /// `async` because L2 backend write-through (a later task) is
-    /// async; the L1-only path resolves immediately.
+    /// `async` because attached L2 backend write-through is async; the
+    /// L1-only path resolves immediately.
     ///
     /// # Errors
     ///
@@ -393,8 +393,8 @@ impl<T: Cacheable> Punnu<T> {
     /// and surface on the event stream as [`EventReason::LruEvict`] /
     /// [`EventReason::TtlExpired`], not via this entry point.
     ///
-    /// `async` because L2 backend invalidation (a later task) is
-    /// async; the L1-only path resolves immediately.
+    /// `async` because attached L2 backend invalidation is async; the
+    /// L1-only path resolves immediately.
     ///
     /// # Errors
     ///
@@ -2217,10 +2217,10 @@ fn reply_stopped_to_queued_triggers(
 /// Builder for [`Punnu<T>`]. Construct via [`Punnu::builder`].
 ///
 /// The builder pattern lets the v0.1 surface stay narrow while
-/// reserving room for `.with_backend(...)`, `.with_executor(...)`,
-/// `.with_tenant(...)` setters that land in later tasks. Today the
-/// only active configuration path is `.config(c)`, which captures a
-/// fully-formed [`PunnuConfig`].
+/// reserving room for future executor and tenant-specific setters.
+/// Active configuration paths are `.config(c)`, which captures a
+/// fully-formed [`PunnuConfig`], and `.backend(b)` when the `serde`
+/// feature is enabled.
 pub struct PunnuBuilder<T: Cacheable> {
     config: PunnuConfig,
     #[cfg(feature = "serde")]

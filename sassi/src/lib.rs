@@ -3,10 +3,11 @@
 //! Typed in-memory pool (`Punnu<T>`) with composable predicate algebra
 //! (`BasicPredicate<T>` + `MemQ<T>`) and cross-runtime trait queries.
 //!
-//! Sassi is **runtime-agnostic** — usable from a backend (e.g., Axum +
-//! a database ORM consumer like djogi) and from a Dioxus frontend
-//! without any backend dependency. Predicates compose with `&`, `|`,
-//! `^`, `!` operators and run identically on both runtimes.
+//! Sassi is framework-neutral: usable from native services, workers,
+//! libraries, and `wasm32-unknown-unknown` applications without a
+//! backend-specific dependency. Predicates compose with `&`, `|`, `^`,
+//! `!` operators and evaluate through the same in-memory path on every
+//! supported target.
 //!
 //! Pre-v0.1.0 alpha. The core public surface is available now:
 //! [`Cacheable`] identities, [`Punnu<T>`](Punnu) pools, in-memory

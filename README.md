@@ -1,82 +1,58 @@
 # sassi
 
+> Named after Sassi and Punnu, the central figures of a classic Punjabi folk
+> tale.
+
 Sassi is a typed cache substrate for Rust applications.
 
-It gives you an in-process identity map, query predicates, refresh loops, delta
-sync, and optional backing storage without asking you to adopt an ORM, a web
-framework, or a database client. The goal is to make cached application data
-feel like ordinary Rust data: typed, testable, portable across native and WASM
-targets, and explicit about the places where cache correctness usually gets
-fuzzy.
+It helps you keep a local, typed view of data you have already fetched without
+tying that view to an ORM, a web framework, or a database client. A service,
+worker, desktop app, library, or WASM build can use the same data model and the
+same cache contracts.
 
-Sassi is being built alongside [djogi](https://github.com/TarunvirBains/djogi),
-but it is not djogi-specific. A service, desktop app, Dioxus frontend, worker,
-or library can use Sassi as the shared caching layer under its own data model.
+The name is meant in that literary context. If it is unfamiliar, the source
+material is worth exploring on its own terms; this project borrows from that
+tradition, not from an acronym or an invented technical metaphor. Any similarity
+to unrelated software, tools, or projects is coincidental. Sassi is independent
+and unaffiliated.
 
-## Why it exists
+## Why Sassi Exists
 
-Rust has strong tools for databases, async services, and frontend state, but
-there is still a gap between "query the source of truth again" and "keep a
-safe, typed local view of the data I already fetched." Most projects fill that
-gap with ad hoc maps, request-scoped caches, stale globals, or framework-local
-state.
+Many Rust applications grow a layer between the source of truth and the code
+that reads from it: identity maps, predicate helpers, refresh tasks, backend
+invalidation, and small caches around expensive calls. Those layers often start
+simple. The hard parts tend to arrive gradually: typed identity, freshness,
+eviction, query boundaries, runtime portability, and visibility into what the
+cache is doing.
 
-Sassi tries to make that middle layer boring:
+Sassi gives that layer a shared shape. It is not trying to replace a database,
+an ORM, or an application state framework. It focuses on the cache substrate
+beneath them: storing values by typed identity, reading through explicit
+predicates, refreshing from fetchers, and keeping cache policy visible in Rust
+types.
 
-- cache entries by their real typed identity
-- keep reads cheap with immutable L1 snapshots
-- express reusable predicates once
-- run the same data model on backend and WASM frontend builds
-- refresh whole sets or delta streams without hiding query state inside the
-  cache
-- plug in a backend cache when a process-local L1 is not enough
+## What It Provides
 
-## Core pieces
+- Typed identity maps through `Punnu<T>` and `Cacheable`
+- Cheap in-process reads from immutable L1 snapshots
+- `BasicPredicate<T>` for constraints a fetcher can inspect and replay
+- `MemQ<T>` for in-memory closure and trait-based querying
+- Lazy fetch-on-miss with `get_or_fetch` and `get_or_fetch_many`
+- Periodic refresh and watermark-based delta refresh
+- Bounded sampled-LRU eviction, optional TTL, events, and metrics
+- An L2 `CacheBackend` boundary with memory and file backends in the core crate
+- Redis support in the `sassi-cache-redis` companion crate
+- A `Sassi` orchestrator for typed pools and cross-type trait queries
+- Native `tokio` support and a `wasm32-unknown-unknown` compile path
 
-- `Punnu<T>` is the typed pool. It stores `Arc<T>` values by `Cacheable::Id`,
-  uses bounded sampled-LRU eviction, supports optional TTL, and can publish
-  cache events.
-- `Cacheable` is the trait that tells Sassi how to identify a value. The derive
-  macro can also mark a monotonic watermark field for delta sync.
-- `BasicPredicate<T>` is a serializable predicate algebra for filters that can
-  be projected to a data layer and replayed in memory.
-- `MemQ<T>` adds in-memory-only predicates for closures and trait-based checks.
-- `start_periodic_refresh` runs simple polling refreshes.
-- `start_delta_refresh` runs watermark-based subscriptions with per-subscription
-  watermarks, single-flight updates, eviction recovery, and periodic full
-  refresh policies.
-- `CacheBackend` lets Sassi use Redis, file, memory, or other backend stores
-  behind the same cache trait.
-- `Sassi` is the process orchestrator for cross-type pools and trait queries.
+## Core Shape
 
-## Refresh Model
+`Punnu<T>` is the in-process pool. It stores `Arc<T>` values by
+`Cacheable::Id`, publishes new immutable snapshots after writes, and lets reads
+compose explicit predicates over the resident data.
 
-Use `start_periodic_refresh` when a fetcher returns a complete or partial list
-on a timer and a simple upsert or replace policy is enough.
-
-Use `start_delta_refresh` when the source can answer "what changed since this
-watermark?" Delta refreshers own their own watermark, recovery set, and
-single-flight slot, so several query-shaped subscriptions can feed the same
-`Punnu<T>` without advancing each other's cursors.
-
-A single `Punnu<T>` stores the resident union for that type. It does not store
-hidden query membership. Query-specific reads should use `scope()` predicates,
-and query-specific refreshers should not use `RefreshMode::Replace` unless they
-are authoritative for the whole resident set.
-
-Refresh subscriptions should be driven by data-layer-projectable filters. In
-Sassi terms, that means `BasicPredicate` constraints. `MemQ` closures are for
-in-memory reads after data has reached the pool; they cannot be replayed safely
-by a backend fetcher.
-
-Delta tombstones mean true deletes from the identity map. If a row merely stops
-matching a query, return the updated row and let predicates stop selecting it.
-For soft deletes, keep the deleted marker on the value and opt into visibility
-at the data layer when a fetcher needs to recover or migrate those rows.
-
-## Watermarks
-
-Delta sync requires a monotonic watermark. With `#[derive(Cacheable)]`, use:
+`Cacheable` tells Sassi how to identify a value. The derive macro can also mark
+a monotonic watermark field for delta sync:
 
 ```rust
 #[derive(sassi::Cacheable)]
@@ -87,50 +63,72 @@ struct User {
 }
 ```
 
-Sassi ships std-only watermark impls for integers, `SystemTime`, and small
-tuples. Enable `watermark-time` for `time` types and `watermark-chrono` for
-`chrono` types.
+`BasicPredicate<T>` is the shared predicate algebra. It is walkable and
+data-layer-projectable, so a fetcher can understand the same constraints that
+Sassi can replay in memory. It is not a serde-serializable wire format in
+v0.1.0.
 
-Fetchers should query with an inclusive `>= since` boundary. Returning the
-boundary row again is correct; Sassi deduplicates by identity and never rolls
-the subscription watermark backward.
+`MemQ<T>` is for local work after data has reached the pool: closure filters,
+map, sort, take, unique, group, partition, and fold.
 
-## Auth And Tenancy
+`start_periodic_refresh` handles simple polling. `start_delta_refresh` handles
+watermark-based subscriptions with per-subscription cursors, single-flight
+updates, eviction recovery, and periodic full-refresh policies.
 
-Sassi does not infer tenant, auth, pagination, or row-level-security boundaries
-from cached values. Put those dimensions in the type, in the id, in a wrapper
-key, or in the fetcher/subscription that owns the query.
+`Sassi` is the process-level orchestrator for typed pools and cross-type trait
+queries registered with `#[sassi::trait_impl]`.
 
-For backend/RLS work, make the fetcher own a `'static` substrate such as a pool,
-client, or factory, then construct the per-call data-layer context inside
-`fetch_delta`. Do not share a request-scoped transaction or borrowed auth guard
-with a background refresh task.
+## Design Notes For Adopters
 
-`PunnuConfig::namespace` is for backend keyspace separation. It does not isolate
-the in-process L1 map.
+A `Punnu<T>` is a resident union for a type, not a hidden materialized result
+set for one query. Several subscriptions can feed the same pool. They share the
+identity map, but each subscription owns its fetcher, filter, watermark, and
+recovery state.
+
+That tradeoff is intentional. Shared identity keeps memory use and cache
+coherence manageable, while query membership stays explicit at read and refresh
+boundaries. If a row no longer matches one query, return the updated row and let
+predicates stop selecting it. Use tombstones for true deletes from the identity
+map. Use `RefreshMode::Replace` only when the fetcher is authoritative for the
+whole resident set.
+
+Sassi also does not infer tenant, auth, pagination, or row-level-security rules
+from cached values. Put those boundaries in the type, in the id, in a wrapper
+key, or in the fetcher/subscription that owns the query. `PunnuConfig::namespace`
+separates backend keyspaces; it does not isolate the in-process L1 map.
+
+The core crate targets native Rust and `wasm32-unknown-unknown`. Native
+background work uses the `runtime-tokio` feature. WASM background work uses the
+`runtime-wasm` feature, backed by `wasm-bindgen-futures` and `gloo-timers`.
+
+This repository currently verifies the WASM compile path. Full per-test WASM
+runtime execution is tracked in
+[issue #3](https://github.com/TarunvirBains/sassi/issues/3). Sassi has no
+Dioxus-specific API in this repository; a Dioxus app is one possible consumer
+of the WASM build, not a separately certified integration here.
 
 ## Status
 
-Sassi is pre-v0.1.0. The public shape is close, but this repository is still in
-active implementation and review before the first release cut.
+Sassi is pre-v0.1.0. The public shape is close, but the first release cut is
+still going through implementation, review, examples, benchmarks, and docs.
 
-The current implementation targets native Rust and `wasm32-unknown-unknown`.
-WASM compile coverage is in place; broader per-test WASM execution tracks
-[issue #3](https://github.com/TarunvirBains/sassi/issues/3).
+Adopter feedback is welcome. If Sassi looks useful but a workflow is unclear,
+an API feels awkward, or an integration path is missing, please
+[open a GitHub issue](https://github.com/TarunvirBains/sassi/issues). Early
+adopter friction is useful signal for the v0.1.x surface.
+
+The current release path is focused on the library crate, the Redis companion,
+and the dependency-light `bardownski` TUI example. The heavier Bardownski Dioxus
+implementation is planned outside this workspace.
 
 ## Workspace
 
 ```text
-sassi/          # library crate
-sassi-codegen/  # shared code generation used by sassi and djogi macros
-sassi-macros/   # proc macros
+sassi/              # library crate
+sassi-codegen/      # shared code generation used by sassi and djogi macros
+sassi-macros/       # proc macros
+sassi-cache-redis/  # Redis CacheBackend companion crate
 ```
-
-## Naming
-
-The names come from the Punjabi story of Sassi and Punnu. The cache type is
-`Punnu` because it is the thing Sassi keeps reaching for. That is the whole
-joke; no acronym required.
 
 ## License
 

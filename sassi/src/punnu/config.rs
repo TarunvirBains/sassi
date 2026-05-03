@@ -17,11 +17,9 @@
 //! native consumer" — 10k-entry LRU, 256-event channel, L1-only on
 //! backend failure, last-write-wins on conflict, no TTL, no metrics.
 //!
-//! Some fields are forward-compat pins for surfaces that are not yet
-//! load-bearing — adopters see the full config shape from
-//! v0.1.0-alpha.0 onward, even when the wire-up is deferred to a
-//! later release. Per-field doc comments mark whether each field is
-//! load-bearing today or reserved for a future integration.
+//! All fields are load-bearing in the current public surface. Prefer
+//! struct-update syntax with `..Default::default()` so future additive
+//! config fields do not break callers.
 
 use crate::error::BackendError;
 use crate::punnu::events::EventReason;
