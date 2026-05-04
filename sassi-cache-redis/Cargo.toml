@@ -13,15 +13,15 @@ keywords = ["cache", "redis", "invalidation"]
 categories = ["caching"]
 
 [dependencies]
-sassi = { path = "../sassi", version = "0.1.0-alpha.2" }
+sassi = { path = "../sassi", version = "0.1.0-alpha.3" }
 async-trait = { workspace = true }
 async-stream = "0.3"
 futures = { workspace = true }
-redis = { version = "0.32", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "script"] }
+redis = { version = "1.2", default-features = false, features = ["tokio-comp", "tokio-rustls-comp", "script"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1.48", default-features = false, features = ["sync", "rt", "time", "macros"] }
+tokio = { version = "1.52", default-features = false, features = ["sync", "rt", "time", "macros"] }

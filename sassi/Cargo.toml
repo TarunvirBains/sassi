@@ -48,7 +48,7 @@ fastrand = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-sassi-macros = { path = "../sassi-macros", version = "0.1.0-alpha.2" }
+sassi-macros = { path = "../sassi-macros", version = "0.1.0-alpha.3" }
 inventory = { workspace = true }
 # `web-time` is a drop-in for `std::time::Instant` that works on
 # `wasm32-unknown-unknown`. Used only on wasm — native builds keep
@@ -71,7 +71,7 @@ chrono = { workspace = true, optional = true }
 # TTL test files (`punnu_ttl_lazy.rs`, `punnu_ttl_sweep.rs`) so they
 # can drive virtual time deterministically instead of relying on
 # real `sleep` calls. Dev-only; never linked into a production build.
-tokio = { version = "1.48", default-features = false, features = ["sync", "rt", "time", "macros", "test-util"] }
+tokio = { version = "1.52", default-features = false, features = ["sync", "rt", "time", "macros", "test-util"] }
 proptest = { workspace = true }
 tempfile = "3"
 trybuild = { workspace = true }
