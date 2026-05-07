@@ -25,6 +25,8 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.95"
 
+[workspace]
+
 [dependencies]
 cache = {{ package = "sassi", path = "{}" }}
 "#,

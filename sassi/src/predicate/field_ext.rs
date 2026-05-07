@@ -12,17 +12,20 @@
 //! so downstream walkers (SQL emitters, debug formatters) can
 //! downcast and inspect. Layout per op is documented on [`LookupOp`].
 //!
-//! Case-insensitive string ops use `str::eq_ignore_ascii_case` and
-//! `to_lowercase()` rather than a regex engine — djogi's "no Rust
-//! regex" doctrine carries over here even though sassi has no djogi
-//! dependency, because the rule reflects a sound preference for
-//! stdlib primitives.
+//! Case-insensitive string ops use ASCII-only case folding rather than
+//! a regex engine or Unicode locale folding. This keeps in-memory
+//! predicates portable across runtimes and lets downstream SQL emitters
+//! mirror the same contract exactly.
 
 use super::basic::BasicPredicate;
 use super::field_predicate::{FieldPredicate, LookupOp};
 use crate::cacheable::Field;
 use std::any::Any;
 use std::sync::Arc;
+
+fn ascii_fold(value: &str) -> String {
+    value.to_ascii_lowercase()
+}
 
 // === Equality ============================================================
 
@@ -203,6 +206,178 @@ impl<T: 'static, U: Send + Sync + 'static> Field<T, Option<U>> {
     }
 }
 
+/// View of an optional field that only compares the present inner value.
+///
+/// `None` evaluates to `false` for every `PresentField` value comparison.
+pub struct PresentField<T, V> {
+    field: Field<T, Option<V>>,
+}
+
+impl<T, V> std::fmt::Debug for PresentField<T, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PresentField")
+            .field("name", &self.field.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T, V> Copy for PresentField<T, V> {}
+
+impl<T, V> Clone for PresentField<T, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T, V> Field<T, Option<V>> {
+    /// Compare only the present `Some(V)` value.
+    pub fn some(&self) -> PresentField<T, V> {
+        PresentField { field: *self }
+    }
+}
+
+impl<T: 'static, V: PartialEq + Send + Sync + 'static> PresentField<T, V> {
+    /// `field IS NOT NULL AND field == value`.
+    pub fn eq(&self, val: V) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let val_arc: Arc<V> = Arc::new(val);
+        let val_for_eval = val_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = val_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::Eq,
+            value,
+            move |t| extract(t).as_ref().is_some_and(|v| v == &*val_for_eval),
+        ))
+    }
+
+    /// `field IS NOT NULL AND field != value`.
+    pub fn neq(&self, val: V) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let val_arc: Arc<V> = Arc::new(val);
+        let val_for_eval = val_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = val_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::Neq,
+            value,
+            move |t| extract(t).as_ref().is_some_and(|v| v != &*val_for_eval),
+        ))
+    }
+
+    /// `field IS NOT NULL AND field IN (values...)`.
+    pub fn in_(&self, vals: Vec<V>) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let vec_arc: Arc<Vec<V>> = Arc::new(vals);
+        let vec_for_eval = vec_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = vec_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::In,
+            value,
+            move |t| {
+                extract(t)
+                    .as_ref()
+                    .is_some_and(|v| vec_for_eval.iter().any(|cand| cand == v))
+            },
+        ))
+    }
+
+    /// `field IS NOT NULL AND field NOT IN (values...)`.
+    pub fn not_in(&self, vals: Vec<V>) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let vec_arc: Arc<Vec<V>> = Arc::new(vals);
+        let vec_for_eval = vec_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = vec_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::NotIn,
+            value,
+            move |t| {
+                extract(t)
+                    .as_ref()
+                    .is_some_and(|v| !vec_for_eval.iter().any(|cand| cand == v))
+            },
+        ))
+    }
+}
+
+impl<T: 'static, V: PartialOrd + Send + Sync + 'static> PresentField<T, V> {
+    /// `field IS NOT NULL AND field > value`.
+    pub fn gt(&self, val: V) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let val_arc: Arc<V> = Arc::new(val);
+        let val_for_eval = val_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = val_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::Gt,
+            value,
+            move |t| extract(t).as_ref().is_some_and(|v| v > &*val_for_eval),
+        ))
+    }
+
+    /// `field IS NOT NULL AND field >= value`.
+    pub fn gte(&self, val: V) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let val_arc: Arc<V> = Arc::new(val);
+        let val_for_eval = val_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = val_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::Gte,
+            value,
+            move |t| extract(t).as_ref().is_some_and(|v| v >= &*val_for_eval),
+        ))
+    }
+
+    /// `field IS NOT NULL AND field < value`.
+    pub fn lt(&self, val: V) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let val_arc: Arc<V> = Arc::new(val);
+        let val_for_eval = val_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = val_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::Lt,
+            value,
+            move |t| extract(t).as_ref().is_some_and(|v| v < &*val_for_eval),
+        ))
+    }
+
+    /// `field IS NOT NULL AND field <= value`.
+    pub fn lte(&self, val: V) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let val_arc: Arc<V> = Arc::new(val);
+        let val_for_eval = val_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = val_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::Lte,
+            value,
+            move |t| extract(t).as_ref().is_some_and(|v| v <= &*val_for_eval),
+        ))
+    }
+
+    /// `field IS NOT NULL AND low <= field <= high`.
+    pub fn between(&self, low: V, high: V) -> BasicPredicate<T> {
+        let extract = self.field.extract;
+        let pair_arc: Arc<(V, V)> = Arc::new((low, high));
+        let pair_for_eval = pair_arc.clone();
+        let value: Arc<dyn Any + Send + Sync> = pair_arc;
+        BasicPredicate::Field(FieldPredicate::new(
+            self.field.name,
+            LookupOp::Between,
+            value,
+            move |t| {
+                extract(t)
+                    .as_ref()
+                    .is_some_and(|v| v >= &pair_for_eval.0 && v <= &pair_for_eval.1)
+            },
+        ))
+    }
+}
+
 // === String-specific operations ==========================================
 
 impl<T: 'static> Field<T, String> {
@@ -221,19 +396,19 @@ impl<T: 'static> Field<T, String> {
         ))
     }
 
-    /// Case-insensitive substring match (ASCII-fast-path; UTF-8
-    /// preserved by `to_lowercase`). Operand value layout: `Arc<String>`
+    /// Case-insensitive substring match using ASCII-only folding.
+    /// Operand value layout: `Arc<String>`
     /// — original (non-lowered) needle for inspection.
     pub fn icontains(&self, needle: &str) -> BasicPredicate<T> {
         let extract = self.extract;
         let needle_arc: Arc<String> = Arc::new(needle.to_owned());
-        let needle_lower: String = needle.to_lowercase();
+        let needle_lower = ascii_fold(needle);
         let value: Arc<dyn Any + Send + Sync> = needle_arc;
         BasicPredicate::Field(FieldPredicate::new(
             self.name,
             LookupOp::IContains,
             value,
-            move |t| extract(t).to_lowercase().contains(needle_lower.as_str()),
+            move |t| ascii_fold(extract(t)).contains(needle_lower.as_str()),
         ))
     }
 
@@ -257,13 +432,13 @@ impl<T: 'static> Field<T, String> {
     pub fn istarts_with(&self, prefix: &str) -> BasicPredicate<T> {
         let extract = self.extract;
         let prefix_arc: Arc<String> = Arc::new(prefix.to_owned());
-        let prefix_lower: String = prefix.to_lowercase();
+        let prefix_lower = ascii_fold(prefix);
         let value: Arc<dyn Any + Send + Sync> = prefix_arc;
         BasicPredicate::Field(FieldPredicate::new(
             self.name,
             LookupOp::IStartsWith,
             value,
-            move |t| extract(t).to_lowercase().starts_with(prefix_lower.as_str()),
+            move |t| ascii_fold(extract(t)).starts_with(prefix_lower.as_str()),
         ))
     }
 
@@ -287,36 +462,28 @@ impl<T: 'static> Field<T, String> {
     pub fn iends_with(&self, suffix: &str) -> BasicPredicate<T> {
         let extract = self.extract;
         let suffix_arc: Arc<String> = Arc::new(suffix.to_owned());
-        let suffix_lower: String = suffix.to_lowercase();
+        let suffix_lower = ascii_fold(suffix);
         let value: Arc<dyn Any + Send + Sync> = suffix_arc;
         BasicPredicate::Field(FieldPredicate::new(
             self.name,
             LookupOp::IEndsWith,
             value,
-            move |t| extract(t).to_lowercase().ends_with(suffix_lower.as_str()),
+            move |t| ascii_fold(extract(t)).ends_with(suffix_lower.as_str()),
         ))
     }
 
-    /// `field == value` (case-insensitive ASCII fast-path; falls back
-    /// to full `to_lowercase` for non-ASCII inputs).
+    /// `field == value` using ASCII-only case folding.
     /// Operand value layout: `Arc<String>` — original.
     pub fn iexact(&self, val: &str) -> BasicPredicate<T> {
         let extract = self.extract;
         let val_arc: Arc<String> = Arc::new(val.to_owned());
-        let val_for_eval = val_arc.clone();
+        let val_folded = ascii_fold(val);
         let value: Arc<dyn Any + Send + Sync> = val_arc;
         BasicPredicate::Field(FieldPredicate::new(
             self.name,
             LookupOp::IExact,
             value,
-            move |t| {
-                let extracted = extract(t);
-                if extracted.is_ascii() && val_for_eval.is_ascii() {
-                    extracted.eq_ignore_ascii_case(val_for_eval.as_str())
-                } else {
-                    extracted.to_lowercase() == val_for_eval.to_lowercase()
-                }
-            },
+            move |t| ascii_fold(extract(t)) == val_folded,
         ))
     }
 }

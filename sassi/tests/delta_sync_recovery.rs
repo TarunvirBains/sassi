@@ -15,13 +15,61 @@ struct Item {
     value: &'static str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PanicWatermarkItem {
+    id: i64,
+    updated_at: i64,
+    value: &'static str,
+    panic_on_watermark: bool,
+}
+
+#[derive(Default)]
+struct PanicWatermarkFields {
+    #[allow(dead_code)]
+    id: sassi::Field<PanicWatermarkItem, i64>,
+}
+
+impl sassi::Cacheable for PanicWatermarkItem {
+    type Id = i64;
+    type Fields = PanicWatermarkFields;
+
+    fn id(&self) -> Self::Id {
+        self.id
+    }
+
+    fn fields() -> Self::Fields {
+        PanicWatermarkFields {
+            id: sassi::Field::new("id", |item| &item.id),
+        }
+    }
+}
+
+impl sassi::DeltaSyncCacheable for PanicWatermarkItem {
+    type Watermark = i64;
+
+    fn watermark(&self) -> Self::Watermark {
+        assert!(
+            !self.panic_on_watermark,
+            "panic watermark observed after membership priming"
+        );
+        self.updated_at
+    }
+}
+
 type RecordedQuery = (Option<i64>, HashSet<i64>);
+type PanicRecordedQuery = (Option<i64>, HashSet<i64>);
 
 #[derive(Clone)]
 struct RecordingFetcher {
     outcomes: Arc<Mutex<VecDeque<FetchOutcome>>>,
     queries: Arc<Mutex<Vec<RecordedQuery>>>,
     calls: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct PanicWatermarkFetcher {
+    outcomes: Arc<Mutex<VecDeque<DeltaResult<PanicWatermarkItem, i64>>>>,
+    queries: Arc<Mutex<Vec<PanicRecordedQuery>>>,
 }
 
 enum FetchOutcome {
@@ -62,6 +110,19 @@ impl RecordingFetcher {
     }
 }
 
+impl PanicWatermarkFetcher {
+    fn new(outcomes: impl Into<VecDeque<DeltaResult<PanicWatermarkItem, i64>>>) -> Self {
+        Self {
+            outcomes: Arc::new(Mutex::new(outcomes.into())),
+            queries: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn queries(&self) -> Vec<PanicRecordedQuery> {
+        self.queries.lock().await.clone()
+    }
+}
+
 #[async_trait::async_trait]
 impl DeltaPunnuFetcher<Item> for RecordingFetcher {
     async fn fetch_delta(
@@ -95,6 +156,25 @@ impl DeltaPunnuFetcher<Item> for RecordingFetcher {
     }
 }
 
+#[async_trait::async_trait]
+impl DeltaPunnuFetcher<PanicWatermarkItem> for PanicWatermarkFetcher {
+    async fn fetch_delta(
+        &self,
+        query: DeltaQuery<PanicWatermarkItem>,
+    ) -> Result<DeltaResult<PanicWatermarkItem, i64>, FetchError> {
+        self.queries
+            .lock()
+            .await
+            .push((query.since, query.recover_ids));
+        Ok(self
+            .outcomes
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or_else(|| DeltaResult::new(Vec::<PanicWatermarkItem>::new(), HashSet::new())))
+    }
+}
+
 fn item(id: i64, updated_at: i64, value: &'static str) -> Item {
     Item {
         id,
@@ -103,7 +183,25 @@ fn item(id: i64, updated_at: i64, value: &'static str) -> Item {
     }
 }
 
+fn panic_item(
+    id: i64,
+    updated_at: i64,
+    value: &'static str,
+    panic_on_watermark: bool,
+) -> PanicWatermarkItem {
+    PanicWatermarkItem {
+        id,
+        updated_at,
+        value,
+        panic_on_watermark,
+    }
+}
+
 fn delta(items: Vec<Item>) -> DeltaResult<Item, i64> {
+    DeltaResult::new(items, HashSet::new())
+}
+
+fn panic_delta(items: Vec<PanicWatermarkItem>) -> DeltaResult<PanicWatermarkItem, i64> {
     DeltaResult::new(items, HashSet::new())
 }
 
@@ -580,6 +678,66 @@ async fn recovery_set_merges_back_on_fetch_error() {
     assert_eq!(queries.len(), 3);
     assert_eq!(queries[1].1, HashSet::from([1]));
     assert_eq!(queries[2].1, HashSet::from([1]));
+    assert_eq!(punnu.get(&1).unwrap().value, "recovered");
+}
+
+#[tokio::test]
+async fn panic_after_membership_prime_restores_recovery_and_membership() {
+    let punnu = Punnu::<PanicWatermarkItem>::builder()
+        .config(PunnuConfig {
+            lru_size: 1,
+            ..Default::default()
+        })
+        .build();
+    let fetcher = PanicWatermarkFetcher::new([
+        panic_delta(vec![panic_item(1, 10, "seed", false)]),
+        panic_delta(vec![panic_item(2, 20, "panic", true)]),
+        panic_delta(vec![panic_item(1, 30, "recovered", false)]),
+    ]);
+    let handle = punnu
+        .start_delta_refresh(long_interval(), fetcher.clone())
+        .with_eviction_recovery(true);
+
+    handle.update().await.unwrap();
+    punnu
+        .insert(panic_item(99, 99, "evictor", false))
+        .await
+        .unwrap();
+    wait_until(
+        || handle.pending_eviction_recovery_count() == 1,
+        "seed ID should be queued for recovery",
+    )
+    .await;
+
+    let err = handle.update().await.unwrap_err();
+    assert!(matches!(
+        err,
+        FetchError::FetcherPanic {
+            message,
+            ..
+        } if message == "panic watermark observed after membership priming"
+    ));
+
+    punnu
+        .insert(panic_item(2, 21, "local-two", false))
+        .await
+        .unwrap();
+    punnu
+        .insert(panic_item(3, 22, "evict-local-two", false))
+        .await
+        .unwrap();
+
+    handle.update().await.unwrap();
+    handle.cancel();
+
+    let queries = fetcher.queries().await;
+    assert_eq!(queries.len(), 3);
+    assert_eq!(queries[1].1, HashSet::from([1]));
+    assert_eq!(
+        queries[2].1,
+        HashSet::from([1]),
+        "failed tick must not lose recovery ID 1 or subscribe failed item 2"
+    );
     assert_eq!(punnu.get(&1).unwrap().value, "recovered");
 }
 

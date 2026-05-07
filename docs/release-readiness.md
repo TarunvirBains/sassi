@@ -1,13 +1,13 @@
 # Release Readiness
 
-Sassi v0.1.0-alpha is meant to be usable by capable Rust adopters who are
-willing to work with an early API surface. The goal is not to claim that every
-future integration is done; it is to make the current contracts, tradeoffs, and
-verification expectations visible before publish.
+Sassi v0.1.0-beta.1 is meant to be usable by capable Rust adopters who are
+willing to work with an early but candidate API surface. The goal is not to
+claim that every future integration is done; it is to make the current
+contracts, tradeoffs, and verification expectations visible before publish.
 
-## v0.1.0-alpha Scope
+## v0.1.0-beta.1 Scope
 
-In scope for the alpha:
+In scope for the beta:
 
 - `Cacheable` and `#[derive(Cacheable)]` for typed identity.
 - `Punnu<T>` as an in-process resident union identity map.
@@ -31,9 +31,9 @@ In scope for the alpha:
   [benchmark baselines](../sassi/benches/README.md) for same-host regression
   tracking of public cache surfaces.
 
-## Out Of Scope For This Alpha
+## Out Of Scope For This Beta
 
-These are intentionally not release claims for v0.1.0-alpha:
+These are intentionally not release claims for v0.1.0-beta.1:
 
 - Full downstream data-layer integration examples.
 - The Bardownski Dioxus/full-stack implementation.
@@ -66,7 +66,7 @@ include:
 
 ## Verification Before Publish
 
-Before publishing an alpha, run the commands below from the repository root and
+Before publishing a beta, run the commands below from the repository root and
 record the results in the release notes or publish checklist:
 
 ```bash

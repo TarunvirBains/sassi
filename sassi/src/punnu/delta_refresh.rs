@@ -521,6 +521,7 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
             0
         };
         let (recovery_snapshot, recover_ids) = self.prepare_recovery_query(kind, current_tick);
+        let mut rollback = TickRollbackGuard::new(self, current_tick, recovery_snapshot);
         let since = match kind {
             TickKind::Delta => self
                 .last_watermark
@@ -537,11 +538,11 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
         let delta = match fetch {
             Ok(Ok(delta)) => delta,
             Ok(Err(err)) => {
-                self.restore_recovery_after_failed(recovery_snapshot, current_tick);
+                rollback.restore_after_failed();
                 return Err(err);
             }
             Err(panic_payload) => {
-                self.restore_recovery_after_failed(recovery_snapshot, current_tick);
+                rollback.restore_after_failed();
                 return Err(FetchError::FetcherPanic {
                     type_name: std::any::type_name::<T>(),
                     message: panic_message(&panic_payload),
@@ -550,15 +551,15 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
         };
 
         let membership_update =
-            MembershipUpdate::<T::Id>::from_delta(kind, &delta, &recovery_snapshot);
+            MembershipUpdate::<T::Id>::from_delta(kind, &delta, rollback.recovery_snapshot());
         let membership_before_prime = self.membership_snapshot();
         self.prime_membership_for_observed_items(&membership_update);
+        rollback.record_membership_snapshot(membership_before_prime);
         let (applied, next_watermark) =
-            match self.apply_delta_and_observed_watermark(delta, &recovery_snapshot) {
+            match self.apply_delta_and_observed_watermark(delta, rollback.recovery_snapshot()) {
                 Ok(applied) => applied,
                 Err(err) => {
-                    self.restore_membership(membership_before_prime);
-                    self.restore_recovery_after_failed(recovery_snapshot, current_tick);
+                    rollback.restore_after_failed();
                     return Err(err);
                 }
             };
@@ -566,10 +567,7 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
         let watermark = self.advance_watermark(next_watermark);
         self.note_successful_tick(kind, observed_force_generation);
         self.apply_membership_update(membership_update);
-        self.recovery
-            .lock()
-            .expect("delta refresh recovery lock poisoned")
-            .note_success(recovery_snapshot);
+        rollback.note_success();
 
         Ok(UpdateResult { applied, watermark })
     }
@@ -873,6 +871,92 @@ impl<T: DeltaSyncCacheable> RefreshSubscription<T> {
 
     fn next_operation_id(&self) -> u64 {
         self.next_operation_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+struct TickRollbackGuard<'a, T: DeltaSyncCacheable> {
+    subscription: &'a RefreshSubscription<T>,
+    current_tick: u64,
+    recovery_snapshot: Option<RecoverySnapshot<T::Id>>,
+    membership_before_prime: Option<HashSet<T::Id>>,
+    resolved: bool,
+}
+
+impl<'a, T: DeltaSyncCacheable> TickRollbackGuard<'a, T> {
+    fn new(
+        subscription: &'a RefreshSubscription<T>,
+        current_tick: u64,
+        recovery_snapshot: RecoverySnapshot<T::Id>,
+    ) -> Self {
+        Self {
+            subscription,
+            current_tick,
+            recovery_snapshot: Some(recovery_snapshot),
+            membership_before_prime: None,
+            resolved: false,
+        }
+    }
+
+    fn recovery_snapshot(&self) -> &RecoverySnapshot<T::Id> {
+        self.recovery_snapshot
+            .as_ref()
+            .expect("delta tick recovery snapshot already resolved")
+    }
+
+    fn record_membership_snapshot(&mut self, snapshot: HashSet<T::Id>) {
+        self.membership_before_prime = Some(snapshot);
+    }
+
+    fn restore_after_failed(&mut self) {
+        if let Some(snapshot) = self.membership_before_prime.take() {
+            self.subscription.restore_membership(snapshot);
+        }
+        if let Some(snapshot) = self.recovery_snapshot.take() {
+            self.subscription
+                .restore_recovery_after_failed(snapshot, self.current_tick);
+        }
+        self.resolved = true;
+    }
+
+    fn note_success(mut self) {
+        let Some(snapshot) = self.recovery_snapshot.take() else {
+            self.resolved = true;
+            return;
+        };
+        self.subscription
+            .recovery
+            .lock()
+            .expect("delta refresh recovery lock poisoned")
+            .note_success(snapshot);
+        self.resolved = true;
+    }
+}
+
+impl<T: DeltaSyncCacheable> Drop for TickRollbackGuard<'_, T> {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+
+        if let Some(snapshot) = self.membership_before_prime.take() {
+            match self.subscription.membership.lock() {
+                Ok(mut membership) => *membership = snapshot,
+                Err(_) => tracing::error!(
+                    "delta refresh membership lock poisoned while rolling back failed tick"
+                ),
+            }
+        }
+
+        if let Some(snapshot) = self.recovery_snapshot.take() {
+            match self.subscription.recovery.lock() {
+                Ok(mut recovery) => {
+                    recovery.restore_after_failed(snapshot, self.current_tick);
+                }
+                Err(_) => tracing::error!(
+                    "delta refresh recovery lock poisoned while rolling back failed tick"
+                ),
+            }
+        }
     }
 }
 

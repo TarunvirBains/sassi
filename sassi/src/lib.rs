@@ -9,7 +9,7 @@
 //! `!` operators and evaluate through the same in-memory path on every
 //! supported target.
 //!
-//! Pre-v0.1.0 alpha. The core public surface is available now:
+//! Pre-v0.1.0 beta. The core public surface is available now:
 //! [`Cacheable`] identities, [`Punnu<T>`](Punnu) pools, in-memory
 //! [`MemQ`] scopes, lazy fetch helpers, TTL/LRU policy, event streams,
 //! and atomic delta application.
@@ -79,7 +79,9 @@ pub use cacheable::{Cacheable, Field};
 #[cfg(feature = "serde")]
 pub use error::WireFormatError;
 pub use error::{BackendError, FetchError, InsertError};
-pub use predicate::{BasicPredicate, FieldPredicate, LookupOp, MemQ};
+pub use predicate::{
+    BasicPredicate, FieldPredicate, IntoBasicPredicate, LookupOp, MemQ, PresentField,
+};
 pub use punnu::{
     BackendFailureMode, CacheTier, DeltaApplyStats, DeltaPunnuFetcher, DeltaQuery,
     DeltaRefreshHandle, DeltaResult, EventReason, InvalidationReason, OnConflict, Punnu,

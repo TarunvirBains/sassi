@@ -1,7 +1,9 @@
 //! # sassi-macros
 //!
-//! Proc macros for sassi: `#[derive(Cacheable)]` and
+//! Support proc-macro crate for Sassi: `#[derive(Cacheable)]` and
 //! `#[sassi::trait_impl]`.
+//!
+//! Ordinary adopters depend on `sassi`, which re-exports these macros.
 //!
 //! Macros call into `sassi-codegen` for the actual `TokenStream`
 //! emission so the codegen logic stays in a regular library crate

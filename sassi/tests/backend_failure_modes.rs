@@ -1,14 +1,13 @@
 #![cfg(all(feature = "serde", feature = "runtime-tokio"))]
 
 use async_trait::async_trait;
-use sassi::punnu::config::retry_delay_for_attempt;
 use sassi::{
     BackendError, BackendFailureMode, BackendInvalidation, BackendKeyspace, CacheBackend,
     Cacheable, DeltaPunnuFetcher, DeltaQuery, DeltaResult, DeltaSyncCacheable, EventReason,
     FetchError, Field, MemoryBackend, Punnu, PunnuConfig, PunnuFetcher, RefreshMode,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -140,14 +139,6 @@ async fn memory_backend_ttl_honors_paused_runtime_clock() {
     tokio::time::advance(Duration::from_secs(6)).await;
 
     assert_eq!(backend.get(&keyspace, &2_i64).await.unwrap(), None::<E>);
-}
-
-#[test]
-fn retry_delay_uses_capped_exponential_backoff() {
-    assert_eq!(retry_delay_for_attempt(1), Duration::ZERO);
-    assert_eq!(retry_delay_for_attempt(2), Duration::from_millis(25));
-    assert_eq!(retry_delay_for_attempt(3), Duration::from_millis(50));
-    assert_eq!(retry_delay_for_attempt(8), Duration::from_millis(1_000));
 }
 
 #[test]
@@ -328,6 +319,218 @@ async fn retry_mode_invalidate_exhaustion_stops_after_total_attempts() {
 
     assert!(punnu.get(&15).is_none());
     assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn l1only_invalidate_failure_does_not_rehydrate_stale_l2() {
+    let backend = StaleInvalidateBackend::default();
+    let get_attempts = backend.get_attempts.clone();
+    let invalidate_attempts = backend.invalidate_attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::L1Only,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 30,
+            label: "stale".into(),
+        })
+        .await
+        .unwrap();
+    punnu
+        .invalidate(&30, sassi::InvalidationReason::OnDelete)
+        .await
+        .unwrap();
+
+    assert!(punnu.get(&30).is_none());
+    assert!(punnu.get_async(&30).await.unwrap().is_none());
+    assert!(punnu.get(&30).is_none());
+    assert_eq!(invalidate_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(get_attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn retry_invalidate_exhaustion_does_not_rehydrate_stale_l2() {
+    let backend = StaleInvalidateBackend::default();
+    let get_attempts = backend.get_attempts.clone();
+    let invalidate_attempts = backend.invalidate_attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::Retry { attempts: 3 },
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 31,
+            label: "stale".into(),
+        })
+        .await
+        .unwrap();
+    punnu
+        .invalidate(&31, sassi::InvalidationReason::OnDelete)
+        .await
+        .unwrap();
+
+    assert!(punnu.get(&31).is_none());
+    assert!(punnu.get_async(&31).await.unwrap().is_none());
+    assert!(punnu.get(&31).is_none());
+    assert_eq!(invalidate_attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(get_attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn failed_invalidation_suppression_outlives_lru_capacity() {
+    let backend = StaleInvalidateBackend::default();
+    let get_attempts = backend.get_attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::L1Only,
+            lru_size: 1,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 32,
+            label: "first stale".into(),
+        })
+        .await
+        .unwrap();
+    punnu
+        .insert(E {
+            id: 33,
+            label: "second stale".into(),
+        })
+        .await
+        .unwrap();
+
+    assert!(punnu.get(&32).is_none());
+    punnu
+        .invalidate(&32, sassi::InvalidationReason::OnDelete)
+        .await
+        .unwrap();
+    punnu
+        .invalidate(&33, sassi::InvalidationReason::OnDelete)
+        .await
+        .unwrap();
+
+    assert!(punnu.get_async(&32).await.unwrap().is_none());
+    assert!(punnu.get(&32).is_none());
+    assert_eq!(get_attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn concurrent_get_async_does_not_rehydrate_while_invalidate_failure_is_pending() {
+    let backend = BlockingStaleInvalidateBackend::default();
+    let invalidate_entered = backend.invalidate_entered.clone();
+    let invalidate_release = backend.invalidate_release.clone();
+    let get_attempts = backend.get_attempts.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::L1Only,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    punnu
+        .insert(E {
+            id: 34,
+            label: "pending stale".into(),
+        })
+        .await
+        .unwrap();
+
+    let invalidating = {
+        let punnu = punnu.clone();
+        tokio::spawn(async move {
+            punnu
+                .invalidate(&34, sassi::InvalidationReason::OnDelete)
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), invalidate_entered.notified())
+        .await
+        .expect("backend invalidation should be pending");
+
+    let value = punnu.get_async(&34).await.unwrap();
+    invalidate_release.notify_one();
+    invalidating.await.unwrap().unwrap();
+
+    assert!(value.is_none());
+    assert!(punnu.get(&34).is_none());
+    assert_eq!(get_attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn backend_invalidation_stream_does_not_clear_failed_invalidation_suppression() {
+    let (backend, tx) = StreamingStaleInvalidateBackend::new();
+    let get_attempts = backend.get_attempts.clone();
+    let subscribed = backend.subscribed.clone();
+    let punnu = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            backend_failure_mode: BackendFailureMode::L1Only,
+            ..Default::default()
+        })
+        .backend(backend)
+        .build();
+
+    tokio::time::timeout(Duration::from_secs(1), subscribed.notified())
+        .await
+        .expect("listener should subscribe to backend stream");
+
+    punnu
+        .insert(E {
+            id: 35,
+            label: "stale until stream".into(),
+        })
+        .await
+        .unwrap();
+    punnu
+        .invalidate(&35, sassi::InvalidationReason::OnDelete)
+        .await
+        .unwrap();
+
+    assert!(punnu.get_async(&35).await.unwrap().is_none());
+    assert_eq!(get_attempts.load(Ordering::SeqCst), 0);
+
+    let mut events = punnu.events();
+    punnu
+        .get_or_fetch(&35, |id| async move {
+            Ok::<_, FetchError>(Some(E {
+                id,
+                label: "local replacement".into(),
+            }))
+        })
+        .await
+        .unwrap();
+    drain_ready_events(&mut events);
+
+    tx.unbounded_send(Ok(BackendInvalidation::Id(35))).unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(matches!(
+        event,
+        sassi::PunnuEvent::Invalidate {
+            id: 35,
+            reason: EventReason::BackendInvalidation { .. }
+        }
+    ));
+    assert!(punnu.get(&35).is_none());
+    assert!(punnu.get_async(&35).await.unwrap().is_none());
+    assert_eq!(get_attempts.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1190,6 +1393,149 @@ impl CacheBackend<E> for RetryInvalidateBackend {
 
     async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct StaleInvalidateBackend {
+    stored: Arc<Mutex<HashMap<i64, E>>>,
+    get_attempts: Arc<AtomicUsize>,
+    invalidate_attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl CacheBackend<E> for StaleInvalidateBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, id: &i64) -> Result<Option<E>, BackendError> {
+        self.get_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(self.stored.lock().unwrap().get(id).cloned())
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        id: &i64,
+        value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        self.stored.lock().unwrap().insert(*id, value.clone());
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        self.invalidate_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(BackendError::Network("stale delete".into()))
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct BlockingStaleInvalidateBackend {
+    stored: Arc<Mutex<HashMap<i64, E>>>,
+    get_attempts: Arc<AtomicUsize>,
+    invalidate_attempts: Arc<AtomicUsize>,
+    invalidate_entered: Arc<Notify>,
+    invalidate_release: Arc<Notify>,
+}
+
+#[async_trait]
+impl CacheBackend<E> for BlockingStaleInvalidateBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, id: &i64) -> Result<Option<E>, BackendError> {
+        self.get_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(self.stored.lock().unwrap().get(id).cloned())
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        id: &i64,
+        value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        self.stored.lock().unwrap().insert(*id, value.clone());
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        self.invalidate_attempts.fetch_add(1, Ordering::SeqCst);
+        self.invalidate_entered.notify_one();
+        self.invalidate_release.notified().await;
+        Err(BackendError::Network("stale delete".into()))
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+}
+
+struct StreamingStaleInvalidateBackend {
+    stored: Arc<Mutex<HashMap<i64, E>>>,
+    get_attempts: Arc<AtomicUsize>,
+    invalidate_attempts: Arc<AtomicUsize>,
+    subscribed: Arc<Notify>,
+    rx: Mutex<Option<InvalidationRx>>,
+}
+
+impl StreamingStaleInvalidateBackend {
+    fn new() -> (
+        Self,
+        futures::channel::mpsc::UnboundedSender<Result<BackendInvalidation<i64>, BackendError>>,
+    ) {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        (
+            Self {
+                stored: Arc::new(Mutex::new(HashMap::new())),
+                get_attempts: Arc::new(AtomicUsize::new(0)),
+                invalidate_attempts: Arc::new(AtomicUsize::new(0)),
+                subscribed: Arc::new(Notify::new()),
+                rx: Mutex::new(Some(rx)),
+            },
+            tx,
+        )
+    }
+}
+
+#[async_trait]
+impl CacheBackend<E> for StreamingStaleInvalidateBackend {
+    async fn get(&self, _keyspace: &BackendKeyspace, id: &i64) -> Result<Option<E>, BackendError> {
+        self.get_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(self.stored.lock().unwrap().get(id).cloned())
+    }
+
+    async fn put(
+        &self,
+        _keyspace: &BackendKeyspace,
+        id: &i64,
+        value: &E,
+        _ttl: Option<Duration>,
+    ) -> Result<(), BackendError> {
+        self.stored.lock().unwrap().insert(*id, value.clone());
+        Ok(())
+    }
+
+    async fn invalidate(&self, _keyspace: &BackendKeyspace, _id: &i64) -> Result<(), BackendError> {
+        self.invalidate_attempts.fetch_add(1, Ordering::SeqCst);
+        Err(BackendError::Network("stale delete".into()))
+    }
+
+    async fn invalidate_all(&self, _keyspace: &BackendKeyspace) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    fn invalidation_stream(
+        &self,
+        _keyspace: BackendKeyspace,
+    ) -> sassi::BackendInvalidationStream<i64> {
+        self.subscribed.notify_one();
+        Box::pin(
+            self.rx
+                .lock()
+                .unwrap()
+                .take()
+                .expect("stream should be subscribed once"),
+        )
     }
 }
 

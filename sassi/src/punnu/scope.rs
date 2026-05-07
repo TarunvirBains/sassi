@@ -7,7 +7,7 @@
 //! function boundaries without lifetime plumbing.
 
 use crate::cacheable::Cacheable;
-use crate::predicate::{BasicPredicate, MemQ};
+use crate::predicate::{IntoBasicPredicate, MemQ};
 use crate::punnu::Punnu;
 use std::cmp::Ordering;
 use std::hash::Hash;
@@ -63,11 +63,12 @@ impl<T: Cacheable> PunnuScope<T> {
     /// Append a shared field-predicate filter.
     ///
     /// This keeps pure field predicates on the common
-    /// [`BasicPredicate`] path while
+    /// [`BasicPredicate`](crate::predicate::BasicPredicate) path while
     /// still executing in-memory through `MemQ`.
-    pub fn filter_basic<F>(self, build: F) -> Self
+    pub fn filter_basic<F, P>(self, build: F) -> Self
     where
-        F: FnOnce(T::Fields) -> BasicPredicate<T>,
+        F: FnOnce(T::Fields) -> P,
+        P: IntoBasicPredicate<T>,
     {
         self.then(MemQ::filter_basic(build(T::fields())))
     }
