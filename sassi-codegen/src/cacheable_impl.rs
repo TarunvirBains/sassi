@@ -7,13 +7,13 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Field, Fields};
 
-use crate::derive_options::CacheableDeriveOptions;
+use crate::derive_options::{CacheableDeriveOptions, CacheableFieldsMode};
 
 /// Emit `impl Cacheable for T`:
 ///
 /// 1. `type Id` — set to the type of the field literally named `id`.
-/// 2. `type Fields` — set to `{Name}Fields` (companion struct produced
-///    by [`generate_fields_struct`](super::fields_struct::generate_fields_struct)).
+/// 2. `type Fields` — set to `{Name}Fields` by default, or to the
+///    external field companion named by [`CacheableFieldsMode::External`].
 /// 3. `fn cache_type_name()` — returns either `#[cacheable(type_name = "...")]`
 ///    or `std::any::type_name::<Self>()`.
 /// 4. `fn id(&self) -> Self::Id` — clones `self.id`.
@@ -56,19 +56,36 @@ pub fn generate_cacheable_impl(
         quote! { std::any::type_name::<Self>() }
     };
 
-    // For each declared field, emit `name: Field::new("name", |s| &s.name)`.
-    let field_constructors = named.iter().map(|f| {
-        let name = f.ident.as_ref().unwrap();
-        let name_str = name.to_string();
-        quote! {
-            #name: #sassi_path::Field::new(#name_str, |s| &s.#name)
+    let (fields_type, fields_constructor) = match &options.fields {
+        CacheableFieldsMode::Generated => {
+            // For each declared field, emit `name: Field::new("name", |s| &s.name)`.
+            let field_constructors = named.iter().map(|f| {
+                let name = f.ident.as_ref().unwrap();
+                let name_str = name.to_string();
+                quote! {
+                    #name: #sassi_path::Field::new(#name_str, |s| &s.#name)
+                }
+            });
+
+            (
+                quote! { #fields_name },
+                quote! {
+                    #fields_name {
+                        #(#field_constructors,)*
+                    }
+                },
+            )
         }
-    });
+        CacheableFieldsMode::External {
+            type_path,
+            constructor,
+        } => (quote! { #type_path }, quote! { #constructor }),
+    };
 
     Ok(quote! {
         impl #sassi_path::Cacheable for #struct_name {
             type Id = #id_ty;
-            type Fields = #fields_name;
+            type Fields = #fields_type;
 
             fn cache_type_name() -> &'static str {
                 #cache_type_name
@@ -79,9 +96,7 @@ pub fn generate_cacheable_impl(
             }
 
             fn fields() -> Self::Fields {
-                #fields_name {
-                    #(#field_constructors,)*
-                }
+                #fields_constructor
             }
         }
     })

@@ -7,8 +7,8 @@ providing shared L2 storage plus an explicit invalidation pub/sub path.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-alpha.2"
-sassi-cache-redis = "0.1.0-alpha.2"
+sassi = "0.1.0-beta.1"
+sassi-cache-redis = "0.1.0-beta.1"
 ```
 
 The backend uses the `BackendKeyspace` supplied by `PunnuConfig::namespace` and
@@ -40,7 +40,13 @@ drain can survive in Redis and be read back later. Coordinate writers outside
 Sassi or move to a new namespace when a deployment needs a true generation
 boundary.
 
+`invalidate_all` may also partially succeed. It deletes Redis entries in
+committed batches before publishing the final keyspace-wide invalidation
+message. If that final publish fails, deleted Redis entries are not rolled back,
+and other processes can retain stale L1 entries until a later invalidation,
+refresh, restart, or namespace/generation rollover.
+
 See the Sassi repository docs for the broader cache model and release notes:
 
-- https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/backends-and-runtimes.md
-- https://github.com/TarunvirBains/sassi/blob/v0.1.0-alpha.2/docs/release-readiness.md
+- https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/docs/backends-and-runtimes.md
+- https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/docs/release-readiness.md

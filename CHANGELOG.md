@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.1.0-beta.1] - 2026-05-07
+
+### Added
+
+- Added `IntoBasicPredicate<T>` so downstream crates can expose provenanced
+  predicate wrappers while still feeding Punnu's in-memory evaluator.
+- Added `PresentField<T, V>` and `Field<T, Option<V>>::some()` for comparing
+  only present optional values without treating `None` as an inner default.
+- Added `CacheableFieldsMode::External` for downstream macro crates that own
+  their own `Cacheable::Fields` companion type.
+
+### Changed
+
+- Made `PunnuScope::filter_basic` and `MemQ::filter_basic` accept
+  `IntoBasicPredicate<T>`.
+- Made `BasicPredicate<T>` clone structurally without imposing `T: Clone`.
+- Changed case-insensitive string predicates to ASCII-only folding so portable
+  in-memory semantics can be mirrored exactly by database emitters.
+- Made `retry_delay_for_attempt` internal; retry backoff remains covered by
+  crate-local tests without exposing the helper as public API.
+- Updated public docs and crate metadata for the `0.1.0-beta.1` release line.
+- Documented `sassi-macros` and `sassi-codegen` as support crates; ordinary
+  adopters depend on `sassi` and optionally `sassi-cache-redis`.
+- Documented Redis `invalidate_all` as best-effort across the delete/publish
+  boundary.
+
+### Fixed
+
+- Suppressed local `get_async` L2 rehydration for ids whose best-effort backend
+  invalidation failed, preventing stale backend values from being resurrected in
+  the same process.
+- Restored delta-refresh recovery snapshots and primed subscription membership
+  when a panic occurs after recovery query preparation.
+
 ## [0.1.0-alpha.2] - 2026-05-03
 
 ### Added

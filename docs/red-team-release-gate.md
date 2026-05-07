@@ -68,10 +68,10 @@ publish decision:
 Use these publish decisions:
 
 - `BLOCK`: do not publish until fixed or disproven.
-- `FIX_BEFORE_ALPHA`: fix before this alpha because the blast radius is real.
-- `DOC_BEFORE_ALPHA`: code behavior is acceptable for alpha, but docs/API
+- `FIX_BEFORE_RELEASE`: fix before this release because the blast radius is real.
+- `DOC_BEFORE_RELEASE`: code behavior is acceptable for this release, but docs/API
   wording can cause dangerous misuse.
-- `POST_ALPHA`: worth tracking, not release-blocking.
+- `POST_RELEASE`: worth tracking, not release-blocking.
 - `NO_ACTION`: checked and safe enough with current evidence.
 
 Confirmed bugs outrank speculative hardening. A suspicious area becomes a
@@ -193,12 +193,12 @@ and release goals.
 Before publishing, there should be:
 
 - no unresolved `BLOCK` findings;
-- no unresolved `FIX_BEFORE_ALPHA` findings unless the release is intentionally
+- no unresolved `FIX_BEFORE_RELEASE` findings unless the release is intentionally
   delayed or rescoped;
-- `DOC_BEFORE_ALPHA` findings either documented or consciously promoted to code
+- `DOC_BEFORE_RELEASE` findings either documented or consciously promoted to code
   fixes;
 - a short issue register recording what was fixed, what was documented, and what
-  remains post-alpha;
+  remains after this release;
 - targeted tests for every fixed bug;
 - full release verification rerun after the final patch set.
 

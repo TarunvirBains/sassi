@@ -1,13 +1,16 @@
 //! # sassi-codegen
 //!
-//! Shared codegen primitives for `sassi-macros` and downstream
+//! Support crate with codegen primitives for `sassi-macros` and downstream
 //! proc-macro consumers (e.g., `djogi-macros`).
+//!
+//! Ordinary adopters depend on `sassi`, not this crate directly.
 //!
 //! Proc-macro crates can't depend on each other directly, but they can
 //! share a regular library crate. `sassi-codegen` is that library: it
 //! emits `TokenStream`s for `Cacheable` derive output (the companion
 //! `{Name}Fields` struct, the `Cacheable` impl, stable backend type-name
-//! support, the `T::fields()` constructor, and optional `DeltaSyncCacheable`
+//! support, the `T::fields()` constructor, optional external field-companion
+//! routing for downstream macro crates, and optional `DeltaSyncCacheable`
 //! impls). Each entry
 //! point takes a `sassi_path: &TokenStream` parameter so the caller can
 //! target whatever path prefix the end-user crate exposes (`::sassi`
@@ -32,6 +35,7 @@ mod fields_struct;
 
 pub use cacheable_impl::{generate_cacheable_impl, generate_delta_sync_cacheable_impl};
 pub use derive_options::{
-    CacheTypeName, CacheableDeriveOptions, WatermarkField, parse_cacheable_derive_options,
+    CacheTypeName, CacheableDeriveOptions, CacheableFieldsMode, WatermarkField,
+    parse_cacheable_derive_options,
 };
 pub use fields_struct::generate_fields_struct;

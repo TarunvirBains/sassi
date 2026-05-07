@@ -32,7 +32,7 @@
 //! the inventory-based registry, and `inventory` documents support for
 //! the wasm32 startup-init slot. Full runtime-test coverage on
 //! `wasm32-unknown-unknown` requires a `wasm-bindgen-test` runner and is
-//! outside the current v0.1.0-alpha release gate.
+//! outside the current v0.1.0-beta.1 release gate.
 
 use crate::sassi::orchestrator::Sassi;
 use std::any::{Any, TypeId};

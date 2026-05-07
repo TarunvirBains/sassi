@@ -17,6 +17,7 @@ pub mod field_ext;
 pub mod field_predicate;
 pub mod memq;
 
-pub use basic::BasicPredicate;
+pub use basic::{BasicPredicate, IntoBasicPredicate};
+pub use field_ext::PresentField;
 pub use field_predicate::{FieldPredicate, LookupOp};
 pub use memq::MemQ;

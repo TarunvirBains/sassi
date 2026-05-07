@@ -1,6 +1,6 @@
 [package]
 name = "sassi-codegen"
-description = "Shared codegen primitives for sassi-macros and downstream proc-macro consumers."
+description = "Support crate for Sassi macro/codegen integrations; most adopters depend on sassi directly."
 readme = "../README.md"
 version.workspace = true
 edition.workspace = true

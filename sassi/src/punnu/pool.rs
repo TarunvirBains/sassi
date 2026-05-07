@@ -189,6 +189,13 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     #[cfg(feature = "serde")]
     backend_strict_insert_released: Notify,
 
+    /// Ids whose L2 backend value is locally untrusted after a best-effort
+    /// invalidation failure. Suppresses `get_async` backend rehydration until a
+    /// later backend write/delete for that id succeeds, independent of L1 LRU
+    /// capacity.
+    #[cfg(feature = "serde")]
+    backend_read_suppressed_ids: Mutex<BTreeSet<T::Id>>,
+
     /// Readiness signal fired on the sweep task's first poll, *before*
     /// the first sleep. Tests `await` this before
     /// `tokio::time::advance(...)` to guarantee the sleep is
@@ -360,12 +367,17 @@ impl<T: Cacheable> Punnu<T> {
                     .put(&keyspace, &id, arc.as_ref(), ttl)
                     .await
                     .map_err(InsertError::BackendFailed)?;
+                self.clear_backend_read_suppression(&id);
                 return self.insert_arc_l1(arc, ttl).await;
             }
 
             let inserted = self.insert_arc_l1(arc.clone(), ttl).await?;
-            self.write_backend_after_l1(backend.as_ref(), &keyspace, &id, arc.as_ref(), ttl)
+            let backend_write_succeeded = self
+                .write_backend_after_l1(backend.as_ref(), &keyspace, &id, arc.as_ref(), ttl)
                 .await;
+            if backend_write_succeeded {
+                self.clear_backend_read_suppression(&id);
+            }
             return Ok(inserted);
         }
 
@@ -437,7 +449,10 @@ impl<T: Cacheable> Punnu<T> {
     /// In the default [`BackendFailureMode::L1Only`] and
     /// [`BackendFailureMode::Retry`] modes, backend invalidation
     /// failures are logged/recorded and the L1 invalidation remains
-    /// successful.
+    /// successful. When that best-effort backend invalidation fails, this
+    /// process suppresses future `get_async` L2 rehydration for the id until a
+    /// later local backend write or local backend invalidation for the same id
+    /// succeeds.
     pub async fn invalidate(
         &self,
         id: &T::Id,
@@ -449,15 +464,22 @@ impl<T: Cacheable> Punnu<T> {
         if self.strict_backend_errors_enabled() {
             let _guard = self.acquire_backend_strict_insert(id).await;
             self.invalidate_backend_strict(id).await?;
+            self.clear_backend_read_suppression(id);
             self.invalidate_l1(id, reason);
             return Ok(());
         }
 
         #[cfg(feature = "serde")]
         let id_for_backend = id.clone();
+        #[cfg(feature = "serde")]
+        if self.inner.backend.is_some() {
+            self.suppress_backend_read(&id_for_backend);
+        }
         self.invalidate_internal(id, reason).await;
         #[cfg(feature = "serde")]
-        self.invalidate_backend_after_l1(&id_for_backend).await;
+        if self.invalidate_backend_after_l1(&id_for_backend).await {
+            self.clear_backend_read_suppression(&id_for_backend);
+        }
         Ok(())
     }
 
@@ -497,7 +519,10 @@ impl<T: Cacheable> Punnu<T> {
     /// Backend hits are validated against the requested canonical id
     /// before they can enter L1. A backend that returns the wrong id is
     /// treated as corrupt data for this key and does not contaminate the
-    /// resident identity map.
+    /// resident identity map. If a prior best-effort invalidation failed for
+    /// this id, the local pool treats the backend value as untrusted and returns
+    /// `Ok(None)` without touching L2 until a later backend write or
+    /// invalidation for the same id succeeds.
     #[cfg(feature = "serde")]
     pub async fn get_async(&self, id: &T::Id) -> Result<Option<Arc<T>>, BackendError> {
         if let Some(arc) = self.get(id) {
@@ -507,6 +532,9 @@ impl<T: Cacheable> Punnu<T> {
         let Some(backend) = &self.inner.backend else {
             return Ok(None);
         };
+        if self.backend_read_suppressed(id) {
+            return Ok(None);
+        }
         let keyspace = self.backend_keyspace();
         let Some(value) = self
             .read_backend_with_policy(backend.as_ref(), &keyspace, id)
@@ -854,7 +882,7 @@ impl<T: Cacheable> Punnu<T> {
     /// Within a single batch call, missing ids are deduplicated
     /// before the batch fetcher is invoked (input may contain dupes).
     /// Across concurrent batch calls, batch-level deduplication is
-    /// **not** implemented in v0.1.0-alpha — two concurrent
+    /// **not** implemented in v0.1.0-beta.1 — two concurrent
     /// `get_or_fetch_many(&[1, 2, 3])` calls invoke the batch fetcher
     /// twice for the same set. Per-id single-flight coalescing across
     /// concurrent *individual* `get_or_fetch` calls still applies as
@@ -2046,26 +2074,30 @@ impl<T: Cacheable> Punnu<T> {
         id: &T::Id,
         value: &T,
         ttl: Option<Duration>,
-    ) {
+    ) -> bool {
         let result = match self.inner.config.backend_failure_mode {
             BackendFailureMode::L1Only => backend.put(keyspace, id, value, ttl).await,
             BackendFailureMode::Retry { attempts } => {
                 self.retry_backend_put(backend, keyspace, id, value, ttl, attempts)
                     .await
             }
-            BackendFailureMode::Error => return,
+            BackendFailureMode::Error => return false,
         };
 
-        if let Err(err) = result {
-            self.log_backend_error(&err);
-            self.metrics_record_backend_error(&err);
+        match result {
+            Ok(()) => true,
+            Err(err) => {
+                self.log_backend_error(&err);
+                self.metrics_record_backend_error(&err);
+                false
+            }
         }
     }
 
     #[cfg(feature = "serde")]
-    async fn invalidate_backend_after_l1(&self, id: &T::Id) {
+    async fn invalidate_backend_after_l1(&self, id: &T::Id) -> bool {
         let Some(backend) = &self.inner.backend else {
-            return;
+            return true;
         };
         let keyspace = self.backend_keyspace();
         let result = match self.inner.config.backend_failure_mode {
@@ -2078,10 +2110,41 @@ impl<T: Cacheable> Punnu<T> {
             }
         };
 
-        if let Err(err) = result {
-            self.log_backend_error(&err);
-            self.metrics_record_backend_error(&err);
+        match result {
+            Ok(()) => true,
+            Err(err) => {
+                self.log_backend_error(&err);
+                self.metrics_record_backend_error(&err);
+                false
+            }
         }
+    }
+
+    #[cfg(feature = "serde")]
+    fn backend_read_suppressed(&self, id: &T::Id) -> bool {
+        self.inner
+            .backend_read_suppressed_ids
+            .lock()
+            .expect("Punnu backend read-suppression table lock poisoned")
+            .contains(id)
+    }
+
+    #[cfg(feature = "serde")]
+    fn suppress_backend_read(&self, id: &T::Id) {
+        self.inner
+            .backend_read_suppressed_ids
+            .lock()
+            .expect("Punnu backend read-suppression table lock poisoned")
+            .insert(id.clone());
+    }
+
+    #[cfg(feature = "serde")]
+    fn clear_backend_read_suppression(&self, id: &T::Id) {
+        self.inner
+            .backend_read_suppressed_ids
+            .lock()
+            .expect("Punnu backend read-suppression table lock poisoned")
+            .remove(id);
     }
 
     #[cfg(feature = "serde")]
@@ -2581,6 +2644,8 @@ impl<T: Cacheable> PunnuBuilder<T> {
             backend_strict_insert_ids: Mutex::new(BTreeSet::new()),
             #[cfg(feature = "serde")]
             backend_strict_insert_released: Notify::new(),
+            #[cfg(feature = "serde")]
+            backend_read_suppressed_ids: Mutex::new(BTreeSet::new()),
             #[cfg(any(
                 all(feature = "runtime-tokio", not(target_arch = "wasm32")),
                 all(feature = "runtime-wasm", target_arch = "wasm32"),

@@ -140,6 +140,12 @@ Redis and be read back later. Applications that need a global write barrier
 should coordinate writes outside Sassi, move to a new namespace, or use a backend
 design with generation tokens.
 
+`invalidate_all` is also best-effort across the delete-and-publish boundary. It
+deletes Redis entries in committed batches before publishing the final
+keyspace-wide invalidation message. If that final publish fails, Sassi does not
+roll back deleted Redis entries, and other processes can retain stale L1 entries
+until a later invalidation, refresh, restart, or namespace/generation rollover.
+
 `RedisBackend` drains index keys in bounded chunks, so `invalidate_all` may run
 for a long time under sustained concurrent writes.
 
@@ -150,8 +156,8 @@ script effects replication.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-alpha.2"
-sassi-cache-redis = "0.1.0-alpha.2"
+sassi = "0.1.0-beta.1"
+sassi-cache-redis = "0.1.0-beta.1"
 ```
 
 ## Backend Failure Modes
@@ -173,12 +179,26 @@ and `start_delta_refresh` apply fetched values to the in-process L1 map; they do
 not write those fetched values through to L2 or publish L2 invalidations for
 query membership changes.
 
+In best-effort modes (`L1Only` and exhausted `Retry`), a failed single-id
+backend invalidation suppresses future `get_async` L2 rehydration for that id in
+the same process. The suppression is set before the local L1 entry is removed,
+so concurrent same-id `get_async` calls cannot rehydrate L2 while backend
+invalidation is in flight. Suppression is cleared after a later local backend
+write or local backend invalidation for that id succeeds. Backend invalidation
+stream delivery does not clear it because streams do not carry an ordering token
+relative to this process's failed invalidation. Suppression is per-id and is not
+capped by the L1 `lru_size`, so a prolonged backend outage can retain one local
+suppression entry per failed invalidation. This prevents a local pool from
+resurrecting a value it explicitly invalidated during an L2 outage, but it is not
+a distributed generation-token guarantee for other processes.
+
 ### L1/L2 Access Boundaries
 
 `get` is L1-only.
 
 `get_async` checks L1 first, then backend, and finally inserts the backend value
-into L1 if canonical.
+into L1 if canonical. It skips the backend read when a prior best-effort
+invalidation failure marked that id as locally untrusted.
 
 `get_or_fetch` and `get_or_fetch_many` are canonical-id fetch helpers. They do
 not `put` back to L2, and they should not be used as query/page-style membership
@@ -253,7 +273,7 @@ For `wasm32-unknown-unknown`, enable `runtime-wasm`:
 
 ```toml
 sassi = {
-    version = "0.1.0-alpha.2",
+    version = "0.1.0-beta.1",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }

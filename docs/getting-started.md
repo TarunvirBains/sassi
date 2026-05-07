@@ -10,7 +10,7 @@ The default feature set enables `serde` and the native Tokio runtime path:
 
 ```toml
 [dependencies]
-sassi = "0.1.0-alpha.2"
+sassi = "0.1.0-beta.1"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
@@ -109,7 +109,7 @@ when the caller needs positional lookup.
 only when you want an L1-only in-process cache with the smallest surface:
 
 ```toml
-sassi = { version = "0.1.0-alpha.2", default-features = false }
+sassi = { version = "0.1.0-beta.1", default-features = false }
 ```
 
 `runtime-tokio` is the native background-work path. It is selected by default
@@ -122,7 +122,7 @@ explicitly for browser/WASM targets:
 
 ```toml
 sassi = {
-    version = "0.1.0-alpha.2",
+    version = "0.1.0-beta.1",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }
@@ -133,7 +133,7 @@ for selected `time` and `chrono` timestamp types. They are useful when a delta
 sync cursor is already represented by one of those libraries:
 
 ```toml
-sassi = { version = "0.1.0-alpha.2", features = ["watermark-time"] }
+sassi = { version = "0.1.0-beta.1", features = ["watermark-time"] }
 ```
 
 ## Where Next

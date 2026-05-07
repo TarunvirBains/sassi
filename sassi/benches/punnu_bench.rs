@@ -20,6 +20,7 @@
 //! throughput claims are derived from these numbers.
 
 use std::collections::{HashSet, VecDeque};
+use std::hint::black_box;
 #[cfg(all(
     feature = "serde",
     feature = "runtime-tokio",
@@ -36,7 +37,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use futures::{future::join_all, join};
 #[cfg(all(
     feature = "serde",

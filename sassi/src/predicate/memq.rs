@@ -12,7 +12,7 @@
 //! [`BasicPredicate`] tree.
 
 use crate::cacheable::Cacheable;
-use crate::predicate::BasicPredicate;
+use crate::predicate::{BasicPredicate, IntoBasicPredicate};
 use std::any::{Any, TypeId};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
@@ -205,9 +205,12 @@ impl<T: Cacheable> MemQ<T> {
     /// This is the bridge from SQL-projectable
     /// [`BasicPredicate`] into the
     /// Rust-only `MemQ` pipeline.
-    pub fn filter_basic(predicate: BasicPredicate<T>) -> Self {
+    pub fn filter_basic<P>(predicate: P) -> Self
+    where
+        P: IntoBasicPredicate<T>,
+    {
         Self::Filter(Filter {
-            kind: FilterKind::Basic(predicate),
+            kind: FilterKind::Basic(predicate.into_basic_predicate()),
         })
     }
 

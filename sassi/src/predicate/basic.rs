@@ -30,7 +30,7 @@ use std::ops::{BitAnd, BitOr, BitXor, Not};
 /// let alice = User { age: 30, banned: false };
 /// assert!(active_adult.evaluate(&alice));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum BasicPredicate<T> {
     /// Always-true sentinel. Useful as an identity for `And` reductions.
@@ -52,6 +52,37 @@ pub enum BasicPredicate<T> {
     /// Exclusive or — `a XOR b`. Not flattened (XOR isn't associative
     /// the way And/Or are when chained).
     Xor(Box<BasicPredicate<T>>, Box<BasicPredicate<T>>),
+}
+
+impl<T> Clone for BasicPredicate<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::True => Self::True,
+            Self::False => Self::False,
+            Self::Field(field) => Self::Field(field.clone()),
+            Self::And(parts) => Self::And(parts.clone()),
+            Self::Or(parts) => Self::Or(parts.clone()),
+            Self::Not(inner) => Self::Not(Box::new((**inner).clone())),
+            Self::Xor(left, right) => {
+                Self::Xor(Box::new((**left).clone()), Box::new((**right).clone()))
+            }
+        }
+    }
+}
+
+/// Conversion into the SQL-projectable base predicate algebra.
+///
+/// This lets downstream crates expose their own provenanced predicate wrapper
+/// while still feeding Punnu's in-memory evaluator.
+pub trait IntoBasicPredicate<T> {
+    /// Convert into a Sassi [`BasicPredicate<T>`].
+    fn into_basic_predicate(self) -> BasicPredicate<T>;
+}
+
+impl<T> IntoBasicPredicate<T> for BasicPredicate<T> {
+    fn into_basic_predicate(self) -> BasicPredicate<T> {
+        self
+    }
 }
 
 impl<T> BasicPredicate<T> {

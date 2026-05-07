@@ -1,6 +1,6 @@
 //! Parsing support for `#[derive(Cacheable)]` helper attributes.
 
-use proc_macro2::Span;
+use proc_macro2::{Span, TokenStream};
 use syn::{Data, DeriveInput, Fields, LitStr, spanned::Spanned};
 
 /// Parsed options from `#[cacheable(...)]` helper attributes.
@@ -10,6 +10,28 @@ pub struct CacheableDeriveOptions {
     pub watermark_field: Option<WatermarkField>,
     /// Optional stable L2 backend keyspace type name.
     pub type_name: Option<CacheTypeName>,
+    /// Companion field surface used for `Cacheable::Fields`.
+    pub fields: CacheableFieldsMode,
+}
+
+/// Companion field-surface mode for generated `Cacheable` impls.
+#[derive(Debug, Default)]
+pub enum CacheableFieldsMode {
+    /// Use sassi-codegen's generated `{Model}Fields` companion and construct
+    /// one `sassi::Field<Model, V>` accessor per model field.
+    #[default]
+    Generated,
+    /// Reference a consumer-owned companion type and constructor expression.
+    ///
+    /// Downstream macro crates use this when they already generate their own
+    /// `{Model}Fields` type and need only the `Cacheable` impl from
+    /// sassi-codegen.
+    External {
+        /// Token path for `type Fields = ...`.
+        type_path: TokenStream,
+        /// Expression used by `fn fields() -> Self::Fields`.
+        constructor: TokenStream,
+    },
 }
 
 /// Name and source span for a requested watermark field.
@@ -54,6 +76,22 @@ impl CacheTypeName {
         Self {
             value: value.into(),
             span,
+        }
+    }
+}
+
+impl CacheableFieldsMode {
+    /// Construct an external field companion mode.
+    ///
+    /// `type_path` is emitted after `type Fields =`; `constructor` is emitted
+    /// as the body expression of `fn fields() -> Self::Fields`.
+    pub fn external(
+        type_path: impl Into<TokenStream>,
+        constructor: impl Into<TokenStream>,
+    ) -> Self {
+        Self::External {
+            type_path: type_path.into(),
+            constructor: constructor.into(),
         }
     }
 }

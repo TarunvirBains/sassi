@@ -59,7 +59,11 @@ pub struct PunnuConfig {
     /// and backend invalidation publishing from
     /// [`crate::punnu::Punnu::invalidate`]. Default
     /// [`BackendFailureMode::L1Only`] — log the error, succeed against
-    /// L1 alone.
+    /// L1 alone. Best-effort single-id invalidation failures also suppress
+    /// local `get_async` L2 rehydration for that id until a later local
+    /// backend write or local backend invalidation succeeds. That suppression
+    /// is per-id and is not capped by `lru_size`, so a prolonged backend outage
+    /// can retain one local suppression entry per failed invalidation.
     pub backend_failure_mode: BackendFailureMode,
 
     /// What to do when [`crate::punnu::Punnu::insert`] is called for an
@@ -145,12 +149,26 @@ impl std::fmt::Debug for PunnuConfig {
 /// Attempt 1 has no preceding delay. Attempt 2 waits 25ms; later
 /// attempts double until capped at 1s. Production retry paths add
 /// jitter on top of this base to avoid synchronized retry storms.
-pub fn retry_delay_for_attempt(attempt_number: u8) -> Duration {
+pub(crate) fn retry_delay_for_attempt(attempt_number: u8) -> Duration {
     if attempt_number <= 1 {
         return Duration::ZERO;
     }
     let exponent = u32::from(attempt_number.saturating_sub(2)).min(10);
     Duration::from_millis((25u64.saturating_mul(1u64 << exponent)).min(1_000))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_delay_for_attempt;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_delay_uses_capped_exponential_backoff() {
+        assert_eq!(retry_delay_for_attempt(1), Duration::ZERO);
+        assert_eq!(retry_delay_for_attempt(2), Duration::from_millis(25));
+        assert_eq!(retry_delay_for_attempt(3), Duration::from_millis(50));
+        assert_eq!(retry_delay_for_attempt(8), Duration::from_millis(1_000));
+    }
 }
 
 /// Behaviour when an L2 backend operation fails.
@@ -180,9 +198,9 @@ pub enum BackendFailureMode {
 
     /// Retry the backend operation up to `attempts` total attempts
     /// (including the original call) before falling through to
-    /// L1Only behaviour for retryable errors. Backoff is centrally
-    /// defined by [`retry_delay_for_attempt`] plus 0-25% jitter in
-    /// production call paths. `attempts` must be at least 1.
+    /// L1Only behaviour for retryable errors. Backoff uses an internal
+    /// capped exponential schedule plus 0-25% jitter in production call
+    /// paths. `attempts` must be at least 1.
     Retry {
         /// Number of attempts before giving up.
         attempts: u8,
