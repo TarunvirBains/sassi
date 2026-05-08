@@ -11,19 +11,26 @@ use crate::cacheable::Cacheable;
 use crate::error::BackendError;
 use crate::wire;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+const EXPIRY_NONE: u8 = 0;
+const EXPIRY_UNIX_MS: u8 = 1;
+const FILE_EXPIRY_PREFIX_LEN: usize = 9;
+
 /// File-backed cache backend.
 ///
-/// Values are stored as Sassi wire-envelope JSON files. TTL metadata is
-/// embedded in the same envelope so value and expiry are published with one
-/// atomic file rename. Older `.ttl` sidecars are read for compatibility but are
-/// ignored once inline expiry metadata is present.
+/// Values are stored as Sassi binary wire-container records with a
+/// `.sassi` extension. The on-disk body carries an inline expiry tag
+/// followed by a postcard-encoded payload, so value and expiry are
+/// published with one atomic file rename. Beta.2 does not read the
+/// beta.1 `.json` cache files or `.ttl` sidecars; operators should
+/// treat any leftover beta.1 files as cold misses and clear them
+/// during upgrade.
 ///
 /// This backend uses blocking filesystem operations inside async trait methods.
 /// Use it for development, tests, and simple local persistence. For request-path
@@ -32,25 +39,6 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone)]
 pub struct FileBackend {
     root: PathBuf,
-}
-
-#[derive(Serialize)]
-struct FileEnvelopeRef<'a, T: ?Sized> {
-    #[serde(rename = "__sassi_v")]
-    version: u64,
-    #[serde(rename = "__sassi_has_inline_expiry")]
-    has_inline_expiry: bool,
-    #[serde(rename = "__sassi_expires_at_ms")]
-    expires_at_ms: Option<u128>,
-    payload: &'a T,
-}
-
-#[derive(Deserialize)]
-struct FileEnvelopeMetadata {
-    #[serde(rename = "__sassi_has_inline_expiry", default)]
-    has_inline_expiry: bool,
-    #[serde(rename = "__sassi_expires_at_ms", default)]
-    expires_at_ms: Option<u128>,
 }
 
 impl FileBackend {
@@ -72,7 +60,7 @@ impl FileBackend {
         Ok(self
             .root
             .join(keyspace_storage_key::<T>(keyspace, id)?)
-            .with_extension("json"))
+            .with_extension("sassi"))
     }
 
     fn keyspace_dir(&self, keyspace: &BackendKeyspace) -> PathBuf {
@@ -98,11 +86,14 @@ where
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(BackendError::Network(err.to_string())),
         };
-        if is_expired(&path, &bytes)? {
-            remove_pair(&path)?;
-            return Ok(None);
+        let (_, payload) = file_wire_from_slice::<T>(&bytes)?;
+        match payload {
+            Some(value) => Ok(Some(value)),
+            None => {
+                remove_file_idempotent(&path)?;
+                Ok(None)
+            }
         }
-        Ok(Some(wire::from_slice(&bytes)?))
     }
 
     async fn put(
@@ -118,26 +109,19 @@ where
             .ok_or_else(|| BackendError::Other("backend path has no parent".into()))?;
         std::fs::create_dir_all(parent).map_err(|err| BackendError::Network(err.to_string()))?;
 
-        let expires_at_ms = ttl
-            .and_then(|ttl| SystemTime::now().checked_add(ttl))
-            .map(|deadline| {
-                deadline
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|err| BackendError::Other(err.into()))
-                    .map(|duration| duration.as_millis())
-            })
-            .transpose()?;
+        let expires_at_ms = match ttl {
+            Some(ttl) => Some(absolute_expiry_millis(ttl)?),
+            None => None,
+        };
         let bytes = file_wire_to_vec(value, expires_at_ms)?;
         write_atomic(&path, &bytes)?;
-
-        remove_legacy_ttl_sidecar_best_effort(&path);
 
         Ok(())
     }
 
     async fn invalidate(&self, keyspace: &BackendKeyspace, id: &T::Id) -> Result<(), BackendError> {
         let path = self.data_path::<T>(keyspace, id)?;
-        remove_pair(&path)
+        remove_file_idempotent(&path)
     }
 
     async fn invalidate_all(&self, keyspace: &BackendKeyspace) -> Result<(), BackendError> {
@@ -150,54 +134,78 @@ where
     }
 }
 
-fn ttl_path(path: &Path) -> PathBuf {
-    path.with_extension("ttl")
-}
-
-fn file_wire_to_vec<T: Serialize + ?Sized>(
+fn file_wire_to_vec<T: Cacheable + Serialize>(
     payload: &T,
-    expires_at_ms: Option<u128>,
+    expires_at_ms: Option<u64>,
 ) -> Result<Vec<u8>, BackendError> {
-    let envelope = FileEnvelopeRef {
-        version: wire::WIRE_FORMAT_MAJOR,
-        has_inline_expiry: true,
-        expires_at_ms,
-        payload,
-    };
-    serde_json::to_vec(&envelope).map_err(BackendError::from)
-}
-
-fn is_expired(path: &Path, bytes: &[u8]) -> Result<bool, BackendError> {
-    let metadata: FileEnvelopeMetadata = serde_json::from_slice(bytes)?;
-    if metadata.has_inline_expiry {
-        let now_ms = now_millis()?;
-        let expired = metadata
-            .expires_at_ms
-            .is_some_and(|expires_at_ms| expires_at_ms <= now_ms);
-        if !expired {
-            remove_legacy_ttl_sidecar_best_effort(path);
+    let mut out = Vec::new();
+    wire::encode_header::<T>(wire::WireKind::FileEntry, &mut out)?;
+    match expires_at_ms {
+        Some(ms) => {
+            out.push(EXPIRY_UNIX_MS);
+            out.extend_from_slice(&ms.to_le_bytes());
         }
-        return Ok(expired);
+        None => {
+            out.push(EXPIRY_NONE);
+            out.extend_from_slice(&0_u64.to_le_bytes());
+        }
     }
-
-    let meta_path = ttl_path(path);
-    let raw = match std::fs::read_to_string(&meta_path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(BackendError::Network(err.to_string())),
-    };
-    let expires_at_ms = raw
-        .trim()
-        .parse::<u128>()
+    let body = postcard::to_allocvec(payload)
         .map_err(|err| BackendError::Serialization(err.to_string()))?;
-    Ok(expires_at_ms <= now_millis()?)
+    out.extend_from_slice(&body);
+    Ok(out)
 }
 
-fn now_millis() -> Result<u128, BackendError> {
-    Ok(SystemTime::now()
+fn file_wire_from_slice<T: Cacheable + DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<(Option<u64>, Option<T>), BackendError> {
+    let body = wire::decode_header::<T>(bytes, wire::WireKind::FileEntry)?;
+    if body.len() < FILE_EXPIRY_PREFIX_LEN {
+        return Err(BackendError::Serialization(
+            "file entry body too short".into(),
+        ));
+    }
+    let tag = body[0];
+    let expires_at_ms = u64::from_le_bytes(body[1..9].try_into().expect("slice length checked"));
+    let expiry = match tag {
+        EXPIRY_NONE => None,
+        EXPIRY_UNIX_MS => Some(expires_at_ms),
+        other => {
+            return Err(BackendError::Serialization(format!(
+                "unsupported file expiry tag {other}"
+            )));
+        }
+    };
+    let now_ms = now_millis()?;
+    if expiry.is_some_and(|ms| ms <= now_ms) {
+        return Ok((expiry, None));
+    }
+    let payload =
+        wire::decode_postcard_exact(&body[FILE_EXPIRY_PREFIX_LEN..]).map_err(BackendError::from)?;
+    Ok((expiry, Some(payload)))
+}
+
+fn absolute_expiry_millis(ttl: Duration) -> Result<u64, BackendError> {
+    let deadline = SystemTime::now().checked_add(ttl).ok_or_else(|| {
+        BackendError::Serialization("file expiry exceeds u64 milliseconds".into())
+    })?;
+    let duration = deadline
         .duration_since(UNIX_EPOCH)
-        .map_err(|err| BackendError::Other(err.into()))?
-        .as_millis())
+        .map_err(|err| BackendError::Other(err.into()))?;
+    duration
+        .as_millis()
+        .try_into()
+        .map_err(|_| BackendError::Serialization("file expiry exceeds u64 milliseconds".into()))
+}
+
+fn now_millis() -> Result<u64, BackendError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| BackendError::Other(err.into()))?;
+    duration
+        .as_millis()
+        .try_into()
+        .map_err(|_| BackendError::Serialization("file expiry exceeds u64 milliseconds".into()))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), BackendError> {
@@ -220,15 +228,6 @@ fn temp_path(parent: &Path) -> PathBuf {
         TEMP_COUNTER.fetch_add(1, Ordering::Relaxed),
         fastrand::u64(..)
     ))
-}
-
-fn remove_pair(path: &Path) -> Result<(), BackendError> {
-    remove_file_idempotent(path)?;
-    remove_file_idempotent(&ttl_path(path))
-}
-
-fn remove_legacy_ttl_sidecar_best_effort(path: &Path) {
-    let _ = std::fs::remove_file(ttl_path(path));
 }
 
 fn remove_file_idempotent(path: &Path) -> Result<(), BackendError> {

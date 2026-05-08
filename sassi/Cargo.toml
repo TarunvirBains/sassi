@@ -77,6 +77,10 @@ proptest = { workspace = true }
 tempfile = "3"
 trybuild = { workspace = true }
 criterion = { workspace = true }
+# Tests construct postcard payloads directly to verify the binary wire
+# header parser ignores body bytes for incompatible majors and to
+# fabricate type-name mismatches with valid postcard bodies.
+postcard = { workspace = true }
 
 [[bench]]
 name = "punnu_bench"

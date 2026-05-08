@@ -2,6 +2,7 @@
 
 use sassi::{CacheBackend, Cacheable, Field, FileBackend};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,15 +33,35 @@ impl Cacheable for E {
     }
 }
 
+const FILE_ENTRY_KIND: u8 = 0x02;
+
 fn keyspace(namespace: Option<&str>) -> sassi::BackendKeyspace {
     sassi::BackendKeyspace {
         namespace: namespace.map(Arc::from),
-        type_name: std::any::type_name::<E>(),
+        type_name: <E as Cacheable>::cache_type_name(),
     }
 }
 
+fn walkdir(path: PathBuf) -> Vec<PathBuf> {
+    if path.is_dir() {
+        std::fs::read_dir(path)
+            .unwrap()
+            .flat_map(|entry| walkdir(entry.unwrap().path()))
+            .collect()
+    } else {
+        vec![path]
+    }
+}
+
+fn find_files_with_extension(root: &std::path::Path, extension: &str) -> Vec<PathBuf> {
+    walkdir(root.to_path_buf())
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == extension))
+        .collect()
+}
+
 #[tokio::test]
-async fn file_backend_round_trips_wire_envelope_payload() {
+async fn file_backend_round_trips_binary_file_entry() {
     let dir = tempfile::tempdir().unwrap();
     let backend = FileBackend::new(dir.path());
     let value = E {
@@ -54,25 +75,37 @@ async fn file_backend_round_trips_wire_envelope_payload() {
         .unwrap();
 
     let loaded = backend.get(&keyspace(Some("env/a")), &7).await.unwrap();
-    assert_eq!(loaded, Some(value));
+    assert_eq!(loaded, Some(value.clone()));
 
-    let files = std::fs::read_dir(dir.path())
-        .unwrap()
-        .flat_map(|entry| walkdir(entry.unwrap().path()))
-        .collect::<Vec<_>>();
-    let data = files
-        .iter()
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .map(std::fs::read)
-        .unwrap()
-        .unwrap();
-    let envelope: serde_json::Value = serde_json::from_slice(&data).unwrap();
-    assert_eq!(envelope["__sassi_v"], 0);
-    assert_eq!(envelope["payload"]["label"], "seven");
+    let sassi_files = find_files_with_extension(dir.path(), "sassi");
+    assert_eq!(
+        sassi_files.len(),
+        1,
+        "exactly one .sassi data file should exist"
+    );
+    let data = std::fs::read(&sassi_files[0]).unwrap();
+
+    assert_eq!(&data[..8], b"SASSI\0W\0", "binary header magic");
+    assert_eq!(
+        u16::from_le_bytes([data[8], data[9]]),
+        sassi::wire::WIRE_FORMAT_MAJOR,
+        "wire major"
+    );
+    assert_eq!(data[10], FILE_ENTRY_KIND, "kind byte must be file-entry");
+    assert_eq!(data[11], 0, "flags byte must be zero");
+
+    assert!(
+        find_files_with_extension(dir.path(), "json").is_empty(),
+        "beta.2 file backend must never emit .json data files"
+    );
+    assert!(
+        find_files_with_extension(dir.path(), "ttl").is_empty(),
+        "beta.2 file backend must never emit .ttl sidecar files"
+    );
 }
 
 #[tokio::test]
-async fn file_backend_ttl_expiry_removes_expired_entry() {
+async fn file_backend_ttl_expiry_removes_expired_entry_before_payload_decode() {
     let dir = tempfile::tempdir().unwrap();
     let backend = FileBackend::new(dir.path());
     let value = E {
@@ -85,18 +118,37 @@ async fn file_backend_ttl_expiry_removes_expired_entry() {
         .await
         .unwrap();
 
+    // Corrupt the postcard payload after the expiry prefix to prove
+    // the get path observes expiry before attempting to decode the body.
+    let sassi_files = find_files_with_extension(dir.path(), "sassi");
+    assert_eq!(sassi_files.len(), 1);
+    let mut bytes = std::fs::read(&sassi_files[0]).unwrap();
+    let payload_start = bytes
+        .len()
+        .checked_sub(1)
+        .expect("file should have at least one payload byte");
+    for byte in &mut bytes[payload_start..] {
+        *byte = 0xff;
+    }
+    std::fs::write(&sassi_files[0], &bytes).unwrap();
+
     assert_eq!(
         backend.get(&keyspace(None), &9_i64).await.unwrap(),
-        None::<E>
+        None::<E>,
+        "expired entry should be removed without decoding the payload"
+    );
+    assert!(
+        find_files_with_extension(dir.path(), "sassi").is_empty(),
+        "expired entry's .sassi file should be removed on read"
     );
 }
 
 #[tokio::test]
-async fn file_backend_ignores_stale_legacy_ttl_sidecar_for_fresh_inline_metadata() {
+async fn file_backend_uses_sassi_extension_and_ignores_json_cache_files() {
     let dir = tempfile::tempdir().unwrap();
     let backend = FileBackend::new(dir.path());
     let value = E {
-        id: 10,
+        id: 100,
         label: "fresh".into(),
     };
 
@@ -104,47 +156,25 @@ async fn file_backend_ignores_stale_legacy_ttl_sidecar_for_fresh_inline_metadata
         .put(&keyspace(None), &value.id(), &value, None)
         .await
         .unwrap();
+    let sassi_files = find_files_with_extension(dir.path(), "sassi");
+    assert_eq!(sassi_files.len(), 1);
 
-    let data_path = std::fs::read_dir(dir.path())
-        .unwrap()
-        .flat_map(|entry| walkdir(entry.unwrap().path()))
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .expect("data file should exist");
-    std::fs::write(data_path.with_extension("ttl"), b"0").unwrap();
+    // Drop a stray beta.1-style `.json` sibling alongside the new
+    // `.sassi` file. The backend must continue to read the `.sassi`
+    // record and must not fall back to the legacy file.
+    let json_sibling = sassi_files[0].with_extension("json");
+    std::fs::write(
+        &json_sibling,
+        br#"{"__sassi_v":0,"payload":{"id":100,"label":"old"}}"#,
+    )
+    .unwrap();
 
-    let loaded = backend.get(&keyspace(None), &10).await.unwrap();
-
+    let loaded = backend.get(&keyspace(None), &100).await.unwrap();
     assert_eq!(loaded, Some(value));
     assert!(
-        !data_path.with_extension("ttl").exists(),
-        "stale legacy ttl sidecar should be removed after the fresh value is read"
+        json_sibling.exists(),
+        "beta.2 backend should leave stray .json files untouched"
     );
-}
-
-#[tokio::test]
-async fn file_backend_reads_fresh_inline_value_when_stale_sidecar_cleanup_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    let backend = FileBackend::new(dir.path());
-    let value = E {
-        id: 11,
-        label: "fresh".into(),
-    };
-
-    backend
-        .put(&keyspace(None), &value.id(), &value, None)
-        .await
-        .unwrap();
-
-    let data_path = std::fs::read_dir(dir.path())
-        .unwrap()
-        .flat_map(|entry| walkdir(entry.unwrap().path()))
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .expect("data file should exist");
-    std::fs::create_dir(data_path.with_extension("ttl")).unwrap();
-
-    let loaded = backend.get(&keyspace(None), &11).await.unwrap();
-
-    assert_eq!(loaded, Some(value));
 }
 
 #[tokio::test]
@@ -193,7 +223,7 @@ async fn file_backend_namespaces_do_not_collide() {
 }
 
 #[tokio::test]
-async fn file_backend_invalidate_removes_only_requested_id() {
+async fn file_backend_invalidate_removes_sassi_file() {
     let dir = tempfile::tempdir().unwrap();
     let backend = FileBackend::new(dir.path());
     let keyspace = keyspace(None);
@@ -230,10 +260,15 @@ async fn file_backend_invalidate_removes_only_requested_id() {
     let remaining: E = backend.get(&keyspace, &2_i64).await.unwrap().unwrap();
     assert_eq!(backend.get(&keyspace, &1_i64).await.unwrap(), None::<E>);
     assert_eq!(remaining.label, "two");
+    assert_eq!(
+        find_files_with_extension(dir.path(), "sassi").len(),
+        1,
+        "only the surviving id's .sassi file should remain"
+    );
 }
 
 #[tokio::test]
-async fn file_backend_invalidate_all_is_namespace_scoped() {
+async fn file_backend_invalidate_all_removes_keyspace_directory() {
     let dir = tempfile::tempdir().unwrap();
     let backend = FileBackend::new(dir.path());
     let keep = keyspace(Some("keep"));
@@ -271,15 +306,9 @@ async fn file_backend_invalidate_all_is_namespace_scoped() {
     let remaining: E = backend.get(&keep, &1_i64).await.unwrap().unwrap();
     assert_eq!(backend.get(&drop, &1_i64).await.unwrap(), None::<E>);
     assert_eq!(remaining.label, "keep");
-}
-
-fn walkdir(path: std::path::PathBuf) -> Vec<std::path::PathBuf> {
-    if path.is_dir() {
-        std::fs::read_dir(path)
-            .unwrap()
-            .flat_map(|entry| walkdir(entry.unwrap().path()))
-            .collect()
-    } else {
-        vec![path]
-    }
+    assert_eq!(
+        find_files_with_extension(dir.path(), "sassi").len(),
+        1,
+        "drop keyspace .sassi files should be removed by invalidate_all"
+    );
 }
