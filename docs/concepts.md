@@ -294,8 +294,70 @@ let _entry = users.insert_serialized(&payload).await?;
 let _value = sassi::wire::from_slice::<User>(&payload)?;
 ```
 
-`wire` contains only the envelope/tag plus the payload; TTL is a local pool policy
-and is not embedded in the wire bytes.
+Sassi's `serde` feature uses a postcard-backed binary container for value wire.
+The header carries Sassi magic bytes, wire major `1`, a kind byte, zero flags,
+and `Cacheable::cache_type_name()` before postcard payload bytes. Readers
+validate the header before decoding the typed payload, so an incompatible major,
+kind, type, or flags is rejected before the payload is ever touched. TTL is a
+local pool policy and is not embedded in the wire bytes.
+
+The wire major is independent of the crate semver. It is exposed as
+`sassi::wire::WIRE_FORMAT_MAJOR` for diagnostics; future shape changes bump that
+major rather than the crate version.
+
+## Punnu Entries Export And Restore
+
+`Punnu::export_entries_postcard()` exports unexpired entries only. It does not
+export TTL deadlines, LRU epochs, refresh handles, event listeners, in-flight
+fetches, backend stale-read suppression, or runtime/executor state. Export
+clones `Arc<T>` handles into one immutable snapshot, sorts by `Cacheable::Id`,
+and serializes borrowed `&T` values into a postcard-backed snapshot container.
+
+```rust
+let bytes = pool.export_entries_postcard()?;
+```
+
+The postcard methods are Sassi's compact first-party snapshot convenience, not
+the only way to move cached data. Applications that need human-readable
+export, cross-language APIs, spreadsheets, or external contracts should
+extract the same projection entries as Rust values and serialize those
+app-owned DTOs with `serde_json`, YAML, CSV, protobuf, or another format
+appropriate to that contract.
+
+`Punnu::restore_entries_postcard(bytes)` replaces the receiving pool's L1
+entries from the snapshot, applies the receiving pool's TTL policy, and emits
+normal L1 events after the restored snapshot is visible. Restore is L1-only
+and synchronous: it does not write through to L2 and does not publish backend
+invalidations.
+
+```rust
+let stats = pool.restore_entries_postcard(&bytes)?;
+// stats.inserted, stats.updated, stats.removed
+```
+
+Restore rejects oversized snapshots (`TooManyEntries`), duplicate ids
+(`DuplicateId`), type-name mismatches (`WireFormat`), and snapshots arriving
+while a strict backend write is in flight (`BackendWriteInFlight`) before any
+L1 mutation. Restored entries receive fresh target-pool `default_ttl` and
+fresh LRU epochs because the snapshot does not carry the source pool's TTL
+deadlines.
+
+Restore treats the incoming snapshot as authoritative whole-L1 state. It
+therefore replaces same-id residents even when the receiving pool is configured
+with `OnConflict::Reject`; that conflict policy applies to ordinary inserts,
+not to snapshot restore.
+
+The binary kind value for `entries_with_hints` is reserved for a future
+operational handoff mode. Hints may include remaining TTL and approximate
+recency order. Hints are best-effort and may be ignored by restore. This is
+not full internal-state export.
+
+Full internal-state export remains unsupported: active refresh handles,
+subscription watermarks/recovery sets, single-flight work, event listeners,
+backend stale-read suppression, and runtime/executor state are process-local.
+Applications that need gRPC/microservice continuity should send app-level
+generations, sync cursors, or event-log positions beside the Punnu entries
+snapshot.
 
 ## TTL and Size Semantics
 

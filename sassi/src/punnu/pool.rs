@@ -16,6 +16,8 @@ use crate::backend::{BackendInvalidation, BackendKeyspace, BackendRuntime, Cache
 use crate::cacheable::Cacheable;
 use crate::error::BackendError;
 use crate::error::{FetchError, InsertError};
+#[cfg(feature = "serde")]
+use crate::error::{PunnuSnapshotError, WireFormatError};
 use crate::executor::{DefaultExecutor, PunnuExecutor};
 use crate::predicate::MemQ;
 #[cfg(feature = "serde")]
@@ -70,6 +72,8 @@ type AfterPublishHook = Arc<dyn Fn() + Send + Sync + 'static>;
 type BeforeL1StoreHook = Arc<dyn Fn() + Send + Sync + 'static>;
 #[cfg(test)]
 type BeforeFetchL1CommitHook = Arc<dyn Fn() + Send + Sync + 'static>;
+#[cfg(all(test, feature = "serde"))]
+type BeforeRestoreEnterCoordHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
 #[cfg(feature = "serde")]
 const BACKEND_LISTENER_OWNER_CHECK_INTERVAL: Duration = Duration::from_millis(50);
@@ -152,6 +156,13 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     before_l1_store_hook: Mutex<Option<BeforeL1StoreHook>>,
     #[cfg(test)]
     before_fetch_l1_commit_hook: Mutex<Option<BeforeFetchL1CommitHook>>,
+    /// Test-only hook fired by `restore_entries_postcard` after the
+    /// decoded snapshot has been normalized but before the restore
+    /// enters its checked write coordinator. Lets unit tests acquire a
+    /// strict backend insert reservation between validation and the
+    /// in-coordinator strict-reservation re-check.
+    #[cfg(all(test, feature = "serde"))]
+    before_restore_enter_coord_hook: Mutex<Option<BeforeRestoreEnterCoordHook>>,
 
     /// Monotonic access marker used by sampled-LRU eviction.
     pub(crate) access_clock: AtomicU64,
@@ -229,6 +240,32 @@ pub(crate) struct PunnuInner<T: Cacheable> {
     /// fetch. See [`crate::punnu::single_flight`] for the cancellation
     /// contract.
     pub(crate) in_flight: InFlightRegistry<T>,
+}
+
+/// Counts returned after a successful Punnu entries restore.
+///
+/// Restore replaces the receiving pool's L1 entries from a snapshot
+/// using whole-pool replace semantics. The counts describe the visible
+/// effect on the resident identity map at publish time:
+///
+/// - `inserted` — ids absent before restore that the snapshot installed.
+/// - `updated` — non-expired resident ids whose value was replaced by the
+///   snapshot's entry.
+/// - `removed` — non-expired resident ids dropped because the snapshot
+///   did not include them.
+///
+/// Resident ids whose TTL had already elapsed before restore are not
+/// counted as `removed` — they were already absent to readers and the
+/// restore reclaims their slots silently.
+#[cfg(feature = "serde")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PunnuRestoreStats {
+    /// Number of ids that were absent before restore and present after restore.
+    pub inserted: usize,
+    /// Number of ids that were present before restore and replaced during restore.
+    pub updated: usize,
+    /// Number of non-expired resident ids removed because they were absent from the snapshot.
+    pub removed: usize,
 }
 
 impl<T: Cacheable> Punnu<T> {
@@ -315,13 +352,15 @@ impl<T: Cacheable> Punnu<T> {
         self.insert_arc_internal(arc, Some(ttl)).await
     }
 
-    /// Deserialize a value from Sassi's versioned wire envelope and
+    /// Deserialize a value from Sassi's binary wire container and
     /// insert it into the pool.
     ///
     /// This is the entry point for bytes that crossed a process,
     /// runtime, or transport boundary. The payload must be encoded by
-    /// [`crate::wire::to_vec`]; incompatible wire-format majors are
-    /// rejected before the value reaches the identity map.
+    /// [`crate::wire::to_vec`]; incompatible wire-format majors,
+    /// kind/type-name mismatches, and unsupported flags are rejected
+    /// from the fixed binary header before any postcard payload bytes
+    /// are decoded.
     ///
     /// All normal [`Punnu::insert`] semantics still apply after
     /// deserialization: conflict handling, TTL defaults, LRU pressure,
@@ -330,8 +369,8 @@ impl<T: Cacheable> Punnu<T> {
     /// # Errors
     ///
     /// - [`InsertError::WireFormat`] if the bytes are not a valid
-    ///   Sassi wire envelope for `T`, or if the envelope major version
-    ///   is incompatible.
+    ///   Sassi binary wire container for `T`, or if the wire major,
+    ///   kind, flags, or type name reject the payload at the header.
     /// - Any error that [`Punnu::insert`] can return after the value
     ///   has been deserialized.
     #[cfg(feature = "serde")]
@@ -882,7 +921,7 @@ impl<T: Cacheable> Punnu<T> {
     /// Within a single batch call, missing ids are deduplicated
     /// before the batch fetcher is invoked (input may contain dupes).
     /// Across concurrent batch calls, batch-level deduplication is
-    /// **not** implemented in v0.1.0-beta.1 — two concurrent
+    /// **not** implemented in v0.1.0-beta.2 — two concurrent
     /// `get_or_fetch_many(&[1, 2, 3])` calls invoke the batch fetcher
     /// twice for the same set. Per-id single-flight coalescing across
     /// concurrent *individual* `get_or_fetch` calls still applies as
@@ -2214,6 +2253,270 @@ impl<T: Cacheable> Punnu<T> {
             "sassi backend operation failed"
         );
     }
+
+    /// Export the pool's current unexpired L1 entries as a postcard-backed
+    /// snapshot.
+    ///
+    /// The output is a Sassi binary wire container with the entries kind:
+    /// the shared header validates the cached type name and wire major,
+    /// and the body contains a deterministic count-prefixed sequence of
+    /// postcard-encoded entries sorted by `T::Id`. Expired entries are
+    /// skipped; TTL deadlines, LRU epochs, and other process-local state
+    /// are not exported. The export captures one immutable L1 snapshot
+    /// by cloning `Arc<T>` handles, so concurrent inserts or
+    /// invalidations cannot disturb in-progress serialization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireFormatError::Codec`] if more than `u32::MAX` entries
+    /// would need to be encoded, or if postcard fails to serialize an
+    /// individual entry. Returns [`WireFormatError::MalformedHeader`] if
+    /// `T::cache_type_name()` exceeds the header's `u16` length budget.
+    #[cfg(feature = "serde")]
+    pub fn export_entries_postcard(&self) -> Result<Vec<u8>, WireFormatError>
+    where
+        T: Serialize,
+    {
+        let mut entries = self.snapshot_unexpired();
+        entries.sort_by_key(|entry| entry.id());
+        let borrowed = entries.iter().map(Arc::as_ref).collect::<Vec<_>>();
+        crate::wire::encode_punnu_entries::<T>(&borrowed)
+    }
+
+    /// Replace this pool's L1 entries from a postcard-backed entries snapshot.
+    ///
+    /// Restore is L1-only and synchronous. The receiving pool's
+    /// [`PunnuConfig::default_ttl`] applies to every restored entry, LRU
+    /// epochs are issued from the local access clock, and L1 events
+    /// fire after the restored snapshot is published. Restore does not
+    /// write through to L2 — callers that need to seed a backend from
+    /// the same snapshot must use the existing async backend APIs.
+    ///
+    /// Restore validates the snapshot before mutating any L1 state:
+    /// duplicate ids, type-name mismatch, malformed bytes, oversize
+    /// entry counts, and in-flight strict backend writes are all
+    /// rejected before the new snapshot is prepared. The strict
+    /// backend-write check is repeated inside the write coordinator so
+    /// a reservation that arrives between validation and publish still
+    /// blocks the restore. Here "strict" means an active backend write
+    /// reservation from a pool using [`BackendFailureMode::Error`]; it is
+    /// a race guard, not a backend-seeding mechanism.
+    ///
+    /// Snapshot restore treats the incoming entries as authoritative
+    /// whole-L1 state. It replaces same-id resident entries even when the
+    /// receiving pool uses [`OnConflict::Reject`]; that conflict policy
+    /// applies to ordinary inserts, not to restore.
+    ///
+    /// # Errors
+    ///
+    /// - [`PunnuSnapshotError::WireFormat`] if the byte stream is not a
+    ///   valid Sassi entries snapshot for `T`.
+    /// - [`PunnuSnapshotError::DuplicateId`] if the snapshot contains
+    ///   the same id more than once.
+    /// - [`PunnuSnapshotError::TooManyEntries`] if the snapshot
+    ///   contains more entries than [`PunnuConfig::lru_size`].
+    /// - [`PunnuSnapshotError::BackendWriteInFlight`] if any strict
+    ///   backend write is in flight when the restore would publish.
+    ///
+    /// [`PunnuConfig::default_ttl`]: crate::punnu::PunnuConfig::default_ttl
+    /// [`PunnuConfig::lru_size`]: crate::punnu::PunnuConfig::lru_size
+    #[cfg(feature = "serde")]
+    pub fn restore_entries_postcard(
+        &self,
+        bytes: &[u8],
+    ) -> Result<PunnuRestoreStats, PunnuSnapshotError>
+    where
+        T: DeserializeOwned,
+    {
+        let (entry_count, body) = crate::wire::decode_punnu_entries_len::<T>(bytes)?;
+        if entry_count > self.inner.config.lru_size {
+            return Err(PunnuSnapshotError::TooManyEntries {
+                entries: entry_count,
+                limit: self.inner.config.lru_size,
+            });
+        }
+        let entries = crate::wire::decode_punnu_entries_body::<T>(body, entry_count)?;
+        let normalized = self.normalize_entries_restore(entries)?;
+
+        #[cfg(test)]
+        self.run_before_restore_enter_coord_hook();
+
+        self.try_with_write_coordinator(|state| {
+            let reserved = self.backend_strict_insert_count();
+            if reserved > 0 {
+                return Err(PunnuSnapshotError::BackendWriteInFlight { reserved });
+            }
+            Ok(self.prepare_entries_restore(state, normalized))
+        })
+    }
+
+    /// Validate snapshot shape (capacity, duplicates) before any L1
+    /// state is touched. Returned `BTreeMap` is canonicalized by id so
+    /// the prepare path can iterate deterministically.
+    #[cfg(feature = "serde")]
+    fn normalize_entries_restore(
+        &self,
+        items: Vec<T>,
+    ) -> Result<BTreeMap<T::Id, T>, PunnuSnapshotError> {
+        if items.len() > self.inner.config.lru_size {
+            return Err(PunnuSnapshotError::TooManyEntries {
+                entries: items.len(),
+                limit: self.inner.config.lru_size,
+            });
+        }
+
+        let mut normalized = BTreeMap::new();
+        for value in items {
+            if normalized.insert(value.id(), value).is_some() {
+                return Err(PunnuSnapshotError::DuplicateId);
+            }
+        }
+        Ok(normalized)
+    }
+
+    /// Build the post-restore L1 state and event vector from a
+    /// validated snapshot. Whole-pool replace semantics: ids absent
+    /// from the snapshot are removed; ids present are inserted with
+    /// fresh target-pool TTL/LRU epochs.
+    #[cfg(feature = "serde")]
+    fn prepare_entries_restore(
+        &self,
+        mut state: L1State<T>,
+        normalized: BTreeMap<T::Id, T>,
+    ) -> PreparedWrite<T, PunnuRestoreStats> {
+        let now = self.inner.executor.now();
+        let mut events = Vec::new();
+        let mut removed = 0;
+        let mut inserted = 0;
+        let mut updated = 0;
+
+        for id in state.keys.iter().cloned().collect::<Vec<_>>() {
+            if normalized.contains_key(&id) {
+                continue;
+            }
+            if Self::remove_expired_entry(&mut state, &id, now) {
+                continue;
+            }
+            if state.remove_entry(&id).is_some() {
+                removed += 1;
+                events.push(PunnuEvent::Invalidate {
+                    id,
+                    reason: EventReason::Manual,
+                });
+            }
+        }
+
+        for (id, value) in normalized {
+            Self::remove_expired_entry(&mut state, &id, now);
+            let old = state.get(&id).map(|entry| entry.value.clone());
+            let arc = Arc::new(value);
+            let expires_at = self.expiry_deadline(self.inner.config.default_ttl);
+            let epoch = self.next_access_epoch();
+            state.insert_entry(
+                id.clone(),
+                Arc::new(Entry::new(arc.clone(), expires_at, epoch)),
+            );
+            match (old, self.inner.config.on_conflict) {
+                (Some(old), OnConflict::Update) => {
+                    updated += 1;
+                    events.push(PunnuEvent::Update {
+                        old,
+                        new: arc.clone(),
+                    });
+                }
+                (Some(_), _) => {
+                    updated += 1;
+                    events.push(PunnuEvent::Insert { value: arc.clone() });
+                }
+                (None, _) => {
+                    inserted += 1;
+                    events.push(PunnuEvent::Insert { value: arc.clone() });
+                }
+            }
+        }
+
+        debug_assert!(state.len() <= self.inner.config.lru_size);
+        PreparedWrite::new(
+            state,
+            events,
+            PunnuRestoreStats {
+                inserted,
+                updated,
+                removed,
+            },
+        )
+    }
+
+    /// Number of strict-backend-insert reservations currently active.
+    /// Used by `restore_entries_postcard` to reject when a strict L2
+    /// write is in flight, so a synchronous L1 replace cannot race a
+    /// pending backend mutation.
+    #[cfg(feature = "serde")]
+    fn backend_strict_insert_count(&self) -> usize {
+        self.inner
+            .backend_strict_insert_ids
+            .lock()
+            .expect("Punnu backend strict-insert table lock poisoned")
+            .len()
+    }
+
+    /// Variant of [`Punnu::with_write_coordinator`] that lets the
+    /// preparation closure abort the write without publishing.
+    ///
+    /// Used by restore so the strict-reservation re-check that happens
+    /// inside the write coordinator can return [`PunnuSnapshotError`]
+    /// instead of mutating L1.
+    #[cfg(feature = "serde")]
+    fn try_with_write_coordinator<R, E>(
+        &self,
+        prepare: impl FnOnce(L1State<T>) -> Result<PreparedWrite<T, R>, E>,
+    ) -> Result<R, E> {
+        let _commit_guard = self.inner.commit_coord.lock().expect(
+            "Punnu L1 commit coordinator poisoned — a previous panic interrupted event emission",
+        );
+        let (events, result, post_len) = {
+            let _guard = self.inner.write_coord.lock().expect(
+                "Punnu L1 write coordinator poisoned — a previous panic interrupted a write",
+            );
+            let current = self.inner.l1.load_full();
+            let prepared = prepare((*current).clone())?;
+            #[cfg(debug_assertions)]
+            prepared.state().assert_invariants();
+            #[cfg(test)]
+            self.run_before_l1_store_hook();
+            let post_len = prepared.state().len();
+            let (state, events, result) = prepared.into_parts();
+            self.inner.l1.store(Arc::new(state));
+            (events, result, post_len)
+        };
+
+        #[cfg(test)]
+        self.run_after_publish_hook();
+        self.emit_committed_events(events, post_len);
+        Ok(result)
+    }
+
+    #[cfg(all(test, feature = "serde"))]
+    fn set_before_restore_enter_coord_hook(&self, hook: Option<BeforeRestoreEnterCoordHook>) {
+        *self
+            .inner
+            .before_restore_enter_coord_hook
+            .lock()
+            .expect("Punnu before-restore-enter-coord test hook lock poisoned") = hook;
+    }
+
+    #[cfg(all(test, feature = "serde"))]
+    fn run_before_restore_enter_coord_hook(&self) {
+        let hook = self
+            .inner
+            .before_restore_enter_coord_hook
+            .lock()
+            .expect("Punnu before-restore-enter-coord test hook lock poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
 
 #[cfg(any(
@@ -2633,6 +2936,8 @@ impl<T: Cacheable> PunnuBuilder<T> {
             before_l1_store_hook: Mutex::new(None),
             #[cfg(test)]
             before_fetch_l1_commit_hook: Mutex::new(None),
+            #[cfg(all(test, feature = "serde"))]
+            before_restore_enter_coord_hook: Mutex::new(None),
             access_clock: AtomicU64::new(0),
             eviction_rng: Mutex::new(fastrand::Rng::new()),
             events,
@@ -3224,5 +3529,63 @@ mod commit_order_tests {
         assert_eq!(fetched.len(), 2);
         assert!(punnu.get(&40).is_some());
         assert!(punnu.get(&blocked_id).is_some());
+    }
+
+    /// Strict-backend-write reservation that arrives between snapshot
+    /// validation and the restore's checked write coordinator must
+    /// still be observed and reject the publish, not just one that
+    /// pre-dates the call. Uses the test-only
+    /// `before_restore_enter_coord_hook` to acquire a reservation in
+    /// that exact window so the rejection cannot be explained by the
+    /// pre-call check alone.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn restore_entries_postcard_rechecks_strict_backend_write_in_flight_inside_write_coordinator() {
+        use crate::error::PunnuSnapshotError;
+
+        let punnu = Punnu::<EventOrderItem>::builder().build();
+        // Seed L1 with a pre-existing entry so we can detect any stray
+        // mutation: a successful publish would remove `id = 7` because
+        // the snapshot we restore is empty.
+        futures::executor::block_on(async {
+            punnu.insert(EventOrderItem { id: 7 }).await.unwrap();
+        });
+
+        // Empty snapshot — would replace L1 to empty if it ever got
+        // through the strict-reservation re-check.
+        let empty_pool: Punnu<EventOrderItem> = Punnu::<EventOrderItem>::builder().build();
+        let bytes = empty_pool.export_entries_postcard().unwrap();
+
+        let punnu_for_hook = punnu.clone();
+        let guard_slot: Arc<StdMutex<Option<BackendStrictInsertGuard<EventOrderItem>>>> =
+            Arc::new(StdMutex::new(None));
+        let guard_slot_for_hook = guard_slot.clone();
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired_for_hook = fired.clone();
+        punnu.set_before_restore_enter_coord_hook(Some(Arc::new(move || {
+            if fired_for_hook.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let guard = punnu_for_hook.acquire_backend_strict_insert_for_test(&999);
+            *guard_slot_for_hook
+                .lock()
+                .expect("guard slot lock poisoned") = Some(guard);
+        })));
+
+        let err = punnu.restore_entries_postcard(&bytes).unwrap_err();
+
+        match err {
+            PunnuSnapshotError::BackendWriteInFlight { reserved } => {
+                assert_eq!(reserved, 1, "exactly one reservation should be observed");
+            }
+            other => panic!("expected BackendWriteInFlight, got {other:?}"),
+        }
+        assert!(
+            punnu.get(&7).is_some(),
+            "pre-existing entry must remain after rejected restore"
+        );
+
+        // Drop the guard so the reservation releases cleanly.
+        drop(guard_slot.lock().expect("guard slot lock poisoned").take());
     }
 }

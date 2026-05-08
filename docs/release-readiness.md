@@ -1,11 +1,11 @@
 # Release Readiness
 
-Sassi v0.1.0-beta.1 is meant to be usable by capable Rust adopters who are
+Sassi v0.1.0-beta.2 is meant to be usable by capable Rust adopters who are
 willing to work with an early but candidate API surface. The goal is not to
 claim that every future integration is done; it is to make the current
 contracts, tradeoffs, and verification expectations visible before publish.
 
-## v0.1.0-beta.1 Scope
+## v0.1.0-beta.2 Scope
 
 In scope for the beta:
 
@@ -21,6 +21,17 @@ In scope for the beta:
   deletes.
 - Optional L2 `CacheBackend` support with memory/file in core and Redis in the
   companion crate.
+- Postcard-backed binary value wire (`sassi::wire`) with a fixed binary
+  header that validates wire major, kind, flags, and
+  `Cacheable::cache_type_name()` before the postcard payload is decoded.
+- `FileBackend` `.sassi` binary records that publish value and inline expiry
+  with one atomic file rename. Beta.1 `.json` cache files are ignored.
+- `Punnu::export_entries_postcard` and `Punnu::restore_entries_postcard` for
+  L1-only entries snapshots. Restore is synchronous, applies the receiving
+  pool's TTL policy, and rejects oversized, duplicate-id, type-mismatched, or
+  strict-backend-in-flight snapshots before any L1 mutation.
+- A documented shared-L2 upgrade note for adopters carrying beta.1 backend
+  data into beta.2.
 - Native `runtime-tokio` and a verified `wasm32-unknown-unknown` compile path
   with `runtime-wasm`.
 - `Sassi` orchestration for typed pools and cross-type trait queries.
@@ -29,11 +40,11 @@ In scope for the beta:
   repository.
 - Criterion
   [benchmark baselines](../sassi/benches/README.md) for same-host regression
-  tracking of public cache surfaces.
+  tracking of public cache surfaces, including postcard wire round-trips.
 
 ## Out Of Scope For This Beta
 
-These are intentionally not release claims for v0.1.0-beta.1:
+These are intentionally not release claims for v0.1.0-beta.2:
 
 - Full downstream data-layer integration examples.
 - The Bardownski Dioxus/full-stack implementation.
@@ -42,6 +53,12 @@ These are intentionally not release claims for v0.1.0-beta.1:
   [issue #3](https://github.com/TarunvirBains/sassi/issues/3) is closed.
 - Automatic tenant, auth, or row-level-security inference from cached values.
 - A serde-encoded predicate wire protocol.
+- Full internal-state export (refresh handles, subscription watermarks,
+  recovery sets, single-flight work, event listeners, backend stale-read
+  suppression, runtime/executor state). The reserved `entries_with_hints`
+  binary kind is documented but not implemented in beta.2.
+- A backend-seeding restore. `restore_entries_postcard` is L1-only; future
+  backend-seeding restore, if needed, would be a separate async API.
 - Certified framework adapters.
 - Automatic cross-process coherence for Redis `put`/`insert` writes without explicit
   invalidation publication.

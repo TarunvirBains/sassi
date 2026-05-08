@@ -13,7 +13,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [features]
-# `serde` enables the wire-format envelope and backend integrations.
+# `serde` enables the binary wire container and backend integrations.
 # `runtime-tokio` enables the optional background TTL sweep task and is
 # the typical setup for native consumers; tests rely on it via
 # `#[tokio::test]`. `runtime-wasm` is the WASM-target counterpart and
@@ -26,7 +26,7 @@ rust-version.workspace = true
 # but the executor's `spawn` / `sleep` paths only fire under
 # `target_arch = "wasm32"`. Native + `runtime-wasm` is therefore inert.
 default = ["serde", "runtime-tokio"]
-serde = ["dep:serde", "dep:serde_json"]
+serde = ["dep:serde", "dep:serde_json", "dep:postcard"]
 runtime-tokio = []
 runtime-wasm = ["dep:wasm-bindgen-futures", "dep:gloo-timers"]
 watermark-time = ["dep:time"]
@@ -41,6 +41,7 @@ tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+postcard = { workspace = true, optional = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
 im = { workspace = true }
@@ -48,7 +49,7 @@ fastrand = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.1" }
+sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.2" }
 inventory = { workspace = true }
 # `web-time` is a drop-in for `std::time::Instant` that works on
 # `wasm32-unknown-unknown`. Used only on wasm — native builds keep
@@ -76,6 +77,10 @@ proptest = { workspace = true }
 tempfile = "3"
 trybuild = { workspace = true }
 criterion = { workspace = true }
+# Tests construct postcard payloads directly to verify the binary wire
+# header parser ignores body bytes for incompatible majors and to
+# fabricate type-name mismatches with valid postcard bodies.
+postcard = { workspace = true }
 
 [[bench]]
 name = "punnu_bench"

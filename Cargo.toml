@@ -9,7 +9,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/TarunvirBains/sassi"
@@ -33,6 +33,7 @@ thiserror = "2"
 # Serde — opt-in for cross-runtime wire format
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 # Cache primitives
 dashmap = "6"

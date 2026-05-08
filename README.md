@@ -118,7 +118,7 @@ of the WASM build, not a separately certified integration here.
 
 ## Status
 
-Sassi is preparing its first public beta: `0.1.0-beta.1`. The core API,
+Sassi's current public beta is `0.1.0-beta.2`. The core API,
 Redis companion, Bardownski TUI example, benchmark harness, and adopter docs are
 in place, with the caution that beta APIs can still move when integration work
 finds correctness or ergonomics gaps.
@@ -152,18 +152,18 @@ are not part of the ordinary application dependency story.
 
 ## Documentation
 
-- [Getting Started](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/docs/getting-started.md)
-- [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/docs/concepts.md)
-- [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/docs/query-refresh-boundaries.md)
-- [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/docs/backends-and-runtimes.md)
-- [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/docs/release-readiness.md)
-- [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/examples/bardownski/README.md)
-- [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/sassi/benches/README.md)
-- [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/CHANGELOG.md)
+- [Getting Started](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/getting-started.md)
+- [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/concepts.md)
+- [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/query-refresh-boundaries.md)
+- [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/backends-and-runtimes.md)
+- [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/release-readiness.md)
+- [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/examples/bardownski/README.md)
+- [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/sassi/benches/README.md)
+- [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/CHANGELOG.md)
 
 ## License
 
 Dual-licensed under
-[MIT](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/LICENSE-MIT)
+[MIT](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/LICENSE-MIT)
 or
-[Apache-2.0](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.1/LICENSE-APACHE).
+[Apache-2.0](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/LICENSE-APACHE).

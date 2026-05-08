@@ -76,12 +76,14 @@ pub use backend::{
     MemoryBackend,
 };
 pub use cacheable::{Cacheable, Field};
-#[cfg(feature = "serde")]
-pub use error::WireFormatError;
 pub use error::{BackendError, FetchError, InsertError};
+#[cfg(feature = "serde")]
+pub use error::{PunnuSnapshotError, WireFormatError};
 pub use predicate::{
     BasicPredicate, FieldPredicate, IntoBasicPredicate, LookupOp, MemQ, PresentField,
 };
+#[cfg(feature = "serde")]
+pub use punnu::PunnuRestoreStats;
 pub use punnu::{
     BackendFailureMode, CacheTier, DeltaApplyStats, DeltaPunnuFetcher, DeltaQuery,
     DeltaRefreshHandle, DeltaResult, EventReason, InvalidationReason, OnConflict, Punnu,
@@ -110,7 +112,7 @@ pub mod __private {
 }
 
 /// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for
-/// runtime diagnostics. Sassi's wire envelope uses its own
+/// runtime diagnostics. Sassi's binary wire container uses its own
 /// `wire::WIRE_FORMAT_MAJOR`, not the crate semver version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

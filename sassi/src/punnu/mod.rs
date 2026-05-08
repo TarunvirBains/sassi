@@ -24,6 +24,8 @@ pub use config::{BackendFailureMode, CacheTier, OnConflict, PunnuConfig, PunnuMe
 pub use delta::{DeltaApplyStats, DeltaResult};
 pub use delta_refresh::{DeltaPunnuFetcher, DeltaQuery, DeltaRefreshHandle, UpdateResult};
 pub use events::{EventReason, InvalidationReason, PunnuEvent};
+#[cfg(feature = "serde")]
+pub use pool::PunnuRestoreStats;
 pub use pool::{Punnu, PunnuBuilder};
 pub use refresh::{PunnuFetcher, RefreshHandle, RefreshMode};
 pub use scope::PunnuScope;

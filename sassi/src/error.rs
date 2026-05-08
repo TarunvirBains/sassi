@@ -19,27 +19,73 @@
 
 use thiserror::Error;
 
-/// Errors produced by Sassi's JSON wire envelope.
+/// Errors produced by Sassi's binary wire container.
 ///
-/// Backends store values as a versioned envelope rather than raw
-/// payload JSON so future major format changes can be rejected
-/// explicitly instead of being misread as the current shape.
+/// Sassi values cross runtime and process boundaries inside a fixed
+/// binary header followed by a postcard-encoded body. The header
+/// captures the wire major, kind discriminator, optional flags, and the
+/// cached type name so readers can reject incompatible payloads before
+/// touching the body. Postcard's own error type is intentionally not
+/// part of the public surface — its detail is folded into [`Codec`] so
+/// the wire format can evolve without leaking the codec choice.
+///
+/// [`Codec`]: WireFormatError::Codec
 #[cfg(feature = "serde")]
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum WireFormatError {
-    /// The envelope's major version is not understood by this crate.
+    /// The wire major is not understood by this crate.
     #[error("wire format major version mismatch: got {got}, expected {expected}")]
     VersionMismatch {
-        /// Major version found in the stored envelope.
-        got: u64,
+        /// Major version found in the wire header.
+        got: u16,
         /// Major version this crate can read.
-        expected: u64,
+        expected: u16,
     },
 
-    /// JSON serialization or deserialization failed.
-    #[error("wire serialization error: {0}")]
-    Serde(#[from] serde_json::Error),
+    /// The byte stream does not start with Sassi's wire magic.
+    #[error("wire format has invalid magic header")]
+    InvalidMagic,
+
+    /// The byte stream is a different Sassi wire kind than the caller expected.
+    #[error("wire format kind mismatch: got {got}, expected {expected}")]
+    KindMismatch {
+        /// Kind byte found in the wire header.
+        got: u8,
+        /// Kind byte required by the decode path.
+        expected: u8,
+    },
+
+    /// The byte stream uses a reserved or unsupported wire kind.
+    #[error("wire format kind is reserved or unsupported: {kind}")]
+    UnsupportedKind {
+        /// Reserved or unsupported kind byte.
+        kind: u8,
+    },
+
+    /// The byte stream sets flags this crate does not understand.
+    #[error("wire format flags are unsupported: {flags}")]
+    UnsupportedFlags {
+        /// Unsupported flags byte.
+        flags: u8,
+    },
+
+    /// The header names a different cached type.
+    #[error("wire format type mismatch: got {got}, expected {expected}")]
+    TypeNameMismatch {
+        /// Type name found in the wire header.
+        got: String,
+        /// Type name required by the decode path.
+        expected: &'static str,
+    },
+
+    /// The fixed header or variable type-name segment is malformed.
+    #[error("wire header is malformed: {0}")]
+    MalformedHeader(String),
+
+    /// The postcard body failed to encode or decode.
+    #[error("wire body codec error: {0}")]
+    Codec(String),
 }
 
 /// Reasons a [`crate::punnu::Punnu::insert`] (or the L2 write-through
@@ -77,17 +123,59 @@ pub enum InsertError {
     #[error("backend write-through failed: {0}")]
     BackendFailed(#[from] BackendError),
 
-    /// Versioned wire envelope serialization/deserialization failed.
+    /// Sassi's binary wire container failed to serialize or
+    /// deserialize the payload.
     #[cfg(feature = "serde")]
     #[error("wire-format error: {0}")]
     WireFormat(#[from] WireFormatError),
+}
+
+/// Errors produced while restoring a Punnu entries snapshot.
+///
+/// `Punnu::restore_entries_postcard(bytes)` is L1-only and synchronous;
+/// it rejects snapshots that cannot be applied as a whole-pool replace
+/// before mutating any state. The variants here cover the rejection
+/// modes — wire-format trouble, snapshot-shape problems, and a strict
+/// backend write race that prevents a synchronous restore. Here "strict"
+/// means an active backend write reservation from a pool configured with
+/// [`crate::punnu::BackendFailureMode::Error`].
+#[cfg(feature = "serde")]
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum PunnuSnapshotError {
+    /// The snapshot wire container could not be decoded for this cached type.
+    #[error("punnu snapshot wire-format error: {0}")]
+    WireFormat(#[from] WireFormatError),
+
+    /// The snapshot contains the same cache id more than once.
+    #[error("punnu snapshot contains duplicate id")]
+    DuplicateId,
+
+    /// The snapshot has more entries than the receiving pool can hold.
+    #[error("punnu snapshot contains {entries} entries but this pool allows at most {limit}")]
+    TooManyEntries {
+        /// Entry count found in the snapshot.
+        entries: usize,
+        /// Receiving pool capacity.
+        limit: usize,
+    },
+
+    /// The receiving pool has an in-flight strict backend write and cannot
+    /// restore synchronously.
+    #[error(
+        "punnu snapshot restore cannot run while {reserved} strict backend write(s) are in flight"
+    )]
+    BackendWriteInFlight {
+        /// Number of strict backend write reservations currently active.
+        reserved: usize,
+    },
 }
 
 /// Reasons a [`crate::punnu::Punnu::get_or_fetch`] (or batch variant)
 /// can fail.
 ///
 /// Carries either a backend error from the L2 path, a serialization
-/// failure (e.g., when the wire-format envelope rejects a payload), a
+/// failure (e.g., when the binary wire container rejects a payload), a
 /// fetcher panic surfaced via the single-flight follower path, or an
 /// arbitrary boxed error supplied by the consumer's fetcher closure.
 ///
@@ -173,7 +261,7 @@ pub enum BackendError {
     #[error("backend serialization error: {0}")]
     Serialization(String),
 
-    /// The backend encountered a Sassi wire-envelope error.
+    /// The backend encountered a Sassi binary wire-container error.
     #[cfg(feature = "serde")]
     #[error("backend wire-format error: {0}")]
     WireFormat(#[from] WireFormatError),
