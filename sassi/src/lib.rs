@@ -76,12 +76,14 @@ pub use backend::{
     MemoryBackend,
 };
 pub use cacheable::{Cacheable, Field};
-#[cfg(feature = "serde")]
-pub use error::WireFormatError;
 pub use error::{BackendError, FetchError, InsertError};
+#[cfg(feature = "serde")]
+pub use error::{PunnuSnapshotError, WireFormatError};
 pub use predicate::{
     BasicPredicate, FieldPredicate, IntoBasicPredicate, LookupOp, MemQ, PresentField,
 };
+#[cfg(feature = "serde")]
+pub use punnu::PunnuRestoreStats;
 pub use punnu::{
     BackendFailureMode, CacheTier, DeltaApplyStats, DeltaPunnuFetcher, DeltaQuery,
     DeltaRefreshHandle, DeltaResult, EventReason, InvalidationReason, OnConflict, Punnu,

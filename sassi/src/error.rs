@@ -130,6 +130,45 @@ pub enum InsertError {
     WireFormat(#[from] WireFormatError),
 }
 
+/// Errors produced while restoring a Punnu entries snapshot.
+///
+/// `Punnu::restore_entries_postcard(bytes)` is L1-only and synchronous;
+/// it rejects snapshots that cannot be applied as a whole-pool replace
+/// before mutating any state. The variants here cover the rejection
+/// modes — wire-format trouble, snapshot-shape problems, and a strict
+/// backend write race that prevents a synchronous restore.
+#[cfg(feature = "serde")]
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum PunnuSnapshotError {
+    /// The snapshot wire container could not be decoded for this cached type.
+    #[error("punnu snapshot wire-format error: {0}")]
+    WireFormat(#[from] WireFormatError),
+
+    /// The snapshot contains the same cache id more than once.
+    #[error("punnu snapshot contains duplicate id")]
+    DuplicateId,
+
+    /// The snapshot has more entries than the receiving pool can hold.
+    #[error("punnu snapshot contains {entries} entries but this pool allows at most {limit}")]
+    TooManyEntries {
+        /// Entry count found in the snapshot.
+        entries: usize,
+        /// Receiving pool capacity.
+        limit: usize,
+    },
+
+    /// The receiving pool has an in-flight strict backend write and cannot
+    /// restore synchronously.
+    #[error(
+        "punnu snapshot restore cannot run while {reserved} strict backend write(s) are in flight"
+    )]
+    BackendWriteInFlight {
+        /// Number of strict backend write reservations currently active.
+        reserved: usize,
+    },
+}
+
 /// Reasons a [`crate::punnu::Punnu::get_or_fetch`] (or batch variant)
 /// can fail.
 ///

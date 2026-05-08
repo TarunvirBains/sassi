@@ -32,12 +32,6 @@ const HEADER_FIXED_LEN: usize = 14;
 pub(crate) enum WireKind {
     Value,
     FileEntry,
-    // `PunnuEntries` is reserved for the entries snapshot kind shipped
-    // by the Punnu export/restore APIs. It is constructed by the
-    // entries-export code path; the `dead_code` allow keeps the
-    // value-wire-only build (and the staging build before
-    // `Punnu::export_entries_postcard` lands) clean.
-    #[allow(dead_code)]
     PunnuEntries,
 }
 
@@ -218,4 +212,73 @@ where
 {
     let body = decode_header::<T>(bytes, WireKind::Value)?;
     decode_postcard_exact(body)
+}
+
+/// Encode a Punnu entries snapshot body.
+///
+/// The body shape is `<little-endian u32 count> <count × postcard(T)>`
+/// after the shared binary header. Borrowed `&T` values keep the
+/// caller-owned `Arc<T>` snapshot alive during serialization without
+/// requiring `T: Clone`.
+pub(crate) fn encode_punnu_entries<T>(entries: &[&T]) -> Result<Vec<u8>, WireFormatError>
+where
+    T: Cacheable + Serialize,
+{
+    let mut out = Vec::new();
+    encode_header::<T>(WireKind::PunnuEntries, &mut out)?;
+    let count = u32::try_from(entries.len())
+        .map_err(|_| WireFormatError::Codec("too many punnu entries".into()))?;
+    out.extend_from_slice(&count.to_le_bytes());
+    for entry in entries {
+        append_postcard(*entry, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Decode the entries-snapshot header and entry-count prefix without
+/// touching the per-entry postcard bytes.
+///
+/// Returns the decoded entry count and the slice positioned at the
+/// first per-entry postcard payload. Splitting the count from the
+/// per-entry decode lets callers reject oversized snapshots before
+/// allocating or deserializing every entry.
+pub(crate) fn decode_punnu_entries_len<T>(bytes: &[u8]) -> Result<(usize, &[u8]), WireFormatError>
+where
+    T: Cacheable,
+{
+    let body = decode_header::<T>(bytes, WireKind::PunnuEntries)?;
+    if body.len() < 4 {
+        return Err(WireFormatError::MalformedHeader(
+            "punnu entries body missing count".into(),
+        ));
+    }
+    let count = u32::from_le_bytes(body[..4].try_into().expect("slice length checked")) as usize;
+    Ok((count, &body[4..]))
+}
+
+/// Decode `count` postcard-encoded entries from a snapshot body slice.
+///
+/// Trailing bytes after the final entry are rejected as a codec error
+/// so a body that promises N entries but contains stray bytes cannot
+/// be silently accepted.
+pub(crate) fn decode_punnu_entries_body<T>(
+    mut body: &[u8],
+    count: usize,
+) -> Result<Vec<T>, WireFormatError>
+where
+    T: Cacheable + DeserializeOwned,
+{
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let (entry, rest) = postcard::take_from_bytes(body)
+            .map_err(|err| WireFormatError::Codec(err.to_string()))?;
+        entries.push(entry);
+        body = rest;
+    }
+    if !body.is_empty() {
+        return Err(WireFormatError::Codec(
+            "trailing bytes after punnu entries body".into(),
+        ));
+    }
+    Ok(entries)
 }
