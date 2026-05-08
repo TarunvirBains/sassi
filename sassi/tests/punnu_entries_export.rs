@@ -459,6 +459,37 @@ fn restore_entries_postcard_rejects_more_than_lru_size_before_entry_decode() {
     }
 }
 
+#[test]
+fn restore_entries_postcard_does_not_panic_on_huge_count_with_empty_body() {
+    // A pool may legitimately be configured with a very large
+    // `lru_size`, which lets the count <= lru_size guard accept a
+    // declared count of `u32::MAX`. With no per-entry body bytes, the
+    // decoder must not panic on capacity overflow or abort on an OOM
+    // allocation — fallible reservation must surface as a recoverable
+    // PunnuSnapshotError::WireFormat(WireFormatError::Codec). The
+    // pool's L1 must remain untouched.
+    let pool: Punnu<E> = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            lru_size: u32::MAX as usize,
+            ..Default::default()
+        })
+        .build();
+
+    let mut bytes = Vec::new();
+    encode_test_header(&mut bytes, KIND_PUNNU_ENTRIES, E::cache_type_name());
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+    // No per-entry body bytes — the snapshot is malformed, but the
+    // count alone passes the count <= lru_size check.
+
+    let err = pool.restore_entries_postcard(&bytes).unwrap_err();
+
+    match err {
+        PunnuSnapshotError::WireFormat(WireFormatError::Codec(_)) => {}
+        other => panic!("expected wire-format codec error, got {other:?}"),
+    }
+    assert!(pool.is_empty());
+}
+
 #[tokio::test]
 async fn restore_entries_postcard_rejects_strict_backend_write_in_flight_before_mutation() {
     let backend = BlockingStrictPutBackend::default();

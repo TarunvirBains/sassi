@@ -258,6 +258,15 @@ where
 
 /// Decode `count` postcard-encoded entries from a snapshot body slice.
 ///
+/// `count` is decoded from the wire format and is treated as untrusted
+/// even after the caller's `count <= lru_size` rejection: a consumer
+/// may legitimately configure a very large `lru_size`, and a malformed
+/// or hostile snapshot can declare a count near that bound while
+/// providing little or no body. To prevent a process-level abort or
+/// capacity-overflow panic on the speculative allocation, this function
+/// uses [`Vec::try_reserve_exact`] so allocator failure becomes a
+/// recoverable [`WireFormatError::Codec`] rather than a panic.
+///
 /// Trailing bytes after the final entry are rejected as a codec error
 /// so a body that promises N entries but contains stray bytes cannot
 /// be silently accepted.
@@ -268,7 +277,12 @@ pub(crate) fn decode_punnu_entries_body<T>(
 where
     T: Cacheable + DeserializeOwned,
 {
-    let mut entries = Vec::with_capacity(count);
+    let mut entries: Vec<T> = Vec::new();
+    entries.try_reserve_exact(count).map_err(|err| {
+        WireFormatError::Codec(format!(
+            "could not reserve capacity for {count} punnu entries: {err}"
+        ))
+    })?;
     for _ in 0..count {
         let (entry, rest) = postcard::take_from_bytes(body)
             .map_err(|err| WireFormatError::Codec(err.to_string()))?;
