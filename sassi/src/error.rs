@@ -136,7 +136,9 @@ pub enum InsertError {
 /// it rejects snapshots that cannot be applied as a whole-pool replace
 /// before mutating any state. The variants here cover the rejection
 /// modes — wire-format trouble, snapshot-shape problems, and a strict
-/// backend write race that prevents a synchronous restore.
+/// backend write race that prevents a synchronous restore. Here "strict"
+/// means an active backend write reservation from a pool configured with
+/// [`crate::punnu::BackendFailureMode::Error`].
 #[cfg(feature = "serde")]
 #[derive(Debug, Error)]
 #[non_exhaustive]

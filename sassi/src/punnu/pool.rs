@@ -2298,7 +2298,14 @@ impl<T: Cacheable> Punnu<T> {
     /// rejected before the new snapshot is prepared. The strict
     /// backend-write check is repeated inside the write coordinator so
     /// a reservation that arrives between validation and publish still
-    /// blocks the restore.
+    /// blocks the restore. Here "strict" means an active backend write
+    /// reservation from a pool using [`BackendFailureMode::Error`]; it is
+    /// a race guard, not a backend-seeding mechanism.
+    ///
+    /// Snapshot restore treats the incoming entries as authoritative
+    /// whole-L1 state. It replaces same-id resident entries even when the
+    /// receiving pool uses [`OnConflict::Reject`]; that conflict policy
+    /// applies to ordinary inserts, not to restore.
     ///
     /// # Errors
     ///
@@ -2426,7 +2433,6 @@ impl<T: Cacheable> Punnu<T> {
                     events.push(PunnuEvent::Insert { value: arc.clone() });
                 }
             }
-            let _ = id;
         }
 
         debug_assert!(state.len() <= self.inner.config.lru_size);

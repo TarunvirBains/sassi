@@ -845,6 +845,48 @@ async fn restore_entries_postcard_counts_existing_replacements_as_updated_under_
     );
 }
 
+#[tokio::test]
+async fn restore_entries_postcard_replaces_existing_entries_under_reject_conflict_policy() {
+    let pool: Punnu<E> = Punnu::<E>::builder()
+        .config(PunnuConfig {
+            on_conflict: OnConflict::Reject,
+            ..Default::default()
+        })
+        .build();
+    pool.insert(E {
+        id: 1,
+        label: "old".into(),
+    })
+    .await
+    .unwrap();
+
+    let donor = Punnu::<E>::builder().build();
+    donor
+        .insert(E {
+            id: 1,
+            label: "new".into(),
+        })
+        .await
+        .unwrap();
+    let bytes = donor.export_entries_postcard().unwrap();
+
+    let stats = pool.restore_entries_postcard(&bytes).unwrap();
+
+    assert_eq!(
+        stats,
+        PunnuRestoreStats {
+            inserted: 0,
+            updated: 1,
+            removed: 0,
+        }
+    );
+    assert_eq!(
+        pool.get(&1).unwrap().label,
+        "new",
+        "snapshot restore is authoritative whole-L1 replace; OnConflict::Reject applies to ordinary inserts"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------

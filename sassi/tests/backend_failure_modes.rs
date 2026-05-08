@@ -98,7 +98,7 @@ impl Cacheable for StableBackendKey {
 }
 
 #[tokio::test]
-async fn memory_backend_round_trips_and_expires_wire_envelope() {
+async fn memory_backend_round_trips_and_expires_binary_wire_container() {
     let backend = MemoryBackend::default();
     let keyspace = keyspace::<E>(None);
     let value = E {

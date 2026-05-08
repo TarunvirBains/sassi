@@ -214,10 +214,12 @@ let bytes = proposal_pool.export_entries_postcard()?;
 local_store.save("proposal-cache", bytes).await?;
 ```
 
-`restore_entries_postcard` rejects when strict backend writes are in flight.
-The intended beta.2 restore path is backend-less local hydration; backend
-seeding remains a future async API rather than a widening of
-`restore_entries_postcard`.
+`restore_entries_postcard` rejects when strict backend writes are in flight. In
+beta.2, "strict" means an active backend write reservation from a pool using
+`BackendFailureMode::Error`; this is a race guard, not an enforcement mechanism
+for the broader rule above. The intended beta.2 restore path is backend-less
+local hydration; backend seeding remains a future async API rather than a
+widening of `restore_entries_postcard`.
 
 The snapshot is not a distributed correctness boundary. Applications that need
 multi-device or service-to-service recovery should pair entries snapshots with

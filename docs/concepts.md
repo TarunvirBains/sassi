@@ -342,6 +342,11 @@ L1 mutation. Restored entries receive fresh target-pool `default_ttl` and
 fresh LRU epochs because the snapshot does not carry the source pool's TTL
 deadlines.
 
+Restore treats the incoming snapshot as authoritative whole-L1 state. It
+therefore replaces same-id residents even when the receiving pool is configured
+with `OnConflict::Reject`; that conflict policy applies to ordinary inserts,
+not to snapshot restore.
+
 The binary kind value for `entries_with_hints` is reserved for a future
 operational handoff mode. Hints may include remaining TTL and approximate
 recency order. Hints are best-effort and may be ignored by restore. This is
