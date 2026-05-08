@@ -10,7 +10,7 @@
 //! - get_or_fetch hit and miss/coalescing paths
 //! - get_or_fetch_many
 //! - sampled-LRU pressure
-//! - wire/serde JSON round-trips
+//! - postcard wire round-trips
 //! - file/backend paths if serde is enabled
 //! - TTL/scheduler-heavy paths
 //! - Sassi::all_impl
@@ -383,7 +383,7 @@ fn bench_nongating_group(c: &mut Criterion) {
 
     #[cfg(feature = "serde")]
     {
-        group.bench_function("serde_json_wire_roundtrip_to_vec", |b| {
+        group.bench_function("postcard_wire_roundtrip_to_vec", |b| {
             let item = BenchItem::new(42);
             b.iter(|| {
                 let bytes = to_vec(&item).expect("wire serialization should work");
@@ -391,7 +391,7 @@ fn bench_nongating_group(c: &mut Criterion) {
             });
         });
 
-        group.bench_function("serde_json_wire_roundtrip_from_slice", |b| {
+        group.bench_function("postcard_wire_roundtrip_from_slice", |b| {
             let item = BenchItem::new(42);
             let bytes = to_vec(&item).expect("wire serialization should work");
             b.iter(|| {
