@@ -105,8 +105,9 @@ when the caller needs positional lookup.
 
 ## Feature Selection
 
-`serde` enables the wire envelope and `CacheBackend` integration. Disable it
-only when you want an L1-only in-process cache with the smallest surface:
+`serde` enables the binary wire container and `CacheBackend` integration.
+Disable it only when you want an L1-only in-process cache with the smallest
+surface:
 
 ```toml
 sassi = { version = "0.1.0-beta.1", default-features = false }

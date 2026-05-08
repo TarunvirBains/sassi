@@ -112,7 +112,7 @@ pub mod __private {
 }
 
 /// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for
-/// runtime diagnostics. Sassi's wire envelope uses its own
+/// runtime diagnostics. Sassi's binary wire container uses its own
 /// `wire::WIRE_FORMAT_MAJOR`, not the crate semver version.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

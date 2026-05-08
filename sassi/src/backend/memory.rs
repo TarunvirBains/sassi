@@ -18,7 +18,7 @@ struct MemoryCell {
     expires_at: Option<Instant>,
 }
 
-/// Separate in-memory backend that stores wire-envelope bytes.
+/// Separate in-memory backend that stores Sassi binary wire-container bytes.
 ///
 /// This backend is not a replacement for L1; it exists to test the
 /// `CacheBackend` path without a Redis or filesystem dependency. It does not

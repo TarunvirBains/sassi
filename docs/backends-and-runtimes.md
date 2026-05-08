@@ -52,13 +52,18 @@ local resident cache even when all durable truth stays in a database or API.
 With the `serde` feature enabled, the core crate includes:
 
 - `MemoryBackend`: an in-memory L2 implementation useful for tests and local
-  wiring of the backend path. It does not publish invalidation streams.
-- `FileBackend`: a filesystem-backed L2 implementation that stores Sassi wire
-  envelopes with inline TTL metadata. It still understands older TTL sidecars
-  for compatibility with earlier alpha builds. It uses blocking filesystem calls
-  inside the async backend trait and is intended for development, tests, and
-  simple local persistence rather than request-path production load.
-  Like `MemoryBackend`, it does not currently publish distributed invalidations.
+  wiring of the backend path. It stores Sassi binary wire-container bytes and
+  does not publish invalidation streams.
+- `FileBackend`: a filesystem-backed L2 implementation that writes `.sassi`
+  binary records in beta.2. Each record carries an inline expiry tag followed
+  by a postcard-encoded payload, so value and expiry are published with one
+  atomic file rename. Beta.1 `.json` records are not read by beta.2 and should
+  be treated as disposable cache files. Clear the cache directory or roll
+  `PunnuConfig::namespace` during upgrade if stale L2 entries would be noisy.
+  It uses blocking filesystem calls inside the async backend trait and is
+  intended for development, tests, and simple local persistence rather than
+  request-path production load. Like `MemoryBackend`, it does not currently
+  publish distributed invalidations.
 
 Example:
 
@@ -156,9 +161,72 @@ script effects replication.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-beta.1"
-sassi-cache-redis = "0.1.0-beta.1"
+sassi = "0.1.0-beta.2"
+sassi-cache-redis = "0.1.0-beta.2"
 ```
+
+## Shared L2 Upgrade From Beta.1
+
+Persistent or shared L2 backends that store Sassi wire bytes must also be
+cleared or moved to a new `PunnuConfig::namespace` before beta.2 readers attach.
+`FileBackend` treats beta.1 `.json` files as cold misses because the extension
+changes to `.sassi` in beta.2; stray `.json` files are ignored on read.
+
+Redis and custom backends keep their existing keys, so beta.1 JSON values would
+decode as wire-format errors under beta.2. With the default
+`BackendFailureMode::L1Only`, a backend decode error is logged and treated as a
+miss on `get_async`; with `BackendFailureMode::Error`, it is returned to the
+caller. Operators using shared Redis should clear the keyspace or roll
+`PunnuConfig::namespace` during upgrade so beta.2 readers do not attempt to
+decode beta.1 JSON values.
+
+## Local Snapshots vs Shared Backend Mutation
+
+Sassi distinguishes two cache surfaces that beta.2 supports concurrently:
+shared L2 mutation through async backends, and local L1 hydration through
+`Punnu::export_entries_postcard` / `Punnu::restore_entries_postcard`. They are
+not interchangeable.
+
+Service-side pools with Redis or other shared backends should keep shared L2
+state on the existing async backend paths. Do not use this kind of pool for
+local snapshot restore:
+
+```rust,ignore
+let pool = Punnu::<ProfileDoc>::builder()
+    .backend(RedisBackend::new(redis_client))
+    .build();
+
+pool.insert(profile).await?;
+pool.invalidate(&profile_id, InvalidationReason::OnSave).await?;
+```
+
+Frontend, mobile, edge, or request-local pools without an attached L2 backend
+can hydrate local continuity state by loading bytes from platform storage
+asynchronously, then restoring the already-loaded entries into local L1
+synchronously:
+
+```rust,ignore
+let proposal_pool = Punnu::<ProposalPreview>::builder().build();
+let bytes = local_store.load("proposal-cache").await?;
+proposal_pool.restore_entries_postcard(&bytes)?;
+
+let bytes = proposal_pool.export_entries_postcard()?;
+local_store.save("proposal-cache", bytes).await?;
+```
+
+`restore_entries_postcard` rejects when strict backend writes are in flight.
+The intended beta.2 restore path is backend-less local hydration; backend
+seeding remains a future async API rather than a widening of
+`restore_entries_postcard`.
+
+The snapshot is not a distributed correctness boundary. Applications that need
+multi-device or service-to-service recovery should pair entries snapshots with
+their own server-confirmed cursors, generations, or event-log positions.
+
+Examples should use projection or view `Cacheable` types rather than
+persistence models. Backend code decides which projection a caller may see,
+serializes that projection into the entries snapshot, and never exposes
+private fields merely because they exist on a database model.
 
 ## Backend Failure Modes
 
@@ -208,7 +276,7 @@ sources.
 
 ### Wire Ingress and TTL
 
-`insert_serialized` expects wire-envelope bytes from `sassi::wire::to_vec`:
+`insert_serialized` expects bytes produced by `sassi::wire::to_vec`:
 
 ```rust
 let bytes = sassi::wire::to_vec(&value)?;
@@ -216,8 +284,20 @@ let decoded = sassi::wire::from_slice::<User>(&bytes)?;
 pool.insert_serialized(&bytes).await?;
 ```
 
-The wire envelope carries only `__sassi_v` and payload data, not TTL policy. TTL
-remains local (`insert`, `insert_with_ttl`, `PunnuConfig::default_ttl`, etc.).
+Sassi's `serde` feature uses a postcard-backed binary container for value wire.
+The header carries Sassi magic bytes, wire major `1`, a kind byte, zero flags,
+and `Cacheable::cache_type_name()` before postcard payload bytes. Readers
+validate the header before decoding the typed payload, so an incompatible
+major, kind, type, or flags is rejected before the payload is ever touched.
+
+The wire bytes carry only the binary header plus the payload; they do not
+embed TTL policy. TTL remains local (`insert`, `insert_with_ttl`,
+`PunnuConfig::default_ttl`, etc.).
+
+Sassi's own wire metadata uses fixed-width integer fields. If cached payloads
+will cross native/wasm or long-lived storage boundaries, model payload integers
+with explicit widths (`u32`, `u64`, `i32`, `i64`) rather than `usize` or
+`isize`, whose serialized meaning can differ across target pointer widths.
 
 ### Pool-wide Reset
 

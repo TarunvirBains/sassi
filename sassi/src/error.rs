@@ -173,7 +173,7 @@ pub enum PunnuSnapshotError {
 /// can fail.
 ///
 /// Carries either a backend error from the L2 path, a serialization
-/// failure (e.g., when the wire-format envelope rejects a payload), a
+/// failure (e.g., when the binary wire container rejects a payload), a
 /// fetcher panic surfaced via the single-flight follower path, or an
 /// arbitrary boxed error supplied by the consumer's fetcher closure.
 ///

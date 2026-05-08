@@ -13,7 +13,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [features]
-# `serde` enables the wire-format envelope and backend integrations.
+# `serde` enables the binary wire container and backend integrations.
 # `runtime-tokio` enables the optional background TTL sweep task and is
 # the typical setup for native consumers; tests rely on it via
 # `#[tokio::test]`. `runtime-wasm` is the WASM-target counterpart and

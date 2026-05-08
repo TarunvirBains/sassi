@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.1.0-beta.2] - 2026-05-08
+
+### Added
+
+- Added `Punnu::export_entries_postcard()` and
+  `Punnu::restore_entries_postcard()` for L1-only entries snapshots. Restore
+  is synchronous, applies the receiving pool's `default_ttl`, and rejects
+  oversized, duplicate-id, type-mismatched, or strict-backend-in-flight
+  snapshots before any L1 mutation.
+- Added `PunnuRestoreStats` and `PunnuSnapshotError` (behind the `serde`
+  feature) for the new restore path.
+
+### Changed
+
+- Breaking: Sassi value wire changed from JSON v0 to postcard v1. The wire
+  bytes now carry a fixed binary header (Sassi magic, little-endian wire
+  major `1`, kind byte, flags byte, `Cacheable::cache_type_name()`) followed
+  by a postcard-encoded payload.
+- Breaking: `wire::to_vec` and `wire::from_slice` now require
+  `T: Cacheable + serde` so the binary header can validate
+  `Cacheable::cache_type_name()` before the payload is decoded.
+- Breaking: `wire::WIRE_FORMAT_MAJOR` changed from a `u64` JSON major `0` to
+  a `u16` binary major `1`.
+- Breaking: `FileBackend` now writes `.sassi` binary cache records with
+  inline expiry tags. Beta.1 `.json` cache files and `.ttl` sidecars are
+  ignored on read; operators should treat them as cold misses or clear them
+  during upgrade.
+- Replaced `WireFormatError::Serde(serde_json::Error)` with structured
+  binary-header and codec variants (`VersionMismatch`, `InvalidMagic`,
+  `KindMismatch`, `UnsupportedKind`, `UnsupportedFlags`, `TypeNameMismatch`,
+  `MalformedHeader`, `Codec`). Postcard's own error type is intentionally
+  not part of the public surface.
+
+### Documentation
+
+- Documented the postcard binary wire container (header layout, kind bytes,
+  type-name validation, fixed-width integer guidance for portable payloads).
+- Documented the shared-L2 upgrade story for adopters carrying beta.1 backend
+  data into beta.2 (FileBackend `.sassi`/`.json` extension change, Redis and
+  custom-backend keyspace clear/namespace roll).
+- Documented the local-snapshot vs shared-backend boundary, including
+  service-side Redis pools that should keep L2 mutation on backend APIs and
+  frontend/mobile/edge pools that hydrate local L1 from platform storage.
+- Reserved the `entries_with_hints` binary kind for a future operational
+  handoff mode and documented why full internal-state export remains out of
+  scope.
+
+### Notes
+
+- The last commit with JSON v0 wire is
+  `b93f334dfcf1be4e3026335598a007bcd700bcce` (`v0.1.0-beta.1`).
+- `serde_json` remains in the dependency tree because backend key derivation
+  and Redis invalidation control messages still use JSON; only the value
+  wire and FileBackend record bodies moved to postcard.
+
 ## [0.1.0-beta.1] - 2026-05-07
 
 ### Added
