@@ -921,7 +921,7 @@ impl<T: Cacheable> Punnu<T> {
     /// Within a single batch call, missing ids are deduplicated
     /// before the batch fetcher is invoked (input may contain dupes).
     /// Across concurrent batch calls, batch-level deduplication is
-    /// **not** implemented in v0.1.0-beta.1 — two concurrent
+    /// **not** implemented in v0.1.0-beta.2 — two concurrent
     /// `get_or_fetch_many(&[1, 2, 3])` calls invoke the batch fetcher
     /// twice for the same set. Per-id single-flight coalescing across
     /// concurrent *individual* `get_or_fetch` calls still applies as

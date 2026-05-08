@@ -1,7 +1,7 @@
 //! [`PunnuExecutor`] — internal abstraction over runtime spawn / sleep
 //! / now primitives.
 //!
-//! This is crate-internal in v0.1.0-beta.1. The public runtime surface stays
+//! This is crate-internal in v0.1.0-beta.2. The public runtime surface stays
 //! focused on feature selection (`runtime-tokio` or `runtime-wasm`) while the
 //! crate keeps scheduling and clock reads behind one internal trait.
 //!
@@ -32,7 +32,7 @@
 //! preserves that determinism without exposing a tokio-specific knob
 //! to consumers. The wasm-target counterpart wraps
 //! [`web_time::Instant`] (which uses `Performance.now()` in the
-//! browser). Direct WASM runtime tests are outside the current v0.1.0-beta.1
+//! browser). Direct WASM runtime tests are outside the current v0.1.0-beta.2
 //! release gate.
 
 use crate::time::Instant;

@@ -155,7 +155,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "bardownski"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "clap",
  "crossterm",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "sassi"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1784,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "sassi-cache-redis"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "sassi-codegen"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "sassi-macros"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",

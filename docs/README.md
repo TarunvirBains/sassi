@@ -17,7 +17,7 @@ Start here:
 - [Backends And Runtimes](backends-and-runtimes.md) describes L1/L2 behavior,
   built-in backends, Redis, native Tokio, WASM, and framework integration
   boundaries.
-- [Release Readiness](release-readiness.md) records the v0.1.0-beta.1 scope,
+- [Release Readiness](release-readiness.md) records the v0.1.0-beta.2 scope,
   known deferrals, issue categories, and verification commands.
 - [Bardownski TUI Showcase](../examples/bardownski/README.md) is the in-repo
   native example for predicate algebra and cross-type trait queries over

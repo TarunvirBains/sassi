@@ -15,5 +15,5 @@ clap = { workspace = true }
 csv = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }
-sassi = { path = "../../sassi", version = "0.1.0-beta.1", default-features = false }
+sassi = { path = "../../sassi", version = "0.1.0-beta.2", default-features = false }
 serde = { workspace = true }

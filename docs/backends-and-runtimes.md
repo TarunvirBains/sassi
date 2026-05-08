@@ -353,7 +353,7 @@ For `wasm32-unknown-unknown`, enable `runtime-wasm`:
 
 ```toml
 sassi = {
-    version = "0.1.0-beta.1",
+    version = "0.1.0-beta.2",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }

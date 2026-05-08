@@ -49,7 +49,7 @@ fastrand = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.1" }
+sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.2" }
 inventory = { workspace = true }
 # `web-time` is a drop-in for `std::time::Instant` that works on
 # `wasm32-unknown-unknown`. Used only on wasm — native builds keep
