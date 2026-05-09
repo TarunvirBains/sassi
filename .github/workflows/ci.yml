@@ -43,6 +43,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Check test surface (no quarantined/ignored tests)
+        run: cargo xtask check-test-surface
+
       - name: Build
         run: cargo build --workspace --all-features
 

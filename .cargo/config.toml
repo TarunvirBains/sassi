@@ -1,0 +1,4 @@
+[alias]
+# `cargo xtask <subcmd>` -> `cargo run --package xtask -- <subcmd>`
+# This is the standard xtask convention; see https://github.com/matklad/cargo-xtask
+xtask = "run --package xtask --"

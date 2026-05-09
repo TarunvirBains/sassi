@@ -5,6 +5,7 @@ members = [
     "sassi-macros",
     "sassi-cache-redis",
     "examples/bardownski",
+    "xtask",
 ]
 resolver = "2"
 
