@@ -347,17 +347,37 @@ therefore replaces same-id residents even when the receiving pool is configured
 with `OnConflict::Reject`; that conflict policy applies to ordinary inserts,
 not to snapshot restore.
 
-The binary kind value for `entries_with_hints` is reserved for a future
-operational handoff mode. Hints may include remaining TTL and approximate
-recency order. Hints are best-effort and may be ignored by restore. This is
-not full internal-state export.
+For an entries-only snapshot wrapped in the wholistic API (which still emits
+the same byte stream as `export_entries_postcard` for backward compatibility):
 
-Full internal-state export remains unsupported: active refresh handles,
-subscription watermarks/recovery sets, single-flight work, event listeners,
-backend stale-read suppression, and runtime/executor state are process-local.
-Applications that need gRPC/microservice continuity should send app-level
-generations, sync cursors, or event-log positions beside the Punnu entries
-snapshot.
+```rust,ignore
+use sassi::SnapshotMode;
+let bytes = pool.snapshot_postcard(SnapshotMode::default())?;
+restored.restore_postcard(&bytes)?;
+```
+
+For an internal-state snapshot that additionally carries per-entry remaining
+TTL plus a relative sampled-LRU recency rank:
+
+```rust,ignore
+use sassi::SnapshotMode;
+let bytes = pool.snapshot_postcard(SnapshotMode::WithInternalState)?;
+restored.restore_postcard(&bytes)?;
+```
+
+The two modes use distinct binary wire kinds (`KIND_PUNNU_ENTRIES` vs.
+`KIND_PUNNU_ENTRIES_WITH_HINTS`); `restore_postcard` auto-dispatches on the
+kind byte. The internal-state body carries its own envelope version
+independent of the wire major so internal-state evolution can ship without
+rejecting entries-only snapshots.
+
+Even with internal-state mode, the snapshot does not carry refresh-handle
+state. Active refresh handles, subscription watermarks/recovery sets,
+single-flight work, event listeners, backend stale-read suppression, and
+runtime/executor state are process-local. After restore, re-attach refresh
+handles and let the watermark resume from the consumer's persisted cursor.
+Applications that need gRPC/microservice continuity should pair entries
+snapshots with app-level generations, sync cursors, or event-log positions.
 
 ## TTL and Size Semantics
 

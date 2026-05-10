@@ -26,7 +26,13 @@ rust-version.workspace = true
 # but the executor's `spawn` / `sleep` paths only fire under
 # `target_arch = "wasm32"`. Native + `runtime-wasm` is therefore inert.
 default = ["serde", "runtime-tokio"]
-serde = ["dep:serde", "dep:serde_json", "dep:postcard"]
+# `serde` enables Sassi's binary value wire (postcard-backed),
+# wire-aware backend integrations, and the `Punnu` snapshot/restore
+# APIs. JSON support is *not* part of this feature any more — Sassi's
+# core code paths no longer call `serde_json` directly. The
+# `cross_version_compat` integration tests still use `serde_json` to
+# fabricate beta.1 byte streams; that is a dev-only dependency.
+serde = ["dep:serde", "dep:postcard"]
 runtime-tokio = []
 runtime-wasm = ["dep:wasm-bindgen-futures", "dep:gloo-timers"]
 watermark-time = ["dep:time"]
@@ -40,7 +46,6 @@ watermark-chrono = ["dep:chrono"]
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 postcard = { workspace = true, optional = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
@@ -73,14 +78,35 @@ chrono = { workspace = true, optional = true }
 # can drive virtual time deterministically instead of relying on
 # real `sleep` calls. Dev-only; never linked into a production build.
 tokio = { version = "1.52", default-features = false, features = ["sync", "rt", "time", "macros", "test-util"] }
-proptest = { workspace = true }
 tempfile = "3"
-trybuild = { workspace = true }
-criterion = { workspace = true }
 # Tests construct postcard payloads directly to verify the binary wire
 # header parser ignores body bytes for incompatible majors and to
 # fabricate type-name mismatches with valid postcard bodies.
 postcard = { workspace = true }
+# `serde_json` is dev-only as of this version. The
+# `cross_version_compat` integration tests fabricate beta.1 JSON
+# envelopes to verify the binary wire decoder rejects them. No
+# production code path in sassi proper calls `serde_json`.
+serde_json = { workspace = true }
+
+# Native-only dev deps. `proptest`, `criterion`, and `trybuild` all
+# pull transitive crates that don't build cleanly on
+# `wasm32-unknown-unknown` (`rusty-fork` -> `wait-timeout`,
+# `criterion` requires a process model, `trybuild` runs `cargo`
+# itself). Restricting them to non-wasm targets keeps the wasm test
+# binary's dependency graph minimal.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = { workspace = true }
+trybuild = { workspace = true }
+criterion = { workspace = true }
+
+# `wasm-bindgen-test` powers the wasm32 integration tests in
+# `tests/punnu_executor_wasm.rs`. CI runs it with `cargo test --target
+# wasm32-unknown-unknown` through `wasm-bindgen-test-runner`, and local
+# browser/node runs can use `wasm-pack test`. Dev-only; never linked
+# into a production build.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
 
 [[bench]]
 name = "punnu_bench"

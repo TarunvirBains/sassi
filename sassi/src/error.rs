@@ -275,10 +275,3 @@ pub enum BackendError {
     #[error("backend error: {0}")]
     Other(Box<dyn std::error::Error + Send + Sync>),
 }
-
-#[cfg(feature = "serde")]
-impl From<serde_json::Error> for BackendError {
-    fn from(err: serde_json::Error) -> Self {
-        Self::Serialization(err.to_string())
-    }
-}

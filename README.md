@@ -110,11 +110,12 @@ The core crate targets native Rust and `wasm32-unknown-unknown`. Native
 background work uses the `runtime-tokio` feature. WASM background work uses the
 `runtime-wasm` feature, backed by `wasm-bindgen-futures` and `gloo-timers`.
 
-This repository currently verifies the WASM compile path. Full per-test WASM
-runtime execution is tracked in
-[issue #3](https://github.com/TarunvirBains/sassi/issues/3). Sassi has no
-Dioxus-specific API in this repository; a Dioxus app is one possible consumer
-of the WASM build, not a separately certified integration here.
+This repository verifies the WASM compile path *and* runs the
+`runtime-wasm` integration test suite under node via `wasm-bindgen-test`,
+covering spawn, sleep, TTL sweep, and periodic refresh on the wasm executor.
+Sassi has no Dioxus-specific API in this repository; a Dioxus app is one
+possible consumer of the WASM build, not a separately certified integration
+here.
 
 ## Status
 
@@ -156,6 +157,10 @@ are not part of the ordinary application dependency story.
 - [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/concepts.md)
 - [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/query-refresh-boundaries.md)
 - [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/backends-and-runtimes.md)
+- [Advanced Guide](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/advanced-guide.md)
+  — predicate walk surface, scope chaining, `MemQ` terminals, `#[trait_impl]`
+  registry, delta refresh handle operations, snapshot/restore modes, and
+  custom-backend implementer notes.
 - [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/release-readiness.md)
 - [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/examples/bardownski/README.md)
 - [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/sassi/benches/README.md)

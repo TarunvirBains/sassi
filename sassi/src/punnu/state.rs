@@ -199,7 +199,12 @@ impl<T: Cacheable> L1State<T> {
     }
 }
 
-#[cfg(test)]
+// `proptest` is a native-only dev-dependency (its transitive
+// `rusty-fork` -> `wait-timeout` graph does not build on
+// `wasm32-unknown-unknown`). Skip the proptest section under wasm so
+// `wasm-bindgen-test` builds the same crate cleanly. Native test
+// coverage is unchanged.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::cacheable::Cacheable;

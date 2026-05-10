@@ -365,8 +365,12 @@ The WASM executor path uses `wasm-bindgen-futures` for spawn and `gloo-timers`
 for sleeps. WASM fetcher traits accept non-`Send` futures so browser-native
 futures do not need artificial `Send` wrappers.
 
-The current repository verifies the WASM compile path. Full per-test WASM
-runtime execution is tracked separately in issue #3.
+The current repository verifies both the WASM compile path *and* the
+`runtime-wasm` execution path. The `wasm-target` CI job runs
+`wasm-bindgen-test` integration tests under node, exercising
+`wasm_bindgen_futures::spawn_local`, `gloo_timers::future::TimeoutFuture`,
+and `web_time::Instant` arithmetic against the same `Punnu<T>` surface that
+native consumers use.
 
 ## Framework Integrations
 

@@ -62,7 +62,7 @@ jobs:
         run: cargo test -p sassi --no-default-features --features "serde,runtime-tokio"
 
   wasm-target:
-    name: WASM target build
+    name: WASM target build and test
     runs-on: ubuntu-latest
 
     steps:
@@ -94,6 +94,26 @@ jobs:
 
       - name: Build sassi for wasm32 with serde/runtime-wasm runtime marker
         run: cargo build -p sassi --target wasm32-unknown-unknown --no-default-features --features "serde,runtime-wasm"
+
+      # The `runtime-wasm` executor (spawn_local + gloo-timers sleep +
+      # web_time monotonic clock) is exercised through wasm-bindgen
+      # tests. `wasm-bindgen-test-runner` is invoked through the
+      # `target.wasm32-unknown-unknown.runner` setting in
+      # `.cargo/config.toml`, which keeps `cargo test --target
+      # wasm32-unknown-unknown` as the canonical entry point on
+      # contributor machines and CI alike. Node is the default
+      # execution environment; the Sassi wasm test binary asserts on
+      # structural outcomes (entry expired, sweep removed it, refresh
+      # ran) rather than millisecond-precise schedules so the suite is
+      # not sensitive to runtime jitter.
+      - name: Install wasm-bindgen-cli (matched to crate version)
+        run: |
+          version=$(cargo metadata --format-version 1 \
+            | python3 -c "import json,sys; m=json.load(sys.stdin); print(next(p['version'] for p in m['packages'] if p['name']=='wasm-bindgen'))")
+          cargo install -f wasm-bindgen-cli --version "$version" --locked
+
+      - name: Run sassi wasm-bindgen tests
+        run: cargo test -p sassi --target wasm32-unknown-unknown --test punnu_executor_wasm --no-default-features --features "serde,runtime-wasm"
 
   msrv:
     name: MSRV (Rust 1.95)

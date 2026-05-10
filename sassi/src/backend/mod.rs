@@ -172,6 +172,15 @@ where
     }
 }
 
+/// Encode a backend storage key for `id` under `keyspace`.
+///
+/// The id segment is the hex-encoded postcard serialization of `id`.
+/// Postcard is already in scope under the `serde` feature (it carries
+/// Sassi's binary value wire), so reusing it here removes the
+/// historical dependence on `serde_json` for backend keys. The change
+/// is wire-format-incompatible with stored records produced before
+/// this version; see the v0.1.0 release readiness doc for the upgrade
+/// note.
 pub(crate) fn keyspace_storage_key<T>(
     keyspace: &BackendKeyspace,
     id: &T::Id,
@@ -180,8 +189,9 @@ where
     T: Cacheable,
     T::Id: Serialize,
 {
-    let id_json = serde_json::to_vec(id)?;
-    let id_part = format!("id_{}", encode_hex(&id_json));
+    let id_bytes =
+        postcard::to_allocvec(id).map_err(|err| BackendError::Serialization(err.to_string()))?;
+    let id_part = format!("id_{}", encode_hex(&id_bytes));
     Ok(format!(
         "{}{}",
         keyspace_storage_key_prefix(keyspace),

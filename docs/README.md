@@ -17,6 +17,15 @@ Start here:
 - [Backends And Runtimes](backends-and-runtimes.md) describes L1/L2 behavior,
   built-in backends, Redis, native Tokio, WASM, and framework integration
   boundaries.
+- [Advanced Guide](advanced-guide.md) covers the more nuanced parts of the
+  public surface: walking predicate trees (`FieldPredicate`, `LookupOp`,
+  `value_as`), `PunnuScope` chaining, `MemQ` terminals, `#[trait_impl]`
+  registry behavior, delta refresh handle operations, snapshot/restore modes,
+  and custom-backend implementer notes.
+- [Dependency Footprint](dependency-footprint.md) records the transitive
+  dep graph by feature combination (default native, no-default, serde,
+  runtime-tokio, runtime-wasm) so adopters can audit binary size and
+  supply-chain surface without running cargo.
 - [Release Readiness](release-readiness.md) records the v0.1.0-beta.2 scope,
   known deferrals, issue categories, and verification commands.
 - [Bardownski TUI Showcase](../examples/bardownski/README.md) is the in-repo

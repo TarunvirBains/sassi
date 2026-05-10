@@ -160,7 +160,7 @@ impl<T> RedisBackend<T> {
         T::Id: Serialize,
     {
         let prefix = Self::key_prefix(keyspace);
-        let id_json = serde_json::to_vec(id)?;
+        let id_json = serde_json::to_vec(id).map_err(serde_json_error)?;
         Ok(format!("{prefix}:id_{}", encode_hex(&id_json)))
     }
 
@@ -273,7 +273,8 @@ where
             .map_err(redis_error)?;
         let key = Self::key(keyspace, id)?;
         let key_index = Self::key_index(keyspace);
-        let payload = serde_json::to_vec(&BackendInvalidation::Id(id.clone()))?;
+        let payload =
+            serde_json::to_vec(&BackendInvalidation::Id(id.clone())).map_err(serde_json_error)?;
         let _: i32 = redis::Script::new(INVALIDATE_ONE_SCRIPT)
             .key(&key)
             .key(&key_index)
@@ -315,7 +316,8 @@ where
                 .await
                 .map_err(redis_error)?;
         }
-        let payload = serde_json::to_vec(&BackendInvalidation::<T::Id>::All)?;
+        let payload =
+            serde_json::to_vec(&BackendInvalidation::<T::Id>::All).map_err(serde_json_error)?;
         conn.publish::<_, _, ()>(Self::channel(keyspace), payload)
             .await
             .map_err(redis_error)?;
@@ -372,6 +374,17 @@ fn next_invalidation_reconnect_delay(current: Duration) -> Duration {
 
 fn redis_error(err: redis::RedisError) -> BackendError {
     BackendError::Network(err.to_string())
+}
+
+/// Map `serde_json` errors into the shared [`BackendError`] surface.
+///
+/// Sassi proper no longer pulls in `serde_json` — its core paths use
+/// postcard exclusively — so the historical
+/// `From<serde_json::Error> for BackendError` blanket impl was
+/// removed. The Redis companion crate still uses JSON for pub/sub
+/// invalidation messages, so it does the conversion explicitly here.
+fn serde_json_error(err: serde_json::Error) -> BackendError {
+    BackendError::Serialization(err.to_string())
 }
 
 fn unix_now_millis() -> Result<u128, BackendError> {

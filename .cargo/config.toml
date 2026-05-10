@@ -2,3 +2,22 @@
 # `cargo xtask <subcmd>` -> `cargo run --package xtask -- <subcmd>`
 # This is the standard xtask convention; see https://github.com/matklad/cargo-xtask
 xtask = "run --package xtask --"
+
+# `wasm-bindgen-test` and `wasm-pack test --node` pull in
+# `getrandom`, which on `wasm32-unknown-unknown` (>= 0.3) refuses to
+# compile without an explicit backend selection. The Sassi crate
+# itself does not call `getrandom` on wasm — `fastrand` is the only
+# RNG path and it does not require a wasm backend — so the flag here
+# only satisfies transitive deps that are dragged in by the test
+# runner. Scoped to the wasm32 target so native builds are unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg=getrandom_backend="wasm_js"']
+# Configures `cargo test --target wasm32-unknown-unknown` to drive the
+# resulting `.wasm` file through `wasm-bindgen-test-runner`. This is
+# the same runner that `wasm-pack test --node` invokes internally; the
+# only delta is that `wasm-bindgen-test-runner` does not bundle a
+# wasm-bindgen build step, so consumers using plain `cargo test` must
+# pre-install the matching CLI version (`cargo install
+# wasm-bindgen-cli --version <pin>`). See the wasm-target CI job for
+# the canonical `cargo test` invocation that installs the matching CLI.
+runner = "wasm-bindgen-test-runner"

@@ -268,6 +268,67 @@ pub struct PunnuRestoreStats {
     pub removed: usize,
 }
 
+/// Snapshot shape selector for [`Punnu::snapshot_postcard`].
+///
+/// The default is [`SnapshotMode::EntriesOnly`], which produces a
+/// values-only byte stream identical to
+/// [`Punnu::export_entries_postcard`]. Adopters that need to preserve
+/// the source pool's remaining TTLs and sampled-LRU recency across the
+/// snapshot boundary can opt in to
+/// [`SnapshotMode::WithInternalState`].
+///
+/// Marked `#[non_exhaustive]` so future modes can be added without a
+/// breaking change.
+#[cfg(feature = "serde")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SnapshotMode {
+    /// Entries only. The snapshot carries values; TTL deadlines, LRU
+    /// epochs, and other process-local state are *not* exported. The
+    /// receiving pool applies its own [`PunnuConfig::default_ttl`] and
+    /// fresh LRU epochs to every restored entry. This is the default
+    /// because it is the right shape for typical "save my cached
+    /// values" workflows.
+    ///
+    /// [`PunnuConfig::default_ttl`]: crate::punnu::PunnuConfig::default_ttl
+    #[default]
+    EntriesOnly,
+
+    /// Entries plus per-entry internal-state hints (remaining TTL and
+    /// relative sampled-LRU recency rank).
+    ///
+    /// On restore, an entry's remaining TTL is added to the receiving
+    /// pool's monotonic clock to derive a new absolute deadline; the
+    /// receiving pool's [`PunnuConfig::default_ttl`] is *not* applied
+    /// when an explicit hint is present. Relative LRU ranks are mapped
+    /// into the receiving pool's access-clock space so the snapshot's
+    /// sampled-LRU eviction priority survives the boundary.
+    ///
+    /// Internal-state hints are advisory: backend handles, listeners,
+    /// single-flight in-flight registry entries, watermark/refresh
+    /// handle state, and other runtime-bound state are intentionally
+    /// not part of the snapshot. See [`Punnu::snapshot_postcard`] for
+    /// the complete boundary.
+    ///
+    /// [`PunnuConfig::default_ttl`]: crate::punnu::PunnuConfig::default_ttl
+    WithInternalState,
+}
+
+/// Internal-state envelope version. Independent from
+/// [`crate::wire::WIRE_FORMAT_MAJOR`]: the wire major guards the shared
+/// header (magic, kind discriminator, type name); the envelope version
+/// guards the body shape so internal-state evolution can ship without
+/// rejecting entries-only snapshots that share the same wire major.
+#[cfg(feature = "serde")]
+const PUNNU_INTERNAL_SNAPSHOT_VERSION: u16 = 1;
+
+#[cfg(feature = "serde")]
+const REMAINING_TTL_TAG_NONE: u8 = 0;
+#[cfg(feature = "serde")]
+const REMAINING_TTL_TAG_MILLIS: u8 = 1;
+#[cfg(feature = "serde")]
+const HINT_METADATA_LEN: usize = 1 /* tag */ + 8 /* ms */ + 4 /* rank */;
+
 impl<T: Cacheable> Punnu<T> {
     /// Begin building a [`Punnu<T>`]. See [`PunnuBuilder`].
     ///
@@ -1883,11 +1944,57 @@ impl<T: Cacheable> Punnu<T> {
         }
     }
 
+    /// Issue the next sampled-LRU access epoch.
+    ///
+    /// Epochs are monotonic and saturating: once the underlying
+    /// [`AtomicU64`] counter would advance past [`u64::MAX`], further
+    /// reads keep returning `u64::MAX`. Saturation is deliberate.
+    /// Wrap-around would let a freshly accessed entry's epoch wrap back
+    /// near `0` and look *older* than an entry last touched billions of
+    /// reads ago, which would invert sampled-LRU eviction priority
+    /// against the intended "evict the least-recently-accessed sampled
+    /// id" semantics. Saturating instead keeps the bound stable: once the
+    /// clock is at the ceiling, every subsequent access epoch is also at
+    /// the ceiling, so newly-accessed entries are never less-recent than
+    /// older ones — the worst case becomes "all entries within the
+    /// ceiling band are equivalent under sampled-LRU", which is harmless
+    /// (eviction degrades to random sampling) instead of inverted.
+    ///
+    /// At one billion accesses per second, exhausting `u64` takes
+    /// roughly 585 years, so saturation in production is purely
+    /// theoretical. Tests near `u64::MAX` exercise the boundary
+    /// deterministically through [`Self::seed_access_clock_for_test`].
+    ///
+    /// Implementation note: the read uses a single relaxed
+    /// compare-and-exchange loop. Once the counter reaches `u64::MAX`,
+    /// the loop exits immediately without contention because the CAS
+    /// pre-check sees the ceiling and returns it. Ordinary access epoch
+    /// reads remain as cheap as the previous wrapping `fetch_add`.
     fn next_access_epoch(&self) -> u64 {
-        self.inner
-            .access_clock
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1)
+        let mut current = self.inner.access_clock.load(Ordering::Relaxed);
+        loop {
+            if current == u64::MAX {
+                return u64::MAX;
+            }
+            let next = current.saturating_add(1);
+            match self.inner.access_clock.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return next,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Test-only hook that pre-seeds the sampled-LRU access clock so
+    /// boundary conditions near [`u64::MAX`] can be exercised
+    /// deterministically without firing billions of accesses.
+    #[cfg(test)]
+    pub(crate) fn seed_access_clock_for_test(&self, seed: u64) {
+        self.inner.access_clock.store(seed, Ordering::Relaxed);
     }
 
     // ---------------------------------------------------------------
@@ -2412,6 +2519,440 @@ impl<T: Cacheable> Punnu<T> {
             let arc = Arc::new(value);
             let expires_at = self.expiry_deadline(self.inner.config.default_ttl);
             let epoch = self.next_access_epoch();
+            state.insert_entry(
+                id.clone(),
+                Arc::new(Entry::new(arc.clone(), expires_at, epoch)),
+            );
+            match (old, self.inner.config.on_conflict) {
+                (Some(old), OnConflict::Update) => {
+                    updated += 1;
+                    events.push(PunnuEvent::Update {
+                        old,
+                        new: arc.clone(),
+                    });
+                }
+                (Some(_), _) => {
+                    updated += 1;
+                    events.push(PunnuEvent::Insert { value: arc.clone() });
+                }
+                (None, _) => {
+                    inserted += 1;
+                    events.push(PunnuEvent::Insert { value: arc.clone() });
+                }
+            }
+        }
+
+        debug_assert!(state.len() <= self.inner.config.lru_size);
+        PreparedWrite::new(
+            state,
+            events,
+            PunnuRestoreStats {
+                inserted,
+                updated,
+                removed,
+            },
+        )
+    }
+
+    /// Snapshot the whole [`Punnu<T>`] cache for cross-process or
+    /// cross-restart hydration.
+    ///
+    /// This is the entry point most adopters should use. The default
+    /// [`SnapshotMode::EntriesOnly`] mode produces the same byte stream
+    /// as [`Punnu::export_entries_postcard`] — values only, no
+    /// process-local metadata — and is the right choice for routine
+    /// "save my cached values" workflows. The opt-in
+    /// [`SnapshotMode::WithInternalState`] mode additionally serializes
+    /// per-entry hints (remaining TTL, relative LRU recency) so a
+    /// receiving pool can preserve eviction priority and freshness
+    /// across the snapshot boundary.
+    ///
+    /// What is *not* serialized in either mode:
+    ///
+    /// - Executor handles (`runtime-tokio` / `runtime-wasm` are
+    ///   process-local).
+    /// - Backend handles, backend invalidation listeners, and backend
+    ///   strict-insert reservations.
+    /// - Single-flight in-flight registry entries (active fetcher
+    ///   futures).
+    /// - Event broadcast subscribers.
+    /// - [`crate::DeltaRefreshHandle`] and
+    ///   [`crate::RefreshHandle`] state. Refresh handles are owned by
+    ///   the consumer that called `start_periodic_refresh` /
+    ///   `start_delta_refresh`; they hold their own watermark, recovery
+    ///   queue, and single-flight slot which the pool itself does not
+    ///   own. Restored pools receive no refresh handles; the consumer
+    ///   re-attaches them after restore as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireFormatError`] for the same reasons
+    /// [`Punnu::export_entries_postcard`] can fail: header overflow on a
+    /// pathologically long type name, or postcard serialization failure
+    /// for an entry. The with-hints mode adds no new failure modes
+    /// beyond those.
+    ///
+    /// [`SnapshotMode::EntriesOnly`]: crate::SnapshotMode::EntriesOnly
+    /// [`SnapshotMode::WithInternalState`]: crate::SnapshotMode::WithInternalState
+    #[cfg(feature = "serde")]
+    pub fn snapshot_postcard(&self, mode: SnapshotMode) -> Result<Vec<u8>, WireFormatError>
+    where
+        T: Serialize,
+    {
+        match mode {
+            SnapshotMode::EntriesOnly => self.export_entries_postcard(),
+            SnapshotMode::WithInternalState => self.export_entries_with_hints(),
+        }
+    }
+
+    /// Restore from a Sassi snapshot byte stream produced by
+    /// [`Punnu::snapshot_postcard`] (either mode).
+    ///
+    /// This is the inverse of [`Punnu::snapshot_postcard`]: it inspects
+    /// the wire kind and dispatches to the appropriate restore path.
+    /// Bytes from [`SnapshotMode::EntriesOnly`] are restored as if by
+    /// [`Punnu::restore_entries_postcard`]; bytes from
+    /// [`SnapshotMode::WithInternalState`] additionally apply the
+    /// per-entry remaining-TTL and relative LRU hints.
+    ///
+    /// Restore is L1-only and synchronous in both modes, so it does not
+    /// publish backend invalidations or write through to L2.
+    ///
+    /// # Errors
+    ///
+    /// In addition to the [`Punnu::restore_entries_postcard`] failure
+    /// modes, restoring a with-hints snapshot can return
+    /// [`PunnuSnapshotError::WireFormat`] with
+    /// [`WireFormatError::Codec`] when the internal-state envelope
+    /// version is incompatible with the current implementation, when
+    /// the per-entry hint metadata is truncated, or when a hint tag
+    /// byte is unknown. Type-name, kind, version, capacity,
+    /// duplicate-id, and strict-backend-write-in-flight rejections
+    /// share the same shape as the entries-only path.
+    ///
+    /// [`SnapshotMode::EntriesOnly`]: crate::SnapshotMode::EntriesOnly
+    /// [`SnapshotMode::WithInternalState`]: crate::SnapshotMode::WithInternalState
+    #[cfg(feature = "serde")]
+    pub fn restore_postcard(&self, bytes: &[u8]) -> Result<PunnuRestoreStats, PunnuSnapshotError>
+    where
+        T: DeserializeOwned,
+    {
+        match crate::wire::peek_kind(bytes)? {
+            crate::wire::KIND_PUNNU_ENTRIES => self.restore_entries_postcard(bytes),
+            crate::wire::KIND_PUNNU_ENTRIES_WITH_HINTS => self.restore_entries_with_hints(bytes),
+            other => Err(PunnuSnapshotError::WireFormat(
+                WireFormatError::KindMismatch {
+                    got: other,
+                    expected: crate::wire::KIND_PUNNU_ENTRIES,
+                },
+            )),
+        }
+    }
+
+    /// Encode the receiving pool's unexpired L1 entries plus per-entry
+    /// internal-state hints (remaining TTL, relative LRU recency).
+    ///
+    /// The body envelope after the shared wire header is:
+    ///
+    /// ```text
+    /// envelope_version: u16 LE   // PUNNU_INTERNAL_SNAPSHOT_VERSION
+    /// count:             u32 LE
+    /// for each entry (sorted by id):
+    ///     postcard(T)              // value
+    ///     remaining_ttl_tag: u8    // 0 = none, 1 = remaining millis follow
+    ///     remaining_ttl_ms:  u64 LE  // 0 when tag = 0
+    ///     relative_lru_epoch: u32 LE // dense rank in [0, count); 0 = oldest
+    /// ```
+    ///
+    /// The envelope version is independent of
+    /// [`crate::wire::WIRE_FORMAT_MAJOR`]: the wire major guards the
+    /// shared header (magic, kind set, type name), while the envelope
+    /// version guards the body shape so internal-state evolution does
+    /// not require a wire-major bump that would also reject
+    /// entries-only snapshots.
+    #[cfg(feature = "serde")]
+    fn export_entries_with_hints(&self) -> Result<Vec<u8>, WireFormatError>
+    where
+        T: Serialize,
+    {
+        let now = self.inner.executor.now();
+        let snapshot = self.inner.l1.load_full();
+
+        let mut entries: Vec<(Arc<T>, Option<Duration>, u64)> = snapshot
+            .entries
+            .iter()
+            .filter(|(_, entry)| !entry.is_expired_at(now))
+            .map(|(_, entry)| {
+                let remaining = entry
+                    .expires_at
+                    .and_then(|deadline| deadline.checked_duration_since(now));
+                (entry.value.clone(), remaining, entry.access_epoch())
+            })
+            .collect();
+
+        entries.sort_by_key(|entry| entry.0.id());
+
+        // Compress the source pool's u64 access epochs into a dense
+        // rank space [0, count) so the receiving pool does not need to
+        // know the source's clock state to preserve relative recency.
+        // Equal source epochs must remain equal — especially in the
+        // saturation regime where every access epoch can be `u64::MAX`.
+        // The id/index tie-breaker below only makes the byte stream
+        // deterministic; it must not invent recency among equal epochs.
+        let mut indexed: Vec<(usize, u64)> = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| (idx, entry.2))
+            .collect();
+        indexed.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+        let mut ranks = vec![0_u32; entries.len()];
+        let mut current_rank = 0_u32;
+        let mut previous_epoch = None;
+        for (idx, epoch) in indexed {
+            if let Some(previous) = previous_epoch
+                && epoch != previous
+            {
+                current_rank = current_rank
+                    .checked_add(1)
+                    .ok_or_else(|| WireFormatError::Codec("entry rank overflow u32".into()))?;
+            }
+            ranks[idx] = current_rank;
+            previous_epoch = Some(epoch);
+        }
+
+        let mut out = Vec::new();
+        crate::wire::encode_punnu_entries_with_hints_header::<T>(&mut out)?;
+        out.extend_from_slice(&PUNNU_INTERNAL_SNAPSHOT_VERSION.to_le_bytes());
+        let count = u32::try_from(entries.len())
+            .map_err(|_| WireFormatError::Codec("too many punnu entries".into()))?;
+        out.extend_from_slice(&count.to_le_bytes());
+        for ((value, remaining, _epoch), rank) in entries.iter().zip(ranks.iter()) {
+            crate::wire::append_postcard(value.as_ref(), &mut out)?;
+            match remaining {
+                Some(duration) => {
+                    out.push(REMAINING_TTL_TAG_MILLIS);
+                    let ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+                    out.extend_from_slice(&ms.to_le_bytes());
+                }
+                None => {
+                    out.push(REMAINING_TTL_TAG_NONE);
+                    out.extend_from_slice(&0_u64.to_le_bytes());
+                }
+            }
+            out.extend_from_slice(&rank.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// Restore L1 entries from an internal-state snapshot byte stream.
+    ///
+    /// Decodes the envelope header, validates the envelope version,
+    /// pre-screens entry count against [`PunnuConfig::lru_size`], then
+    /// decodes per-entry hint metadata. The hints are applied during
+    /// the same write coordinator pass used by the entries-only restore
+    /// so the strict-backend-write-in-flight contract still applies.
+    ///
+    /// Hints are advisory: the receiving pool's `default_ttl` is
+    /// ignored when an explicit remaining TTL is present; remaining
+    /// TTLs of `0` collapse to "expires immediately" and the entry will
+    /// look absent on the next read. Relative LRU ranks seed the
+    /// receiving pool's [`Punnu::seed_access_clock_for_test`]-equivalent
+    /// internal counter so subsequent accesses still order correctly
+    /// past the restored ranks.
+    ///
+    /// [`PunnuConfig::lru_size`]: crate::punnu::PunnuConfig::lru_size
+    #[cfg(feature = "serde")]
+    fn restore_entries_with_hints(
+        &self,
+        bytes: &[u8],
+    ) -> Result<PunnuRestoreStats, PunnuSnapshotError>
+    where
+        T: DeserializeOwned,
+    {
+        let body = crate::wire::decode_punnu_entries_with_hints::<T>(bytes)?;
+        if body.len() < 6 {
+            return Err(PunnuSnapshotError::WireFormat(WireFormatError::Codec(
+                "punnu internal-state body missing envelope header".into(),
+            )));
+        }
+        let envelope_version = u16::from_le_bytes(
+            body[..2]
+                .try_into()
+                .expect("slice length checked for envelope version"),
+        );
+        if envelope_version != PUNNU_INTERNAL_SNAPSHOT_VERSION {
+            return Err(PunnuSnapshotError::WireFormat(WireFormatError::Codec(
+                format!(
+                    "punnu internal-state envelope version mismatch: got {envelope_version}, expected {PUNNU_INTERNAL_SNAPSHOT_VERSION}"
+                ),
+            )));
+        }
+        let entry_count = u32::from_le_bytes(
+            body[2..6]
+                .try_into()
+                .expect("slice length checked for entry count"),
+        ) as usize;
+        if entry_count > self.inner.config.lru_size {
+            return Err(PunnuSnapshotError::TooManyEntries {
+                entries: entry_count,
+                limit: self.inner.config.lru_size,
+            });
+        }
+        let mut tail = &body[6..];
+
+        let mut hinted: Vec<(T, Option<Duration>, u32)> = Vec::new();
+        hinted.try_reserve_exact(entry_count).map_err(|err| {
+            PunnuSnapshotError::WireFormat(WireFormatError::Codec(format!(
+                "could not reserve capacity for {entry_count} hinted entries: {err}"
+            )))
+        })?;
+        for _ in 0..entry_count {
+            let (value, rest) = postcard::take_from_bytes::<T>(tail)
+                .map_err(|err| WireFormatError::Codec(err.to_string()))?;
+            tail = rest;
+            if tail.len() < HINT_METADATA_LEN {
+                return Err(PunnuSnapshotError::WireFormat(WireFormatError::Codec(
+                    "punnu internal-state hint metadata truncated".into(),
+                )));
+            }
+            let tag = tail[0];
+            let ms = u64::from_le_bytes(
+                tail[1..9]
+                    .try_into()
+                    .expect("slice length checked for hint ms"),
+            );
+            let remaining = match tag {
+                REMAINING_TTL_TAG_NONE => None,
+                REMAINING_TTL_TAG_MILLIS => Some(Duration::from_millis(ms)),
+                other => {
+                    return Err(PunnuSnapshotError::WireFormat(WireFormatError::Codec(
+                        format!("unknown punnu hint TTL tag {other}"),
+                    )));
+                }
+            };
+            let rank = u32::from_le_bytes(
+                tail[9..13]
+                    .try_into()
+                    .expect("slice length checked for rank"),
+            );
+            if usize::try_from(rank)
+                .ok()
+                .is_none_or(|rank| rank >= entry_count)
+            {
+                return Err(PunnuSnapshotError::WireFormat(WireFormatError::Codec(
+                    format!(
+                        "punnu internal-state LRU rank {rank} outside valid range 0..{entry_count}"
+                    ),
+                )));
+            }
+            tail = &tail[HINT_METADATA_LEN..];
+            hinted.push((value, remaining, rank));
+        }
+        if !tail.is_empty() {
+            return Err(PunnuSnapshotError::WireFormat(WireFormatError::Codec(
+                "trailing bytes after punnu internal-state body".into(),
+            )));
+        }
+
+        // Reject duplicate ids before any L1 mutation — same contract as the
+        // entries-only path.
+        let mut seen = std::collections::BTreeSet::<T::Id>::new();
+        for (value, _, _) in &hinted {
+            if !seen.insert(value.id()) {
+                return Err(PunnuSnapshotError::DuplicateId);
+            }
+        }
+
+        // Advance the receiving pool's access clock past every restored
+        // rank so future accesses keep ordering correctly. We do this
+        // before the write coordinator runs because the access clock is
+        // monotonic and saturating; it cannot regress, so the seed is
+        // safe to commit even if the restore is later rejected by the
+        // strict-backend-write check inside the coordinator.
+        let max_rank = hinted.iter().map(|(_, _, r)| *r).max().unwrap_or(0);
+        let bump_target = u64::from(max_rank).saturating_add(1);
+        self.advance_access_clock_to(bump_target);
+
+        #[cfg(test)]
+        self.run_before_restore_enter_coord_hook();
+
+        self.try_with_write_coordinator(|state| {
+            let reserved = self.backend_strict_insert_count();
+            if reserved > 0 {
+                return Err(PunnuSnapshotError::BackendWriteInFlight { reserved });
+            }
+            Ok(self.prepare_entries_restore_with_hints(state, hinted))
+        })
+    }
+
+    /// Advance the access clock to at least `target` if it is below.
+    /// Saturates at [`u64::MAX`]; relaxed CAS keeps ordinary reads cheap.
+    #[cfg(feature = "serde")]
+    fn advance_access_clock_to(&self, target: u64) {
+        let mut current = self.inner.access_clock.load(Ordering::Relaxed);
+        while current < target {
+            match self.inner.access_clock.compare_exchange_weak(
+                current,
+                target,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Build the post-restore L1 state from a validated with-hints
+    /// snapshot. Same whole-pool replace semantics as
+    /// [`Punnu::prepare_entries_restore`], but each restored entry uses
+    /// the snapshot's remaining-TTL hint and the relative LRU rank from
+    /// the hinted body instead of the receiving pool's `default_ttl`
+    /// and a fresh epoch.
+    #[cfg(feature = "serde")]
+    fn prepare_entries_restore_with_hints(
+        &self,
+        mut state: L1State<T>,
+        hinted: Vec<(T, Option<Duration>, u32)>,
+    ) -> PreparedWrite<T, PunnuRestoreStats> {
+        let now = self.inner.executor.now();
+        let mut events = Vec::new();
+        let mut removed = 0;
+        let mut inserted = 0;
+        let mut updated = 0;
+
+        let mut by_id: BTreeMap<T::Id, (T, Option<Duration>, u32)> = BTreeMap::new();
+        for (value, remaining, rank) in hinted {
+            by_id.insert(value.id(), (value, remaining, rank));
+        }
+
+        for id in state.keys.iter().cloned().collect::<Vec<_>>() {
+            if by_id.contains_key(&id) {
+                continue;
+            }
+            if Self::remove_expired_entry(&mut state, &id, now) {
+                continue;
+            }
+            if state.remove_entry(&id).is_some() {
+                removed += 1;
+                events.push(PunnuEvent::Invalidate {
+                    id,
+                    reason: EventReason::Manual,
+                });
+            }
+        }
+
+        for (id, (value, remaining, rank)) in by_id {
+            Self::remove_expired_entry(&mut state, &id, now);
+            let old = state.get(&id).map(|entry| entry.value.clone());
+            let arc = Arc::new(value);
+            let expires_at = remaining.and_then(|d| now.checked_add(d));
+            // Use the decoded dense rank directly. Because we already
+            // advanced `access_clock` past `max_rank` before entering
+            // the write coordinator, future ordinary accesses still
+            // issue epochs newer than every restored entry while equal
+            // source ranks remain equal after restore.
+            let epoch = u64::from(rank);
             state.insert_entry(
                 id.clone(),
                 Arc::new(Entry::new(arc.clone(), expires_at, epoch)),
@@ -3587,5 +4128,190 @@ mod commit_order_tests {
 
         // Drop the guard so the reservation releases cleanly.
         drop(guard_slot.lock().expect("guard slot lock poisoned").take());
+    }
+}
+
+/// Sampled-LRU access-clock saturation tests.
+///
+/// The access clock is monotonic and saturating at [`u64::MAX`] so a
+/// wrap-around can never make a freshly-accessed entry look older than
+/// an entry last touched epochs ago. These tests exercise the boundary
+/// near `u64::MAX` deterministically through
+/// [`Punnu::seed_access_clock_for_test`] — no sleeps, no flakes, no
+/// reliance on real time.
+#[cfg(test)]
+mod access_clock_tests {
+    use super::*;
+    use crate::cacheable::Field;
+
+    #[derive(Debug, Clone)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    struct Item {
+        id: i64,
+    }
+
+    #[derive(Default)]
+    struct ItemFields {
+        _id: Field<Item, i64>,
+    }
+
+    impl Cacheable for Item {
+        type Id = i64;
+        type Fields = ItemFields;
+
+        fn id(&self) -> Self::Id {
+            self.id
+        }
+
+        fn fields() -> Self::Fields {
+            ItemFields {
+                _id: Field::new("id", |item| &item.id),
+            }
+        }
+    }
+
+    /// At the saturation ceiling, every subsequent epoch read returns
+    /// `u64::MAX`. The clock never wraps back to `0`, so a "fresh"
+    /// entry's epoch can never be smaller than an "old" entry's epoch.
+    #[test]
+    fn next_access_epoch_saturates_at_u64_max() {
+        let punnu = Punnu::<Item>::builder().build();
+        punnu.seed_access_clock_for_test(u64::MAX - 2);
+
+        assert_eq!(punnu.next_access_epoch(), u64::MAX - 1);
+        assert_eq!(punnu.next_access_epoch(), u64::MAX);
+        // Subsequent reads keep returning the ceiling instead of
+        // wrapping back to `0`.
+        for _ in 0..32 {
+            assert_eq!(punnu.next_access_epoch(), u64::MAX);
+        }
+    }
+
+    /// Once the clock saturates, sampled-LRU eviction may compare equal
+    /// epochs but it can never invert recency. Insert one entry, drive
+    /// the clock to the ceiling, insert another entry, and confirm the
+    /// older entry is at most as recent as the newer entry.
+    #[tokio::test]
+    async fn saturated_clock_does_not_invert_lru_priority() {
+        let punnu = Punnu::<Item>::builder().build();
+
+        // Touch the first entry at epoch 1.
+        punnu.insert(Item { id: 1 }).await.unwrap();
+        let snapshot = punnu.inner.l1.load_full();
+        let oldest_epoch = snapshot
+            .get(&1)
+            .expect("entry must be resident")
+            .access_epoch();
+
+        // Drive the clock to its ceiling and insert a second entry.
+        // Without saturation, the wrap-around would make the new entry
+        // appear older than the resident entry; with saturation it
+        // simply pins to `u64::MAX`.
+        punnu.seed_access_clock_for_test(u64::MAX - 1);
+        punnu.insert(Item { id: 2 }).await.unwrap();
+        let snapshot = punnu.inner.l1.load_full();
+        let newest_epoch = snapshot
+            .get(&2)
+            .expect("entry must be resident")
+            .access_epoch();
+
+        assert!(
+            newest_epoch >= oldest_epoch,
+            "saturated clock must keep newer epochs >= older epochs (got newest={newest_epoch}, oldest={oldest_epoch})"
+        );
+    }
+
+    /// Concurrent access readers see the saturation ceiling without
+    /// races back to `0`. We pre-seed near the ceiling, fire many
+    /// concurrent reads, and verify every observed epoch is in
+    /// `[seed, u64::MAX]` — never below `seed`, never wrapping.
+    #[tokio::test]
+    async fn next_access_epoch_under_concurrent_load_never_regresses_below_seed() {
+        let punnu = Punnu::<Item>::builder().build();
+        punnu.insert(Item { id: 1 }).await.unwrap();
+
+        let seed = u64::MAX - 1024;
+        punnu.seed_access_clock_for_test(seed);
+
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let punnu = punnu.clone();
+            handles.push(tokio::spawn(async move {
+                let mut observed = Vec::new();
+                for _ in 0..256 {
+                    let epoch = punnu.next_access_epoch();
+                    assert!(epoch >= seed, "epoch {epoch} regressed below seed {seed}");
+                    observed.push(epoch);
+                }
+                observed
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+    }
+
+    /// With-internal-state snapshots preserve equality as well as
+    /// ordering. Once the access clock has saturated, every source
+    /// entry can legitimately carry the same `u64::MAX` epoch; export
+    /// must not invent a deterministic-but-false ordering among those
+    /// equal epochs.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn with_hints_snapshot_preserves_equal_lru_epochs() {
+        futures::executor::block_on(async {
+            let donor = Punnu::<Item>::builder().build();
+            donor.seed_access_clock_for_test(u64::MAX);
+            for id in [1, 2, 3] {
+                donor.insert(Item { id }).await.unwrap();
+            }
+
+            let bytes = donor
+                .snapshot_postcard(SnapshotMode::WithInternalState)
+                .unwrap();
+
+            let restored = Punnu::<Item>::builder().build();
+            restored.restore_postcard(&bytes).unwrap();
+            let snapshot = restored.inner.l1.load_full();
+            let epochs = [1, 2, 3].map(|id| {
+                snapshot
+                    .get(&id)
+                    .expect("entry must restore")
+                    .access_epoch()
+            });
+
+            assert_eq!(epochs, [0, 0, 0]);
+        });
+    }
+
+    /// Rank values in a with-hints snapshot are untrusted wire input.
+    /// Reject ranks outside the documented `[0, count)` range before
+    /// publishing any L1 mutation or advancing eviction semantics with
+    /// a hostile rank.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn restore_with_hints_rejects_rank_outside_entry_count() {
+        let mut bytes = Vec::new();
+        crate::wire::encode_punnu_entries_with_hints_header::<Item>(&mut bytes).unwrap();
+        bytes.extend_from_slice(&PUNNU_INTERNAL_SNAPSHOT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        let item = postcard::to_allocvec(&Item { id: 1 }).unwrap();
+        bytes.extend_from_slice(&item);
+        bytes.push(REMAINING_TTL_TAG_NONE);
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+
+        let punnu = Punnu::<Item>::builder().build();
+        let err = punnu.restore_postcard(&bytes).unwrap_err();
+        match err {
+            PunnuSnapshotError::WireFormat(WireFormatError::Codec(message)) => {
+                assert!(
+                    message.contains("LRU rank"),
+                    "expected rank validation error, got {message}"
+                );
+            }
+            other => panic!("expected wire-format codec error, got {other:?}"),
+        }
+        assert!(punnu.is_empty());
     }
 }

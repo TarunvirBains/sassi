@@ -82,14 +82,14 @@ pub use error::{PunnuSnapshotError, WireFormatError};
 pub use predicate::{
     BasicPredicate, FieldPredicate, IntoBasicPredicate, LookupOp, MemQ, PresentField,
 };
-#[cfg(feature = "serde")]
-pub use punnu::PunnuRestoreStats;
 pub use punnu::{
     BackendFailureMode, CacheTier, DeltaApplyStats, DeltaPunnuFetcher, DeltaQuery,
     DeltaRefreshHandle, DeltaResult, EventReason, InvalidationReason, OnConflict, Punnu,
     PunnuBuilder, PunnuConfig, PunnuEvent, PunnuFetcher, PunnuMetrics, PunnuScope, RefreshHandle,
     RefreshMode, TenantKey, UpdateResult,
 };
+#[cfg(feature = "serde")]
+pub use punnu::{PunnuRestoreStats, SnapshotMode};
 pub use sassi::Sassi;
 pub use time::Instant;
 pub use watermark::{DeltaSyncCacheable, MonotonicWatermark};

@@ -26,6 +26,10 @@ pub(crate) const KIND_VALUE: u8 = 0x01;
 pub(crate) const KIND_FILE_ENTRY: u8 = 0x02;
 pub(crate) const KIND_PUNNU_ENTRIES: u8 = 0x03;
 pub(crate) const KIND_PUNNU_ENTRIES_WITH_HINTS: u8 = 0x04;
+/// First kind byte that the current implementation does not understand.
+/// Anything `>=` this value is rejected as an unsupported wire kind so
+/// future kinds cannot be silently misread.
+const FIRST_RESERVED_KIND: u8 = 0x05;
 const HEADER_FIXED_LEN: usize = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +37,7 @@ pub(crate) enum WireKind {
     Value,
     FileEntry,
     PunnuEntries,
+    PunnuEntriesWithHints,
 }
 
 impl WireKind {
@@ -41,6 +46,7 @@ impl WireKind {
             Self::Value => KIND_VALUE,
             Self::FileEntry => KIND_FILE_ENTRY,
             Self::PunnuEntries => KIND_PUNNU_ENTRIES,
+            Self::PunnuEntriesWithHints => KIND_PUNNU_ENTRIES_WITH_HINTS,
         }
     }
 }
@@ -92,11 +98,13 @@ pub(crate) fn decode_header<T: Cacheable>(
     }
 
     let kind = bytes[10];
-    // Beta.2 understands `Value`, `FileEntry`, and `PunnuEntries` only.
-    // `KIND_PUNNU_ENTRIES_WITH_HINTS` is reserved for a future
-    // operational-hints kind and unsupported; anything above it is
-    // future-only, so collapse both branches into a single `>=` reject.
-    if kind >= KIND_PUNNU_ENTRIES_WITH_HINTS {
+    // The current implementation understands `Value`, `FileEntry`,
+    // `PunnuEntries`, and `PunnuEntriesWithHints`. Anything at or above
+    // [`FIRST_RESERVED_KIND`] is future-only and must be rejected so a
+    // forward kind cannot be silently misread as one of the supported
+    // shapes. Reading still pre-checks the kind byte before any
+    // type-name or body decode work.
+    if kind >= FIRST_RESERVED_KIND {
         return Err(WireFormatError::UnsupportedKind { kind });
     }
     if kind != expected.as_u8() {
@@ -295,4 +303,69 @@ where
         ));
     }
     Ok(entries)
+}
+
+/// Peek at the kind byte of a Sassi wire container without validating
+/// the type name or decoding the body.
+///
+/// The header is still validated for magic and wire-major before the
+/// kind byte is returned, so callers cannot accidentally treat a
+/// non-Sassi byte stream or a future major as a known kind. The
+/// returned byte is the raw kind discriminator; map it to a
+/// [`WireKind`] internally if dispatching.
+///
+/// Used by the snapshot/restore wrapper to dispatch between
+/// entries-only and internal-state restore paths from one byte stream.
+pub(crate) fn peek_kind(bytes: &[u8]) -> Result<u8, WireFormatError> {
+    if bytes.first() == Some(&b'{') {
+        return Err(WireFormatError::VersionMismatch {
+            got: 0,
+            expected: WIRE_FORMAT_MAJOR,
+        });
+    }
+    if bytes.len() < HEADER_FIXED_LEN {
+        return Err(WireFormatError::MalformedHeader("header too short".into()));
+    }
+    if &bytes[..8] != MAGIC {
+        return Err(WireFormatError::InvalidMagic);
+    }
+    let major = u16::from_le_bytes([bytes[8], bytes[9]]);
+    if major != WIRE_FORMAT_MAJOR {
+        return Err(WireFormatError::VersionMismatch {
+            got: major,
+            expected: WIRE_FORMAT_MAJOR,
+        });
+    }
+    let kind = bytes[10];
+    if kind >= FIRST_RESERVED_KIND {
+        return Err(WireFormatError::UnsupportedKind { kind });
+    }
+    Ok(kind)
+}
+
+/// Decode the with-hints snapshot header and return the body slice.
+///
+/// Validates the shared header fields (magic, wire major, kind, flags,
+/// type name) for the [`WireKind::PunnuEntriesWithHints`] kind byte.
+/// The body shape (envelope version, entry count, hint payload) is the
+/// internal-state contract owned by [`crate::punnu`] and decoded there.
+pub(crate) fn decode_punnu_entries_with_hints<T>(bytes: &[u8]) -> Result<&[u8], WireFormatError>
+where
+    T: Cacheable,
+{
+    decode_header::<T>(bytes, WireKind::PunnuEntriesWithHints)
+}
+
+/// Encode the shared binary header for a with-hints snapshot.
+///
+/// Appends only the header segment to `out`. Callers append their own
+/// internal-state body (entry count, per-entry hint payload, etc.) after
+/// this prefix.
+pub(crate) fn encode_punnu_entries_with_hints_header<T>(
+    out: &mut Vec<u8>,
+) -> Result<(), WireFormatError>
+where
+    T: Cacheable,
+{
+    encode_header::<T>(WireKind::PunnuEntriesWithHints, out)
 }

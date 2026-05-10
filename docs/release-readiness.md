@@ -32,8 +32,23 @@ In scope for the beta:
   strict-backend-in-flight snapshots before any L1 mutation.
 - A documented shared-L2 upgrade note for adopters carrying beta.1 backend
   data into beta.2.
-- Native `runtime-tokio` and a verified `wasm32-unknown-unknown` compile path
-  with `runtime-wasm`.
+- Native `runtime-tokio` and a verified `wasm32-unknown-unknown` build *and*
+  test path with `runtime-wasm`. The `wasm-target` CI job builds the explicit
+  feature matrix and runs the `runtime-wasm` integration suite under
+  `wasm-bindgen-test` via `wasm-bindgen-test-runner`, exercising spawn,
+  sleep, TTL sweep, periodic refresh, and the postcard wire round-trip.
+- Whole-Punnu snapshot wrapper (`Punnu::snapshot_postcard` /
+  `Punnu::restore_postcard`) with `SnapshotMode::EntriesOnly` (default,
+  byte-compatible with the existing `export_entries_postcard`) and an
+  opt-in `SnapshotMode::WithInternalState` mode that preserves remaining TTLs
+  and relative sampled-LRU recency. Internal-state hints carry their own
+  envelope version independent from the wire major.
+- Saturating sampled-LRU access clock at `u64::MAX`. The clock cannot wrap and
+  invert eviction priority on long-lived processes; saturation degrades to
+  random sampling rather than treating fresh entries as old.
+- `serde_json` is no longer part of Sassi's `serde` feature; Sassi proper's
+  generic backend storage-key helper uses postcard. The Redis companion crate
+  retains JSON for Redis id-to-key encoding and pub/sub invalidation messages.
 - `Sassi` orchestration for typed pools and cross-type trait queries.
 - The dependency-light
   [Bardownski TUI showcase](../examples/bardownski/README.md) in this
@@ -49,16 +64,17 @@ These are intentionally not release claims for v0.1.0-beta.2:
 - Full downstream data-layer integration examples.
 - The Bardownski Dioxus/full-stack implementation.
 - A custom public executor API.
-- Full per-test WASM runtime execution until
-  [issue #3](https://github.com/TarunvirBains/sassi/issues/3) is closed.
 - Automatic tenant, auth, or row-level-security inference from cached values.
 - A serde-encoded predicate wire protocol.
-- Full internal-state export (refresh handles, subscription watermarks,
-  recovery sets, single-flight work, event listeners, backend stale-read
-  suppression, runtime/executor state). The reserved `entries_with_hints`
-  binary kind is documented but not implemented in beta.2.
-- A backend-seeding restore. `restore_entries_postcard` is L1-only; future
-  backend-seeding restore, if needed, would be a separate async API.
+- Refresh-handle state preservation across snapshot boundaries.
+  `Punnu::snapshot_postcard` (both modes) does not serialize active refresh
+  handles, subscription watermarks/recovery sets, single-flight work, event
+  listeners, backend stale-read suppression, or runtime/executor state.
+  Applications re-attach refresh handles after restore and resume from a
+  consumer-persisted watermark.
+- A backend-seeding restore. `restore_entries_postcard` and `restore_postcard`
+  are L1-only; a future backend-seeding restore, if needed, would be a
+  separate async API.
 - Certified framework adapters.
 - Automatic cross-process coherence for Redis `put`/`insert` writes without explicit
   invalidation publication.
