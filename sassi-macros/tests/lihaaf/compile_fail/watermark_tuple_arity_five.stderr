@@ -2,8 +2,9 @@ error[E0277]: the trait bound `(i64, i64, i64, i64, i64): MonotonicWatermark` is
   --> $DIR/watermark_tuple_arity_five.rs:8:24
    |
  8 |     assert_watermark::<(i64, i64, i64, i64, i64)>();
-   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `MonotonicWatermark` is not implemented for `(i64, i64, i64, i64, i64)`
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
+   = help: the trait `MonotonicWatermark` is not implemented for `(i64, i64, i64, i64, i64)`
 help: the following other types implement trait `MonotonicWatermark`
   --> sassi/src/watermark.rs:31:1
    |

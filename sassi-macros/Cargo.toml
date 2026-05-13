@@ -38,7 +38,7 @@ sassi = { path = "../sassi" }
 # subcommand), not a library dep; adopters subprocess-spawn `cargo
 # lihaaf` instead of importing `lihaaf::*`. CI installs the
 # `cargo-lihaaf` binary explicitly; local contributors should `cargo
-# install lihaaf --version 0.1.0-alpha.2` (or run from a checkout of
+# install lihaaf --version 0.1.0-alpha.3` (or run from a checkout of
 # the sibling repo).
 #
 # Fixture layout (`tests/lihaaf/{compile_fail,compile_pass}/`) follows

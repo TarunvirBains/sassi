@@ -122,7 +122,7 @@ The `cargo lihaaf` line runs the compile-fail / compile-pass fixture suite
 under `sassi-macros/tests/lihaaf/`. It replaces the earlier `trybuild`-driven
 fixtures and is now the authoritative gate for proc-macro derive errors and
 `MonotonicWatermark` trait-bound rejections. Install once locally with
-`cargo install lihaaf --version 0.1.0-alpha.2 --locked`; CI installs it
+`cargo install lihaaf --version 0.1.0-alpha.3 --locked`; CI installs it
 through the same pin. To re-bless snapshots after an intentional diagnostic
 change, run `cargo lihaaf --manifest-path sassi-macros/Cargo.toml --bless`
 and review the resulting `.stderr` diff before committing.
