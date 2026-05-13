@@ -65,7 +65,7 @@ jobs:
       # CLI surface deterministic across runs; bumping the pin is a
       # conscious step that travels with any required `--bless`.
       - name: Install cargo-lihaaf (pinned alpha)
-        run: cargo install lihaaf --version 0.1.0-alpha.3 --locked
+        run: cargo install lihaaf --version 0.1.0-alpha.4 --locked
 
       - name: Lihaaf compile-fixture suite (sassi-macros)
         run: cargo lihaaf --manifest-path sassi-macros/Cargo.toml
