@@ -1,0 +1,38 @@
+error[E0277]: the trait bound `(): MonotonicWatermark` is not satisfied
+  --> $DIR/watermark_unit.rs:8:24
+   |
+ 8 |     assert_watermark::<()>();
+   |                        ^^ the trait `MonotonicWatermark` is not implemented for `()`
+   |
+help: the following other types implement trait `MonotonicWatermark`
+  --> sassi/src/watermark.rs:31:1
+   |
+31 | / impl<A, B> MonotonicWatermark for (A, B)
+32 | | where
+33 | |     A: MonotonicWatermark,
+34 | |     B: MonotonicWatermark,
+   | |__________________________^ `(A, B)`
+...
+38 | / impl<A, B, C> MonotonicWatermark for (A, B, C)
+39 | | where
+40 | |     A: MonotonicWatermark,
+41 | |     B: MonotonicWatermark,
+42 | |     C: MonotonicWatermark,
+   | |__________________________^ `(A, B, C)`
+...
+46 | / impl<A, B, C, D> MonotonicWatermark for (A, B, C, D)
+47 | | where
+48 | |     A: MonotonicWatermark,
+49 | |     B: MonotonicWatermark,
+50 | |     C: MonotonicWatermark,
+51 | |     D: MonotonicWatermark,
+   | |__________________________^ `(A, B, C, D)`
+note: required by a bound in `assert_watermark`
+  --> $DIR/watermark_unit.rs:5:24
+   |
+ 5 | fn assert_watermark<T: MonotonicWatermark>() {}
+   |                        ^^^^^^^^^^^^^^^^^^ required by this bound in `assert_watermark`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.

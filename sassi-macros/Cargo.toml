@@ -23,5 +23,45 @@ syn = { workspace = true }
 sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-beta.2" }
 
 [dev-dependencies]
+# `sassi` as a dev-dep forms a cycle (`sassi` regularly depends on
+# `sassi-macros`; `sassi-macros` dev-deps `sassi` here). Cargo permits
+# this because dev-deps do not participate in the published / runtime
+# dependency graph — they only show up when compiling this crate's own
+# tests. Required so the lihaaf compile_fail / compile_pass fixtures
+# can `use sassi::{Cacheable, MonotonicWatermark, ...}` and reach the
+# proc-macros through `sassi`'s `pub use sassi_macros::*` re-export.
 sassi = { path = "../sassi" }
-trybuild = { workspace = true }
+
+# Lihaaf — Phase 8.5 replacement for trybuild. See the
+# `[package.metadata.lihaaf]` block below for fixture-suite
+# configuration. lihaaf ships as the `cargo-lihaaf` binary (cargo
+# subcommand), not a library dep; adopters subprocess-spawn `cargo
+# lihaaf` instead of importing `lihaaf::*`. CI installs the
+# `cargo-lihaaf` binary explicitly; local contributors should `cargo
+# install lihaaf --version 0.1.0-alpha.3` (or run from a checkout of
+# the sibling repo).
+#
+# Fixture layout (`tests/lihaaf/{compile_fail,compile_pass}/`) follows
+# the v0.1 lihaaf spec. Snapshots use lihaaf's stdlib-only normalizer
+# (`$DIR` for fixture-directory paths, `$WORKSPACE` for workspace
+# root, `$RUST` for sysroot, `$CARGO/registry/` for cargo registry).
+# `dylib_crate = "sassi"` (not `sassi-macros`) because fixtures `use
+# sassi::*`; the proc-macros are loaded transitively through `sassi`'s
+# `pub use sassi_macros::*` re-export. `extern_crates[0]` MUST equal
+# `dylib_crate` per spec §3.2.
+
+# Fixture suite config consumed by `cargo lihaaf`. See lihaaf v0.1
+# spec §3 (`docs/spec/lihaaf-v0.1.md` in the lihaaf repo). The harness
+# builds `sassi` as a release-mode dylib once per session, then
+# dispatches every fixture under `fixture_dirs` to a fresh `rustc`
+# invocation linking the dylib via `--extern`. Snapshots live next to
+# each compile_fail `.rs` fixture as a sibling `.stderr` file using
+# lihaaf's normalized output (`$DIR`, `$WORKSPACE`, `$RUST`,
+# `$CARGO/registry/`, LF endings, collapsed blanks, stripped trailing
+# whitespace).
+[package.metadata.lihaaf]
+dylib_crate = "sassi"
+extern_crates = ["sassi", "sassi-macros"]
+features = []
+edition = "2024"
+fixture_dirs = ["tests/lihaaf/compile_fail", "tests/lihaaf/compile_pass"]

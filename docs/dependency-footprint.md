@@ -34,8 +34,10 @@ Notable absent deps:
   storage-key helper uses postcard. Adapters outside Sassi proper can choose
   their own external wire; `sassi-cache-redis` keeps JSON for Redis id keys
   and pub/sub invalidation messages.
-- `proptest`, `criterion`, `trybuild`, `tempfile`, `wasm-bindgen-test`,
-  `serde_json` are dev-only.
+- `proptest`, `criterion`, `tempfile`, `wasm-bindgen-test`,
+  `serde_json` are dev-only. Compile-fail / compile-pass coverage is
+  driven by the standalone `cargo lihaaf` cargo subcommand (installed
+  in CI; not a Sassi dependency), not by an in-tree dev-dep.
 
 ### `--no-default-features` (L1-only, no serde, no runtime)
 
@@ -125,11 +127,15 @@ executor body is gated `cfg(target_arch = "wasm32")`.
   graph. `serde_json` remains a dev-dependency for the
   `cross_version_compat` integration tests, which need to fabricate beta.1
   JSON envelopes for rejection tests.
-- **WASM dev-deps split out.** `proptest`, `criterion`, and `trybuild` are
-  native-only dev-dependencies because their transitive graph
-  (`rusty-fork` -> `wait-timeout`, `criterion`'s process model, `trybuild`'s
-  cargo invocation) does not build cleanly on `wasm32-unknown-unknown`.
-  `wasm-bindgen-test` is a wasm-only dev dep.
+- **WASM dev-deps split out.** `proptest` and `criterion` are native-only
+  dev-dependencies because their transitive graph (`rusty-fork` ->
+  `wait-timeout`, `criterion`'s process model) does not build cleanly
+  on `wasm32-unknown-unknown`. `wasm-bindgen-test` is a wasm-only dev
+  dep. Compile-fixture coverage no longer lives in the dev-dep graph
+  at all: it moved to `cargo lihaaf` (a separately installed cargo
+  subcommand), configured from `sassi-macros/Cargo.toml`'s
+  `[package.metadata.lihaaf]` block. The earlier `trybuild` dev-dep
+  was removed in the lihaaf migration.
 - **`serde_json` reasoning preserved for sassi-cache-redis.** The Redis
   companion crate retains `serde_json` for Redis id-to-key encoding and
   pub/sub invalidation messages. Those bytes are part of the Redis adapter's

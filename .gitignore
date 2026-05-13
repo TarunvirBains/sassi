@@ -2,8 +2,11 @@
 # codex review findings. Mirrors the djogi convention.
 docs/superpowers/
 
-# Rust build artifacts
-/target
+# Rust build artifacts. `target/` (not `/target`) covers both the
+# workspace target dir and the per-crate `<crate>/target/` directories
+# that `cargo lihaaf --manifest-path <crate>/Cargo.toml` creates when
+# the harness builds against a sub-crate manifest.
+target/
 
 # Editor / OS noise
 .DS_Store

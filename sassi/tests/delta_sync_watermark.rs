@@ -123,9 +123,14 @@ fn chrono_watermarks_are_feature_gated() {
     assert_watermark::<chrono::NaiveDate>();
 }
 
-#[cfg(not(any(feature = "watermark-time", feature = "watermark-chrono")))]
-#[test]
-fn rejected_watermark_types_fail_to_compile() {
-    let t = trybuild::TestCases::new();
-    t.compile_fail("tests/compile_fail/watermark_*.rs");
-}
+// Compile-fail coverage for rejected `MonotonicWatermark` types
+// (`bool`, `char`, `()`, `std::time::Duration`, mis-sized tuples,
+// tuples containing non-monotonic components, and the
+// `DeltaSyncCacheable::Watermark` projection) lives under
+// `sassi-macros/tests/lihaaf/compile_fail/watermark_*.rs`. The lihaaf
+// harness runs them through `cargo lihaaf` against a release-mode
+// `sassi` dylib built without the optional `watermark-time` /
+// `watermark-chrono` features, which pins the universe of
+// `MonotonicWatermark` impls cited in each fixture's `.stderr`
+// snapshot. See `sassi-macros/Cargo.toml`'s
+// `[package.metadata.lihaaf]` block for the suite config.
