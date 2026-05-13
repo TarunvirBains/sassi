@@ -108,6 +108,7 @@ cargo test --workspace --all-features --locked
 cargo test -p sassi --no-default-features --locked
 cargo test -p sassi --no-default-features --features watermark-time --locked
 cargo test -p sassi --no-default-features --features watermark-chrono --locked
+cargo lihaaf --manifest-path sassi-macros/Cargo.toml
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
 cargo check -p sassi --target wasm32-unknown-unknown --no-default-features --features serde,runtime-wasm,watermark-time,watermark-chrono --locked
 cargo bench -p sassi --bench punnu_bench --features serde,runtime-tokio --locked -- --test
@@ -116,6 +117,15 @@ cargo publish --dry-run -p sassi-macros --locked
 cargo publish --dry-run -p sassi --locked
 cargo publish --dry-run -p sassi-cache-redis --locked
 ```
+
+The `cargo lihaaf` line runs the compile-fail / compile-pass fixture suite
+under `sassi-macros/tests/lihaaf/`. It replaces the earlier `trybuild`-driven
+fixtures and is now the authoritative gate for proc-macro derive errors and
+`MonotonicWatermark` trait-bound rejections. Install once locally with
+`cargo install lihaaf --version 0.1.0-alpha.2 --locked`; CI installs it
+through the same pin. To re-bless snapshots after an intentional diagnostic
+change, run `cargo lihaaf --manifest-path sassi-macros/Cargo.toml --bless`
+and review the resulting `.stderr` diff before committing.
 
 For the first publish of a new version, downstream dry-runs cannot resolve until
 the upstream crate exists on crates.io. Publish or dry-run in dependency order:

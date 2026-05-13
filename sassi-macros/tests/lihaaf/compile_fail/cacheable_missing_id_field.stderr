@@ -1,5 +1,7 @@
 error: Cacheable: requires a field literally named `id` (v0.2 will support `#[cacheable(id)]` for custom names)
- --> tests/compile_fail/cacheable_missing_id_field.rs:6:8
+ --> $DIR/cacheable_missing_id_field.rs:6:8
   |
 6 | struct NoIdHere {
   |        ^^^^^^^^
+
+error: aborting due to 1 previous error

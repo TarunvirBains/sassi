@@ -1,5 +1,7 @@
 error: Cacheable: unsupported #[cacheable(...)] option
- --> tests/compile_fail/cacheable_unknown_option.rs:6:13
+ --> $DIR/cacheable_unknown_option.rs:6:13
   |
 6 | #[cacheable(foo = "bar")]
   |             ^^^
+
+error: aborting due to 1 previous error

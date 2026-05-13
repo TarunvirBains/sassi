@@ -89,15 +89,21 @@ postcard = { workspace = true }
 # production code path in sassi proper calls `serde_json`.
 serde_json = { workspace = true }
 
-# Native-only dev deps. `proptest`, `criterion`, and `trybuild` all
-# pull transitive crates that don't build cleanly on
-# `wasm32-unknown-unknown` (`rusty-fork` -> `wait-timeout`,
-# `criterion` requires a process model, `trybuild` runs `cargo`
-# itself). Restricting them to non-wasm targets keeps the wasm test
-# binary's dependency graph minimal.
+# Native-only dev deps. `proptest` and `criterion` pull transitive
+# crates that don't build cleanly on `wasm32-unknown-unknown`
+# (`rusty-fork` -> `wait-timeout`, `criterion` requires a process
+# model). Restricting them to non-wasm targets keeps the wasm test
+# binary's dependency graph minimal. Compile-fail / compile-pass
+# coverage moved off the now-removed `trybuild` dev-dep and onto the
+# `cargo lihaaf` cargo subcommand, configured via
+# `sassi-macros/Cargo.toml`'s `[package.metadata.lihaaf]` block. The
+# entire compile-fixture surface (proc-macro derive errors + bare
+# trait-bound rejections for `MonotonicWatermark`) is now exercised
+# under `sassi-macros/tests/lihaaf/`. Sassi itself ships no compile
+# fixtures from this crate any more, so no driver dev-dep is needed
+# here.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 proptest = { workspace = true }
-trybuild = { workspace = true }
 criterion = { workspace = true }
 
 # `wasm-bindgen-test` powers the wasm32 integration tests in

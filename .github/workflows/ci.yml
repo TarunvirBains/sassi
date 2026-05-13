@@ -24,8 +24,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # rust-src for trybuild compile_fail fixtures (matches djogi convention).
-          components: clippy, rustfmt, rust-src
+          components: clippy, rustfmt
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
@@ -60,6 +59,16 @@ jobs:
 
       - name: Test (no-default + serde + runtime-tokio)
         run: cargo test -p sassi --no-default-features --features "serde,runtime-tokio"
+
+      # Lihaaf is the authoritative compile-fixture gate for sassi.
+      # Pinned to an exact alpha to keep the snapshot byte format and
+      # CLI surface deterministic across runs; bumping the pin is a
+      # conscious step that travels with any required `--bless`.
+      - name: Install cargo-lihaaf (pinned alpha)
+        run: cargo install lihaaf --version 0.1.0-alpha.2 --locked
+
+      - name: Lihaaf compile-fixture suite (sassi-macros)
+        run: cargo lihaaf --manifest-path sassi-macros/Cargo.toml
 
   wasm-target:
     name: WASM target build and test
