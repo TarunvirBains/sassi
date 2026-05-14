@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name = "sassi-heeranjid-wire-proof"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+heeranjid = { path = "../../../HeeRanjID/heeranjid" }
+sassi = { path = "../../sassi" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1.52", default-features = false, features = ["rt", "macros"] }
