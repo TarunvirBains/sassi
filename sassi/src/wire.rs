@@ -12,6 +12,10 @@
 //! Wire majors are independent of the crate's semver. The current major
 //! is exposed as [`WIRE_FORMAT_MAJOR`].
 //!
+//! The final commit where the beta.1 JSON value envelope was live is
+//! `92b77510cb80d98fd749020df3d18571200a315f`
+//! (`git show 92b77510cb80d98fd749020df3d18571200a315f:sassi/src/wire.rs`).
+//!
 //! [`Cacheable::cache_type_name`]: crate::Cacheable::cache_type_name
 
 use crate::cacheable::Cacheable;

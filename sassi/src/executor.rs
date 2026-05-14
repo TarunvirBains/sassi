@@ -32,8 +32,9 @@
 //! preserves that determinism without exposing a tokio-specific knob
 //! to consumers. The wasm-target counterpart wraps
 //! [`web_time::Instant`] (which uses `Performance.now()` in the
-//! browser). Direct WASM runtime tests are outside the current v0.1.0-beta.2
-//! release gate.
+//! browser). The `punnu_executor_wasm` integration test suite exercises
+//! spawn, sleep, TTL sweep, periodic refresh, and postcard wire paths under
+//! `wasm-bindgen-test`.
 
 use crate::time::Instant;
 use std::time::Duration;

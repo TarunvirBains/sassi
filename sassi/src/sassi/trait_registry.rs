@@ -20,7 +20,8 @@
 //! attribute syntax never appears in the expansion of
 //! `#[sassi::trait_impl]`. `inventory` also documents support for
 //! `wasm32-unknown-unknown`; Sassi's current release gate verifies the
-//! WASM compile path, with direct WASM runtime tests tracked separately.
+//! WASM compile path and runs direct wasm-bindgen runtime tests for the
+//! `runtime-wasm` executor.
 //!
 //! Macro expansion routes through [`crate::__private::inventory`] so
 //! emitted code does not depend on the workspace's exact
@@ -30,9 +31,10 @@
 //!
 //! `cargo build --target wasm32-unknown-unknown` finishes clean with
 //! the inventory-based registry, and `inventory` documents support for
-//! the wasm32 startup-init slot. Full runtime-test coverage on
-//! `wasm32-unknown-unknown` requires a `wasm-bindgen-test` runner and is
-//! outside the current v0.1.0-beta.2 release gate.
+//! the wasm32 startup-init slot. The current CI gate also runs the
+//! `runtime-wasm` integration suite through `wasm-bindgen-test`; trait
+//! registry runtime coverage remains indirect through compile and link
+//! coverage.
 
 use crate::sassi::orchestrator::Sassi;
 use std::any::{Any, TypeId};

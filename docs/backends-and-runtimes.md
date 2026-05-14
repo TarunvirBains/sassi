@@ -180,6 +180,11 @@ caller. Operators using shared Redis should clear the keyspace or roll
 `PunnuConfig::namespace` during upgrade so beta.2 readers do not attempt to
 decode beta.1 JSON values.
 
+The final commit where the beta.1 JSON value envelope was live is
+`92b77510cb80d98fd749020df3d18571200a315f`; use
+`git show 92b77510cb80d98fd749020df3d18571200a315f:sassi/src/wire.rs` if an
+upgrade tool needs the exact historical decoder.
+
 ## Local Snapshots vs Shared Backend Mutation
 
 Sassi distinguishes two cache surfaces that beta.2 supports concurrently:
