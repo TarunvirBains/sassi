@@ -85,6 +85,59 @@ assert!(description.contains("AND"));
 include a default arm so future ops can be added without breaking downstream
 crates.
 
+## JSahibON Predicate Payloads
+
+JSON predicates are ordinary `BasicPredicate<T>` values with
+`LookupOp::Json`. The operand downcasts to `JSahibONPredicateBody`, which keeps
+the JSON path and predicate body inspectable for downstream query emitters and
+debug formatters.
+
+```rust
+use sassi::{BasicPredicate, Cacheable, JSahibON, JSahibONPredicateBody, LookupOp};
+
+#[derive(Cacheable, Clone, Debug)]
+struct Event {
+    id: i64,
+    payload: JSahibON,
+}
+
+fn describe_json(predicate: &BasicPredicate<Event>) -> Option<String> {
+    let BasicPredicate::Field(fp) = predicate else {
+        return None;
+    };
+    if fp.op() != LookupOp::Json {
+        return None;
+    }
+
+    let body = fp.value_as::<JSahibONPredicateBody>()?;
+    let path = |segments: &[String]| {
+        if segments.is_empty() {
+            "$".to_owned()
+        } else {
+            segments.join(".")
+        }
+    };
+
+    Some(match body {
+        JSahibONPredicateBody::HasKey { path: jpath, key } => {
+            format!("{}.{} has key {:?}", fp.field_name(), path(jpath.segments()), key)
+        }
+        JSahibONPredicateBody::ScalarCompare { path: jpath, op, operand, .. } => {
+            format!("{}.{} {:?} {:?}", fp.field_name(), path(jpath.segments()), op, operand)
+        }
+        other => format!("{} JSON {:?}", fp.field_name(), other),
+    })
+}
+
+let predicate = Event::fields().payload.jsahibon().path("profile").has_key("age");
+assert!(describe_json(&predicate).unwrap().contains("has key"));
+```
+
+`JSahibONPredicateBody` is `#[non_exhaustive]`, so walkers should keep a
+fallback arm. Dotted `path("profile.age")` segments are already parsed into a
+`JPath`; literal keys reached through `key(...)` or `path_segments(...)` appear
+as exact string segments with no escaping layer.
+
 ## `PunnuScope` Chaining And Terminal Collection
 
 `PunnuScope<T>` is the lazy in-memory query handle returned by `Punnu::scope`.

@@ -124,18 +124,28 @@ needs unknown fields or raw JSON queries. Database-owned wrappers and
 Project those values into `JSahibON`, into a typed schema value, or into an
 audited newtype with an explicit wire marker.
 
+When an application already speaks `serde_json`, enable `serde-json-bridge`.
+That feature provides `TryFrom<serde_json::Value> for JSahibON`,
+`From<JSahibON> for serde_json::Value`, plus
+`JSahibON::try_from_serializable` and `JSahibON::try_into_typed` helpers.
+Applications that name `serde_json::Value` should also depend on `serde_json`
+directly. The bridge is an edge conversion, not a reason to store
+`serde_json::Value` in cache fields that need Sassi wire portability.
+
 JSON predicates start from a field accessor:
 
 ```rust
 let fields = Event::fields();
 let adults = fields.payload.jsahibon().path("profile.age").value::<u64>().gte(18);
-let has_header = fields.payload.jsahibon().path("headers").key("content-type").exists();
+let has_header = fields.payload.jsahibon().path("headers").has_key("content-type");
 ```
 
 `path("a.b")` is a convenience for plain identifier segments. Use `key(...)`
 or `path_segments(...)` for literal keys that are not plain identifiers, such as
 keys containing dots, hyphens, empty strings, non-ASCII text, or an initial
-digit. `Option<JSahibON>` keeps `None` distinct from JSON `null`: `None` is
+digit. Use `has_key`, `has_any_key`, and `has_all_keys` to query object keys,
+and `value::<T>()` / `eq_json` / `array_contains` / `array_len_*` to query
+values. `Option<JSahibON>` keeps `None` distinct from JSON `null`: `None` is
 missing; `Some(JSahibON::Null)` exists and is JSON null.
 
 ## Wire Portability Guard

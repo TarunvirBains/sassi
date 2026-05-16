@@ -14,6 +14,13 @@ sassi = "0.1.0-beta.3"
 tokio = { version = "1", features = ["macros", "rt"] }
 ```
 
+If your cached type derives serde traits for the wire or backend examples, add
+serde directly to your application too:
+
+```toml
+serde = { version = "1", features = ["derive"] }
+```
+
 Inside this repository, path dependencies are relative to the crate that
 declares them. From the repository root that looks like this:
 
@@ -136,6 +143,58 @@ sync cursor is already represented by one of those libraries:
 ```toml
 sassi = { version = "0.1.0-beta.3", features = ["watermark-time"] }
 ```
+
+`serde-json-bridge` enables conversions between Sassi's portable JSON value
+and `serde_json::Value`. Use it when an application already receives raw JSON
+through `serde_json`, but keep the cache field itself as `JSahibON` when that
+field has to travel over Sassi's postcard wire or participate in local JSON
+queries:
+
+```toml
+[dependencies]
+sassi = { version = "0.1.0-beta.3", features = ["serde-json-bridge"] }
+serde_json = "1"
+```
+
+## Portable JSON And Wire Guard
+
+Use `JSahibON` for cached fields that need raw JSON shape at the Sassi
+boundary: user profiles, provider payloads, feature metadata, and other values
+where the local cache must query keys or nested values without owning a full
+Rust schema.
+
+```rust
+use sassi::{Cacheable, JSahibON};
+
+#[derive(Cacheable, Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[cacheable(type_name = "myapp.Profile", wire_portable)]
+struct Profile {
+    id: i64,
+    profile: JSahibON,
+}
+
+let fields = Profile::fields();
+let adults = fields.profile.jsahibon().path("age").value::<u64>().gte(18);
+let has_media = fields.profile.jsahibon().has_key("media");
+let localized = fields
+    .profile
+    .jsahibon()
+    .path("preferences")
+    .has_all_keys(["timezone", "locale"]);
+```
+
+`path("a.b")` is for dotted plain identifier paths. Use `key(...)` or
+`path_segments(...)` when a JSON object key contains dots, hyphens, empty
+strings, non-ASCII text, or an initial digit. `Option<JSahibON>` keeps an
+absent field distinct from JSON null: `None` is missing, while
+`Some(JSahibON::Null)` exists and is null.
+
+`#[cacheable(wire_portable)]` is the strict wire helper gate. It requires the
+entry id and each named field to implement Sassi's `SassiWire` marker, then
+marks the entry as `WirePortable` so callers can use
+`sassi::wire::to_vec_portable` and `from_slice_portable`. The guard does not
+change the bytes; it only rejects fields that are not on Sassi's known portable
+wire allowlist.
 
 ## Where Next
 

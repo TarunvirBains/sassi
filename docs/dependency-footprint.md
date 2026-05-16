@@ -73,6 +73,19 @@ Adds vs. `--no-default-features`:
 Useful for libraries that re-emit Sassi payloads onto their own runtime or
 that integrate with a consumer-supplied executor outside Sassi's contract.
 
+### `--no-default-features --features serde-json-bridge`
+
+L1 cache plus Sassi's binary value wire and explicit edge conversions between
+`JSahibON` and `serde_json::Value`.
+
+Adds vs. `--no-default-features`:
+
+- `serde`, `postcard`, `serde_json`
+
+Use this when the application boundary already receives or emits
+`serde_json::Value`, but the cache model stores raw JSON as `JSahibON` for
+portable wire behavior and local JSON predicates.
+
 ### `--no-default-features --features serde,runtime-tokio`
 
 L1 + wire + tokio background work. Equivalent to the default but with
@@ -119,14 +132,20 @@ green: the features themselves do not conflict (selecting both is the right
 shape for a workspace that compiles for both targets), only the wasm
 executor body is gated `cfg(target_arch = "wasm32")`.
 
+The sensitive-info workflow is event-driven rather than part of push CI: it
+scans GitHub issue, pull request, and review text with
+`cargo xtask sensitive-info --github-event "$GITHUB_EVENT_PATH"`. The release
+preflight also runs `cargo xtask sensitive-info --path .` against repository
+text.
+
 ## Recent Footprint Changes
 
-- **JSON removed from the production graph.** Sassi's core code paths used
+- **JSON removed from the default production graph.** Sassi's core code paths used
   `serde_json` to encode backend storage keys. That dependency moved to
   postcard so the `serde` feature no longer pulls JSON into the production
-  graph. `serde_json` remains a dev-dependency for the
-  `cross_version_compat` integration tests, which need to fabricate beta.1
-  JSON envelopes for rejection tests.
+  graph. `serde_json` remains opt-in through `serde-json-bridge`, remains a
+  dev-dependency for the `cross_version_compat` integration tests, and remains
+  in `sassi-cache-redis` for Redis id keys and pub/sub messages.
 - **WASM dev-deps split out.** `proptest` and `criterion` are native-only
   dev-dependencies because their transitive graph (`rusty-fork` ->
   `wait-timeout`, `criterion`'s process model) does not build cleanly

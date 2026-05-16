@@ -81,11 +81,12 @@ With the `serde` feature enabled, the core crate includes:
   wiring of the backend path. It stores Sassi binary wire-container bytes and
   does not publish invalidation streams.
 - `FileBackend`: a filesystem-backed L2 implementation that writes `.sassi`
-  binary records in beta.2. Each record carries an inline expiry tag followed
-  by a postcard-encoded payload, so value and expiry are published with one
-  atomic file rename. Beta.1 `.json` records are not read by beta.2 and should
-  be treated as disposable cache files. Clear the cache directory or roll
-  `PunnuConfig::namespace` during upgrade if stale L2 entries would be noisy.
+  binary records. Each record carries an inline expiry tag followed by a
+  postcard-encoded payload, so value and expiry are published with one atomic
+  file rename. Beta.1 `.json` records are not read by beta.2 and later and
+  should be treated as disposable cache files. Clear the cache directory or
+  roll `PunnuConfig::namespace` during upgrade if stale L2 entries would be
+  noisy.
   It uses blocking filesystem calls inside the async backend trait and is
   intended for development, tests, and simple local persistence rather than
   request-path production load. Like `MemoryBackend`, it does not currently
@@ -213,8 +214,8 @@ upgrade tool needs the exact historical decoder.
 
 ## Local Snapshots vs Shared Backend Mutation
 
-Sassi distinguishes two cache surfaces that beta.2 supports concurrently:
-shared L2 mutation through async backends, and local L1 hydration through
+Sassi supports two cache surfaces concurrently: shared L2 mutation through
+async backends, and local L1 hydration through
 `Punnu::export_entries_postcard` / `Punnu::restore_entries_postcard`. They are
 not interchangeable.
 
@@ -245,12 +246,12 @@ let bytes = proposal_pool.export_entries_postcard()?;
 local_store.save("proposal-cache", bytes).await?;
 ```
 
-`restore_entries_postcard` rejects when strict backend writes are in flight. In
-beta.2, "strict" means an active backend write reservation from a pool using
+`restore_entries_postcard` rejects when strict backend writes are in flight.
+Here, "strict" means an active backend write reservation from a pool using
 `BackendFailureMode::Error`; this is a race guard, not an enforcement mechanism
-for the broader rule above. The intended beta.2 restore path is backend-less
-local hydration; backend seeding remains a future async API rather than a
-widening of `restore_entries_postcard`.
+for the broader rule above. The intended restore path is backend-less local
+hydration; backend seeding remains a future async API rather than a widening of
+`restore_entries_postcard`.
 
 The snapshot is not a distributed correctness boundary. Applications that need
 multi-device or service-to-service recovery should pair entries snapshots with

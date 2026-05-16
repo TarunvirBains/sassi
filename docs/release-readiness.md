@@ -58,6 +58,12 @@ In scope for the beta:
   portability guard over the existing postcard wire. The guard does not change
   wire bytes, kind, flags, header validation, backend bounds, or snapshot
   bounds.
+- Lihaaf compile fixtures for proc-macro diagnostics and bare trait-bound
+  checks. The fixture runner is pinned in CI and treated as release
+  infrastructure rather than an in-tree dev-dependency.
+- A redacted sensitive-information guard for public issue, pull request, and
+  review text, backed by `cargo xtask sensitive-info` and a GitHub Actions
+  workflow that never echoes matched values.
 - `Sassi` orchestration for typed pools and cross-type trait queries.
 - The dependency-light
   [Bardownski TUI showcase](../examples/bardownski/README.md) in this
@@ -118,15 +124,26 @@ Before publishing a beta, run the commands below from the repository root and
 record the results in the release notes or publish checklist:
 
 ```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo build --workspace --all-features --locked
 cargo test --workspace --locked
-cargo test --workspace --all-features --locked
 cargo test -p sassi --no-default-features --locked
+cargo test -p sassi --no-default-features --features serde --locked
+cargo test -p sassi --no-default-features --features serde,runtime-tokio --locked
 cargo test -p sassi --no-default-features --features watermark-time --locked
 cargo test -p sassi --no-default-features --features watermark-chrono --locked
+REDIS_URL=redis://localhost:6379 cargo test -p sassi-cache-redis --locked
+cargo xtask check-test-surface
+cargo xtask sensitive-info --path .
 cargo lihaaf --manifest-path sassi-macros/Cargo.toml
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps --locked
-cargo check -p sassi --target wasm32-unknown-unknown --no-default-features --features serde,runtime-wasm,watermark-time,watermark-chrono --locked
+cargo build -p sassi --target wasm32-unknown-unknown --locked
+cargo build -p sassi --target wasm32-unknown-unknown --no-default-features --features runtime-tokio,runtime-wasm --locked
+cargo build -p sassi --target wasm32-unknown-unknown --no-default-features --features serde,runtime-wasm --locked
+cargo test -p sassi --target wasm32-unknown-unknown --test punnu_executor_wasm --no-default-features --features serde,runtime-wasm --locked
 cargo bench -p sassi --bench punnu_bench --features serde,runtime-tokio --locked -- --test
+cargo outdated --workspace --root-deps-only --color never
 cargo publish --dry-run -p sassi-codegen --locked
 cargo publish --dry-run -p sassi-macros --locked
 cargo publish --dry-run -p sassi --locked
@@ -147,6 +164,11 @@ the upstream crate exists on crates.io. Publish or dry-run in dependency order:
 `sassi-codegen`, then `sassi-macros`, then `sassi`, then `sassi-cache-redis`.
 After each upstream publish is visible in the registry index, rerun the next
 dry-run cleanly before publishing it.
+
+The repository README uses version-tagged GitHub documentation links for the
+crate landing page. Keep the release commit, crates.io publish, `v0.1.0-beta.3`
+tag, and GitHub release aligned so those links resolve for adopters reading the
+published package.
 
 Benchmark documentation lives in
 [sassi/benches/README.md](../sassi/benches/README.md). The current expectation

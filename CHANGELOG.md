@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## [0.1.0-beta.3] - 2026-05-15
+## [0.1.0-beta.3] - 2026-05-16
 
 ### Added
 
@@ -15,6 +15,23 @@
   `#[cacheable(wire_portable)]` as an opt-in postcard wire portability guard.
   The strict helpers delegate to the existing wire helpers without changing
   wire bytes, header kind, flags, or wire major.
+- Added a repository sensitive-info guard (`cargo xtask sensitive-info`) and
+  GitHub workflow for redacted scanning of public issue, pull request, and
+  review text.
+
+### Changed
+
+- Replaced the proc-macro compile-fixture gate with `cargo lihaaf` fixtures
+  under `sassi-macros/tests/lihaaf/`; the pinned Lihaaf beta is now part of
+  the release verification path.
+
+### Documentation
+
+- Expanded the user guide around portable JSON fields, key/value JSON
+  predicates, the `serde-json-bridge` feature, and `#[cacheable(wire_portable)]`
+  usage.
+- Updated release-readiness guidance with the current CI surface, sensitive
+  information guard, dependency recency check, and publish/tag checklist.
 
 ### Notes
 

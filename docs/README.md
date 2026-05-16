@@ -8,9 +8,11 @@ part of production behavior.
 Start here:
 
 - [Getting Started](getting-started.md) walks through a minimal `Cacheable`
-  model, `Punnu<T>` construction, reads, scopes, and `get_or_fetch`.
+  model, `Punnu<T>` construction, reads, scopes, `get_or_fetch`, portable JSON
+  fields, and the strict wire helper gate.
 - [Concepts](concepts.md) explains the core model: identity maps, predicates,
-  `MemQ`, refreshers, delta sync, backends, and the `Sassi` orchestrator.
+  `JSahibON`, `MemQ`, refreshers, delta sync, backends, and the `Sassi`
+  orchestrator.
 - [Query And Refresh Boundaries](query-refresh-boundaries.md) covers the most
   important design boundary: a `Punnu<T>` is a resident union identity map, not
   one hidden query result.
@@ -19,13 +21,13 @@ Start here:
   boundaries.
 - [Advanced Guide](advanced-guide.md) covers the more nuanced parts of the
   public surface: walking predicate trees (`FieldPredicate`, `LookupOp`,
-  `value_as`), `PunnuScope` chaining, `MemQ` terminals, `#[trait_impl]`
-  registry behavior, delta refresh handle operations, snapshot/restore modes,
-  and custom-backend implementer notes.
+  `value_as`), JSON predicate payloads, `PunnuScope` chaining, `MemQ`
+  terminals, `#[trait_impl]` registry behavior, delta refresh handle
+  operations, snapshot/restore modes, and custom-backend implementer notes.
 - [Dependency Footprint](dependency-footprint.md) records the transitive
   dep graph by feature combination (default native, no-default, serde,
-  runtime-tokio, runtime-wasm) so adopters can audit binary size and
-  supply-chain surface without running cargo.
+  runtime-tokio, runtime-wasm, serde-json-bridge) so adopters can audit binary
+  size and supply-chain surface without running cargo.
 - [Release Readiness](release-readiness.md) records the v0.1.0-beta.3 scope,
   known deferrals, issue categories, and verification commands.
 - [Bardownski TUI Showcase](../examples/bardownski/README.md) is the in-repo
