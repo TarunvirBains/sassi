@@ -51,6 +51,7 @@ fn document(payload: JSahibON, maybe_payload: Option<JSahibON>) -> Document {
 }
 
 #[test]
+#[cfg(feature = "serde")]
 fn postcard_roundtrips_all_value_variants_and_preserves_object_order() {
     let value = object([
         ("null", JSahibON::Null),
@@ -82,6 +83,7 @@ fn postcard_roundtrips_all_value_variants_and_preserves_object_order() {
 }
 
 #[test]
+#[cfg(feature = "serde")]
 fn postcard_variant_order_is_wire_pinned() {
     assert_eq!(postcard::to_allocvec(&JSahibON::Null).unwrap()[0], 0);
     assert_eq!(
@@ -91,12 +93,16 @@ fn postcard_variant_order_is_wire_pinned() {
 }
 
 #[test]
-fn finite_float_rejects_non_finite_constructors_and_deserialization() {
+fn finite_float_rejects_non_finite_constructors() {
     assert!(JFiniteF64::try_new(f64::NAN).is_err());
     assert!(JFiniteF64::try_new(f64::INFINITY).is_err());
     assert!(JFiniteF64::try_new(f64::NEG_INFINITY).is_err());
     assert!(JSahibON::try_f64(f64::NAN).is_err());
+}
 
+#[test]
+#[cfg(feature = "serde")]
+fn finite_float_rejects_non_finite_deserialization() {
     let bytes = postcard::to_allocvec(&f64::INFINITY).unwrap();
     let decoded = postcard::from_bytes::<JFiniteF64>(&bytes);
     assert!(decoded.is_err());
