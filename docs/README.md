@@ -26,7 +26,7 @@ Start here:
   dep graph by feature combination (default native, no-default, serde,
   runtime-tokio, runtime-wasm) so adopters can audit binary size and
   supply-chain surface without running cargo.
-- [Release Readiness](release-readiness.md) records the v0.1.0-beta.2 scope,
+- [Release Readiness](release-readiness.md) records the v0.1.0-beta.3 scope,
   known deferrals, issue categories, and verification commands.
 - [Bardownski TUI Showcase](../examples/bardownski/README.md) is the in-repo
   native example for predicate algebra and cross-type trait queries over

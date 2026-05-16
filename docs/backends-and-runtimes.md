@@ -44,6 +44,32 @@ within a namespace and reused only when the new Rust type can read the same wire
 payloads for the same ids. Reusing a name for incompatible shapes intentionally
 points two types at the same L2 keys.
 
+Backend ids are the cached type's canonical identities. Do not use the Sassi
+wire or L2 keyspace as the place to make public URL identifiers opaque. If an
+application exposes display IDs, keep that deterministic reversible encoding at
+the API, routing, or projection boundary; the cached value should still carry
+the identity that the pool uses for equality, ordering, invalidation, and
+refresh unless the whole cached type is a presentation projection.
+
+The postcard wire has an optional compile-time portability guard for adopters
+that want to claim a cache entry is portable over Sassi's existing wire. Add
+`#[cacheable(wire_portable)]` to a serde-derived entry and call
+`sassi::wire::to_vec_portable` / `from_slice_portable`. These helpers produce
+and read the same bytes as `to_vec` / `from_slice`; they only require the entry
+to implement `WirePortable`.
+
+Backend and snapshot APIs keep their current loose serde bounds in this
+release. `MemoryBackend`, `FileBackend`, `Punnu::insert_serialized`, entries
+export/restore, and whole-pool snapshot/restore do not require
+`WirePortable`. A future release may ratchet backend bounds, but this release
+only adds the strict helper path.
+
+Rejected JSON-like fields should be projected to portable cache fields. Use
+`JSahibON` when the cache needs raw JSON and local JSON predicates, a typed
+schema value when it only needs known content, or an audited newtype with a
+manual `SassiWire` impl when the application accepts responsibility for the
+serde behavior.
+
 L1-only is a valid deployment. For many services, Sassi is valuable as a typed
 local resident cache even when all durable truth stays in a database or API.
 
@@ -161,8 +187,8 @@ script effects replication.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-beta.2"
-sassi-cache-redis = "0.1.0-beta.2"
+sassi = "0.1.0-beta.3"
+sassi-cache-redis = "0.1.0-beta.3"
 ```
 
 ## Shared L2 Upgrade From Beta.1
@@ -360,7 +386,7 @@ For `wasm32-unknown-unknown`, enable `runtime-wasm`:
 
 ```toml
 sassi = {
-    version = "0.1.0-beta.2",
+    version = "0.1.0-beta.3",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }

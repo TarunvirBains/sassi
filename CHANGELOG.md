@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+## [0.1.0-beta.3] - 2026-05-15
+
+### Added
+
+- Added `JSahibON`, Sassi's portable JSON cache value, with finite `f64`
+  storage, postcard-compatible serde, order-insensitive object equality,
+  optional `serde_json` bridge support behind `serde-json-bridge`, and local
+  JSON field predicates.
+- Added `sassi::wire::SassiWire`, `WirePortable`,
+  `wire::to_vec_portable`, `wire::from_slice_portable`, and
+  `#[cacheable(wire_portable)]` as an opt-in postcard wire portability guard.
+  The strict helpers delegate to the existing wire helpers without changing
+  wire bytes, header kind, flags, or wire major.
+
+### Notes
+
+- The wire portability guard is an allowlist and diagnostic aid, not a proof of
+  serde behavior. Manual marker impls can lie, and existing backend/snapshot
+  APIs keep their loose serde bounds.
+
 ## [0.1.0-beta.2] - 2026-05-08
 
 ### Added

@@ -1,0 +1,32 @@
+error[E0277]: the trait bound `u32: JScalar` is not satisfied
+   --> $DIR/jsahibon_scalar_u32.rs:11:56
+    |
+ 11 |     let _ = Event::fields().payload.jsahibon().value::<u32>();
+    |                                                -----   ^^^ the trait `JScalar` is not implemented for `u32`
+    |                                                |
+    |                                                required by a bound introduced by this call
+    |
+help: the following other types implement trait `JScalar`
+   --> sassi/src/predicate/jsahibon.rs:385:1
+    |
+385 | impl JScalar for i64 {
+    | ^^^^^^^^^^^^^^^^^^^^ `i64`
+...
+394 | impl JScalar for u64 {
+    | ^^^^^^^^^^^^^^^^^^^^ `u64`
+...
+403 | impl JScalar for f64 {
+    | ^^^^^^^^^^^^^^^^^^^^ `f64`
+note: required by a bound in `JSahibONFieldRef::<T>::value`
+   --> sassi/src/predicate/jsahibon.rs:684:29
+    |
+684 |             pub fn value<V: JScalar>(&self) -> JSahibONValueRef<T, V> {
+    |                             ^^^^^^^ required by this bound in `JSahibONFieldRef::<T>::value`
+...
+731 | delegate_json_ref_methods!(JSahibONFieldRef);
+    | -------------------------------------------- in this macro invocation
+    = note: this error originates in the macro `delegate_json_ref_methods` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.

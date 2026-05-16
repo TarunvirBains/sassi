@@ -4,8 +4,8 @@
 //! over `T: Cacheable` can call them without knowing the concrete type.
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Field, Fields};
+use quote::{format_ident, quote, quote_spanned};
+use syn::{Data, DeriveInput, Field, Fields, spanned::Spanned};
 
 use crate::derive_options::{CacheableDeriveOptions, CacheableFieldsMode};
 
@@ -148,6 +148,45 @@ pub fn generate_delta_sync_cacheable_impl(
                 ::core::clone::Clone::clone(&self.#watermark_ident)
             }
         }
+    })
+}
+
+/// Emit `impl WirePortable for T` and compile-time component assertions when
+/// the derive input requests `#[cacheable(wire_portable)]`.
+pub fn generate_wire_portable_impl(
+    input: &DeriveInput,
+    options: &CacheableDeriveOptions,
+    sassi_path: &TokenStream,
+) -> Result<TokenStream, syn::Error> {
+    let Some(wire_portable) = &options.wire_portable else {
+        return Ok(TokenStream::new());
+    };
+
+    let struct_name = &input.ident;
+    let named = named_fields(input, struct_name)?;
+    let field_asserts = named.iter().map(|field| {
+        let ty = &field.ty;
+        quote_spanned! {ty.span()=>
+            __sassi_assert_wire_component::<#ty>();
+        }
+    });
+    let id_assert = quote_spanned! {wire_portable.span=>
+        __sassi_assert_wire_component::<<#struct_name as #sassi_path::Cacheable>::Id>();
+    };
+
+    Ok(quote! {
+        const _: () = {
+            const fn __sassi_assert_wire_component<T>()
+            where
+                T: #sassi_path::wire::SassiWire,
+            {
+            }
+
+            #id_assert
+            #(#field_asserts)*
+        };
+
+        impl #sassi_path::wire::WirePortable for #struct_name {}
     })
 }
 

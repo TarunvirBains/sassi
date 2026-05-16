@@ -1,7 +1,7 @@
 error: Cacheable: field-level #[cacheable(...)] options are not supported; place cacheable options on the struct
- --> $DIR/cacheable_field_level_watermark.rs:8:5
+ --> $DIR/wire_portable_field_level.rs:9:5
   |
-8 |     #[cacheable(watermark_field = "updated_at")]
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+9 |     #[cacheable(wire_portable)]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error: aborting due to 1 previous error

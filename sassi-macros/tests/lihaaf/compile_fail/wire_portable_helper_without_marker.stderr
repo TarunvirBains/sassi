@@ -1,0 +1,25 @@
+error[E0277]: the trait bound `LooseOnly: WirePortable` is not satisfied
+   --> $DIR/wire_portable_helper_without_marker.rs:17:42
+    |
+ 17 |     let _ = sassi::wire::to_vec_portable(&value);
+    |             ---------------------------- ^^^^^^ unsatisfied trait bound
+    |             |
+    |             required by a bound introduced by this call
+    |
+help: the trait `WirePortable` is not implemented for `LooseOnly`
+   --> $DIR/wire_portable_helper_without_marker.rs:7:1
+    |
+  7 | struct LooseOnly {
+    | ^^^^^^^^^^^^^^^^
+note: required by a bound in `to_vec_portable`
+   --> sassi/src/wire.rs:347:8
+    |
+345 | pub fn to_vec_portable<T>(payload: &T) -> Result<Vec<u8>, WireFormatError>
+    |        --------------- required by a bound in this function
+346 | where
+347 |     T: WirePortable,
+    |        ^^^^^^^^^^^^ required by this bound in `to_vec_portable`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.

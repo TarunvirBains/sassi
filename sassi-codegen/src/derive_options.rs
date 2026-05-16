@@ -1,7 +1,7 @@
 //! Parsing support for `#[derive(Cacheable)]` helper attributes.
 
 use proc_macro2::{Span, TokenStream};
-use syn::{Data, DeriveInput, Fields, LitStr, spanned::Spanned};
+use syn::{Data, DeriveInput, Fields, LitStr, Token, spanned::Spanned};
 
 /// Parsed options from `#[cacheable(...)]` helper attributes.
 #[derive(Debug, Default)]
@@ -10,6 +10,8 @@ pub struct CacheableDeriveOptions {
     pub watermark_field: Option<WatermarkField>,
     /// Optional stable L2 backend keyspace type name.
     pub type_name: Option<CacheTypeName>,
+    /// Optional postcard wire portability guard.
+    pub wire_portable: Option<WirePortableOption>,
     /// Companion field surface used for `Cacheable::Fields`.
     pub fields: CacheableFieldsMode,
 }
@@ -52,6 +54,13 @@ pub struct CacheTypeName {
     pub span: Span,
 }
 
+/// Source span for `#[cacheable(wire_portable)]`.
+#[derive(Debug)]
+pub struct WirePortableOption {
+    /// Span of the bare `wire_portable` option.
+    pub span: Span,
+}
+
 impl WatermarkField {
     /// Construct a watermark-field option from a field name and source span.
     ///
@@ -77,6 +86,13 @@ impl CacheTypeName {
             value: value.into(),
             span,
         }
+    }
+}
+
+impl WirePortableOption {
+    /// Construct a wire-portable option from its source span.
+    pub fn new(span: Span) -> Self {
+        Self { span }
     }
 }
 
@@ -149,6 +165,21 @@ pub fn parse_cacheable_derive_options(
                 return Ok(());
             }
 
+            if meta.path.is_ident("wire_portable") {
+                if options.wire_portable.is_some() {
+                    return Err(meta.error("Cacheable: duplicate `wire_portable` option"));
+                }
+                if meta.input.peek(Token![=]) {
+                    return Err(meta.error("Cacheable: `wire_portable` does not take a value"));
+                }
+                if meta.input.peek(syn::token::Paren) {
+                    return Err(meta.error("Cacheable: `wire_portable` does not take arguments"));
+                }
+
+                options.wire_portable = Some(WirePortableOption::new(meta.path.span()));
+                return Ok(());
+            }
+
             Err(meta.error("Cacheable: unsupported #[cacheable(...)] option"))
         })?;
     }
@@ -182,7 +213,7 @@ fn reject_field_level_cacheable_attrs(input: &DeriveInput) -> Result<(), syn::Er
                 return Err(syn::Error::new_spanned(
                     attr,
                     "Cacheable: field-level #[cacheable(...)] options are not supported; \
-                     place `watermark_field` on the struct",
+                     place cacheable options on the struct",
                 ));
             }
         }

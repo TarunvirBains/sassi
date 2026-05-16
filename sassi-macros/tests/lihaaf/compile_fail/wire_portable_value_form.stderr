@@ -1,0 +1,7 @@
+error: Cacheable: `wire_portable` does not take a value
+ --> $DIR/wire_portable_value_form.rs:6:57
+  |
+6 | #[cacheable(type_name = "lihaaf.WirePortableValueForm", wire_portable = true)]
+  |                                                         ^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

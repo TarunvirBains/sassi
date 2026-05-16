@@ -1,7 +1,7 @@
 //! [`PunnuExecutor`] — internal abstraction over runtime spawn / sleep
 //! / now primitives.
 //!
-//! This is crate-internal in v0.1.0-beta.2. The public runtime surface stays
+//! This is crate-internal in v0.1.0-beta.3. The public runtime surface stays
 //! focused on feature selection (`runtime-tokio` or `runtime-wasm`) while the
 //! crate keeps scheduling and clock reads behind one internal trait.
 //!

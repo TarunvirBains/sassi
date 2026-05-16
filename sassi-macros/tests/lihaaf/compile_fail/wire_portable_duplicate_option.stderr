@@ -1,0 +1,7 @@
+error: Cacheable: duplicate `wire_portable` option
+ --> $DIR/wire_portable_duplicate_option.rs:6:72
+  |
+6 | #[cacheable(type_name = "lihaaf.DuplicateWirePortable", wire_portable, wire_portable)]
+  |                                                                        ^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

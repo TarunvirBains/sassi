@@ -1,11 +1,11 @@
 # Release Readiness
 
-Sassi v0.1.0-beta.2 is meant to be usable by capable Rust adopters who are
+Sassi v0.1.0-beta.3 is meant to be usable by capable Rust adopters who are
 willing to work with an early but candidate API surface. The goal is not to
 claim that every future integration is done; it is to make the current
 contracts, tradeoffs, and verification expectations visible before publish.
 
-## v0.1.0-beta.2 Scope
+## v0.1.0-beta.3 Scope
 
 In scope for the beta:
 
@@ -49,6 +49,15 @@ In scope for the beta:
 - `serde_json` is no longer part of Sassi's `serde` feature; Sassi proper's
   generic backend storage-key helper uses postcard. The Redis companion crate
   retains JSON for Redis id-to-key encoding and pub/sub invalidation messages.
+- `JSahibON`, the Sassi-owned portable JSON cache value. It supports
+  postcard-compatible serde, finite-only floats, order-insensitive object
+  equality, and local JSON predicates without depending on `serde_json::Value`
+  as the cache representation.
+- `#[cacheable(wire_portable)]`, `SassiWire`, `WirePortable`, and
+  `wire::to_vec_portable` / `wire::from_slice_portable`, an additive opt-in
+  portability guard over the existing postcard wire. The guard does not change
+  wire bytes, kind, flags, header validation, backend bounds, or snapshot
+  bounds.
 - `Sassi` orchestration for typed pools and cross-type trait queries.
 - The dependency-light
   [Bardownski TUI showcase](../examples/bardownski/README.md) in this
@@ -59,13 +68,19 @@ In scope for the beta:
 
 ## Out Of Scope For This Beta
 
-These are intentionally not release claims for v0.1.0-beta.2:
+These are intentionally not release claims for v0.1.0-beta.3:
 
 - Full downstream data-layer integration examples.
 - The Bardownski Dioxus/full-stack implementation.
 - A custom public executor API.
 - Automatic tenant, auth, or row-level-security inference from cached values.
 - A serde-encoded predicate wire protocol.
+- A proof that arbitrary serde implementations are portable. `SassiWire`
+  absence rejects known bad shapes, but manual marker impls can lie and the
+  derive cannot inspect foreign serde bodies for `deserialize_any`.
+- Backend or snapshot ratcheting to require `WirePortable`. Existing backend,
+  insert-serialized, export/restore, and snapshot APIs remain on their current
+  loose serde bounds.
 - Refresh-handle state preservation across snapshot boundaries.
   `Punnu::snapshot_postcard` (both modes) does not serialize active refresh
   handles, subscription watermarks/recovery sets, single-flight work, event
@@ -76,8 +91,8 @@ These are intentionally not release claims for v0.1.0-beta.2:
   are L1-only; a future backend-seeding restore, if needed, would be a
   separate async API.
 - Certified framework adapters.
-- Automatic cross-process coherence for Redis `put`/`insert` writes without explicit
-  invalidation publication.
+- Automatic cross-process coherence for Redis `put`/`insert` writes without
+  explicit invalidation publication.
 
 Those deferrals are not dismissals. They are places where Sassi needs real
 integration pressure before it should freeze an abstraction.

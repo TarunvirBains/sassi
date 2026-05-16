@@ -33,6 +33,7 @@ default = ["serde", "runtime-tokio"]
 # `cross_version_compat` integration tests still use `serde_json` to
 # fabricate beta.1 byte streams; that is a dev-only dependency.
 serde = ["dep:serde", "dep:postcard"]
+serde-json-bridge = ["serde", "dep:serde_json"]
 runtime-tokio = []
 runtime-wasm = ["dep:wasm-bindgen-futures", "dep:gloo-timers"]
 watermark-time = ["dep:time"]
@@ -46,6 +47,7 @@ watermark-chrono = ["dep:chrono"]
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 postcard = { workspace = true, optional = true }
 dashmap = { workspace = true }
 arc-swap = { workspace = true }
@@ -54,7 +56,7 @@ fastrand = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.2" }
+sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.3" }
 inventory = { workspace = true }
 # `web-time` is a drop-in for `std::time::Instant` that works on
 # `wasm32-unknown-unknown`. Used only on wasm — native builds keep
@@ -83,10 +85,9 @@ tempfile = "3"
 # header parser ignores body bytes for incompatible majors and to
 # fabricate type-name mismatches with valid postcard bodies.
 postcard = { workspace = true }
-# `serde_json` is dev-only as of this version. The
-# `cross_version_compat` integration tests fabricate beta.1 JSON
-# envelopes to verify the binary wire decoder rejects them. No
-# production code path in sassi proper calls `serde_json`.
+# Tests construct beta.1 JSON envelopes and exercise the optional
+# `serde-json-bridge` feature. The default production feature set still
+# avoids serde_json; adopters opt in explicitly when they need the bridge.
 serde_json = { workspace = true }
 
 # Native-only dev deps. `proptest` and `criterion` pull transitive

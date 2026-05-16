@@ -1,0 +1,7 @@
+error: Cacheable: `wire_portable` does not take arguments
+ --> $DIR/wire_portable_list_form.rs:6:56
+  |
+6 | #[cacheable(type_name = "lihaaf.WirePortableListForm", wire_portable())]
+  |                                                        ^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

@@ -20,7 +20,7 @@ proc-macro2 = { workspace = true }
 proc-macro-crate = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
-sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-beta.2" }
+sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-beta.3" }
 
 [dev-dependencies]
 # `sassi` as a dev-dep forms a cycle (`sassi` regularly depends on
@@ -62,6 +62,6 @@ sassi = { path = "../sassi" }
 [package.metadata.lihaaf]
 dylib_crate = "sassi"
 extern_crates = ["sassi", "sassi-macros"]
-features = []
+features = ["serde-json-bridge"]
 edition = "2024"
 fixture_dirs = ["tests/lihaaf/compile_fail", "tests/lihaaf/compile_pass"]

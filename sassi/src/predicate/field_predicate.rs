@@ -24,16 +24,19 @@ use std::sync::Arc;
 
 /// Lookup operator marker. Used for diagnostics + by SQL-emitting
 /// downstream consumers (e.g., djogi's `Q<T>` walker) to choose the
-/// right SQL construction. Also tells walkers what the
-/// [`FieldPredicate::value`] payload contains:
+/// right SQL construction. Also tells walkers what type to request with
+/// [`FieldPredicate::value_as`]. Values are stored internally behind
+/// `Arc<dyn Any + Send + Sync>`, but callers downcast to the payload type
+/// shown here:
 ///
-/// | Op | `value` payload |
+/// | Op | `value_as` payload |
 /// |---|---|
-/// | `Eq`, `Neq`, `Gt`, `Gte`, `Lt`, `Lte` | `Arc<V>` |
-/// | `In`, `NotIn` | `Arc<Vec<V>>` |
-/// | `Between` | `Arc<(V, V)>` |
-/// | `IsNull`, `IsNotNull` | `Arc<()>` (no operand) |
-/// | `Contains`, `IContains`, `StartsWith`, `IStartsWith`, `EndsWith`, `IEndsWith`, `IExact` | `Arc<String>` |
+/// | `Eq`, `Neq`, `Gt`, `Gte`, `Lt`, `Lte` | `V` |
+/// | `In`, `NotIn` | `Vec<V>` |
+/// | `Between` | `(V, V)` |
+/// | `IsNull`, `IsNotNull` | `()` (no operand) |
+/// | `Contains`, `IContains`, `StartsWith`, `IStartsWith`, `EndsWith`, `IEndsWith`, `IExact` | `String` |
+/// | `Json` | `JSahibONPredicateBody` |
 ///
 /// Marked `#[non_exhaustive]` so adding new ops in a future release does not
 /// break downstream matchers.
@@ -76,6 +79,9 @@ pub enum LookupOp {
     IEndsWith,
     /// `field == value` (case-insensitive ASCII)
     IExact,
+    /// Portable JSON predicate. Operand value layout:
+    /// [`JSahibONPredicateBody`](super::jsahibon::JSahibONPredicateBody).
+    Json,
 }
 
 /// Single-field predicate. Carries the field name, operator marker, the

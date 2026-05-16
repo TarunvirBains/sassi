@@ -72,6 +72,12 @@ name with `#[cacheable(type_name = "myapp.User")]`. Treat that name as part of
 the backend schema: it should be unique inside a namespace and reused only for
 wire-compatible payloads keyed by the same ids.
 
+Keep `Cacheable::Id` canonical. URL-opaque display identifiers such as
+`veh_7kJ9mQ3xN2p` belong at API, routing, or view-model edges unless the cached
+type itself is explicitly a presentation projection. The cache wire stores the
+application identity it evaluates and invalidates by; it does not hide
+enumeration risk for public URLs.
+
 `BasicPredicate<T>` is the shared predicate algebra. It is walkable and
 data-layer-projectable, so a fetcher can understand the same constraints that
 Sassi can replay in memory. It is not a serde-serializable wire format in
@@ -119,7 +125,7 @@ here.
 
 ## Status
 
-Sassi's current public beta is `0.1.0-beta.2`. The core API,
+Sassi's current public beta is `0.1.0-beta.3`. The core API,
 Redis companion, Bardownski TUI example, benchmark harness, and adopter docs are
 in place, with the caution that beta APIs can still move when integration work
 finds correctness or ergonomics gaps.
@@ -153,22 +159,22 @@ are not part of the ordinary application dependency story.
 
 ## Documentation
 
-- [Getting Started](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/getting-started.md)
-- [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/concepts.md)
-- [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/query-refresh-boundaries.md)
-- [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/backends-and-runtimes.md)
-- [Advanced Guide](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/advanced-guide.md)
+- [Getting Started](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/getting-started.md)
+- [Concepts](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/concepts.md)
+- [Query And Refresh Boundaries](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/query-refresh-boundaries.md)
+- [Backends And Runtimes](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/backends-and-runtimes.md)
+- [Advanced Guide](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/advanced-guide.md)
   — predicate walk surface, scope chaining, `MemQ` terminals, `#[trait_impl]`
   registry, delta refresh handle operations, snapshot/restore modes, and
   custom-backend implementer notes.
-- [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/docs/release-readiness.md)
-- [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/examples/bardownski/README.md)
-- [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/sassi/benches/README.md)
-- [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/CHANGELOG.md)
+- [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/release-readiness.md)
+- [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/examples/bardownski/README.md)
+- [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/sassi/benches/README.md)
+- [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/CHANGELOG.md)
 
 ## License
 
 Dual-licensed under
-[MIT](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/LICENSE-MIT)
+[MIT](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/LICENSE-MIT)
 or
-[Apache-2.0](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.2/LICENSE-APACHE).
+[Apache-2.0](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/LICENSE-APACHE).

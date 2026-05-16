@@ -33,9 +33,11 @@ mod cacheable_impl;
 mod derive_options;
 mod fields_struct;
 
-pub use cacheable_impl::{generate_cacheable_impl, generate_delta_sync_cacheable_impl};
+pub use cacheable_impl::{
+    generate_cacheable_impl, generate_delta_sync_cacheable_impl, generate_wire_portable_impl,
+};
 pub use derive_options::{
-    CacheTypeName, CacheableDeriveOptions, CacheableFieldsMode, WatermarkField,
+    CacheTypeName, CacheableDeriveOptions, CacheableFieldsMode, WatermarkField, WirePortableOption,
     parse_cacheable_derive_options,
 };
 pub use fields_struct::generate_fields_struct;

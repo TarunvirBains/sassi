@@ -15,9 +15,15 @@
 pub mod basic;
 pub mod field_ext;
 pub mod field_predicate;
+pub mod jsahibon;
 pub mod memq;
 
 pub use basic::{BasicPredicate, IntoBasicPredicate};
 pub use field_ext::PresentField;
 pub use field_predicate::{FieldPredicate, LookupOp};
+pub use jsahibon::{
+    JCompareOp, JInPolarity, JOrderedScalar, JPath, JSahibONFieldRef, JSahibONOptionFieldRef,
+    JSahibONPathRef, JSahibONPredicateBody, JSahibONValueRef, JScalar, JScalarKind, JScalarValue,
+    JTypeKind, evaluate_jsahibon_predicate,
+};
 pub use memq::MemQ;

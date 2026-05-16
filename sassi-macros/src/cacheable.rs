@@ -41,10 +41,17 @@ pub fn derive_cacheable(input: TokenStream) -> TokenStream {
             Err(e) => return e.to_compile_error().into(),
         };
 
+    let wire_portable_impl =
+        match sassi_codegen::generate_wire_portable_impl(&parsed, &options, &sassi_path) {
+            Ok(ts) => ts,
+            Err(e) => return e.to_compile_error().into(),
+        };
+
     let combined: TokenStream2 = quote! {
         #fields_struct
         #cacheable_impl
         #delta_sync_impl
+        #wire_portable_impl
     };
     combined.into()
 }

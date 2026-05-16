@@ -28,6 +28,13 @@ The `id` must be stable for the lifetime of the value. Mutating a cached value
 so that its identity changes is a logic bug: the pool stores one canonical
 value per `T::Id`.
 
+`T::Id` should be the canonical cache identity. If an external API needs
+opaque, enumeration-resistant display tokens, encode them at the route/API/view
+edge or cache a separate presentation type whose identity is intentionally that
+token. Sassi does not turn canonical ids into Sqids, FPE tokens, or other
+display IDs on the wire; it stores the identity used for lookup, invalidation,
+delta refresh, and predicate evaluation.
+
 For delta sync, the derive can also mark a monotonic cursor:
 
 ```rust
@@ -101,6 +108,52 @@ in-memory replay.
 It is not a serde wire format in v0.1.0. Persisting or transmitting predicate
 values across processes needs an application or downstream crate to define a
 typed codec.
+
+## Portable JSON With JSahibON
+
+`JSahibON` is Sassi's owned JSON value for cache entries that need raw JSON
+documents and local JSON predicates. It is not a `serde_json::Value` wrapper:
+it is a closed enum with `null`, `bool`, `i64`, `u64`, finite `f64`, `String`,
+arrays, and insertion-ordered objects. Object equality ignores key insertion
+order, but iteration, debug output, serde, and postcard wire round-trips keep
+the original order.
+
+Use `JSahibON` at the cache boundary when the frontend or local Punnu cache
+needs unknown fields or raw JSON queries. Database-owned wrappers and
+`serde_json::Value` are not portable Sassi wire/cache JSON types by default.
+Project those values into `JSahibON`, into a typed schema value, or into an
+audited newtype with an explicit wire marker.
+
+JSON predicates start from a field accessor:
+
+```rust
+let fields = Event::fields();
+let adults = fields.payload.jsahibon().path("profile.age").value::<u64>().gte(18);
+let has_header = fields.payload.jsahibon().path("headers").key("content-type").exists();
+```
+
+`path("a.b")` is a convenience for plain identifier segments. Use `key(...)`
+or `path_segments(...)` for literal keys that are not plain identifiers, such as
+keys containing dots, hyphens, empty strings, non-ASCII text, or an initial
+digit. `Option<JSahibON>` keeps `None` distinct from JSON `null`: `None` is
+missing; `Some(JSahibON::Null)` exists and is JSON null.
+
+## Wire Portability Guard
+
+The existing `sassi::wire::to_vec` and `from_slice` helpers remain the loose
+serde-backed postcard wire APIs. For entries that want an opt-in portability
+guard, derive with `#[cacheable(wire_portable)]` and use
+`sassi::wire::to_vec_portable` / `from_slice_portable`.
+
+The derive checks `<Self as Cacheable>::Id: SassiWire` and every named field
+type: `SassiWire`, then marks the entry as `WirePortable`. The strict helpers
+delegate to the existing wire helpers, so bytes, header kind, flags, wire major,
+and validation behavior do not change.
+
+This is a guardrail, not a proof. Sassi's `SassiWire` impls are an explicit
+allowlist for known portable components, and manual impls are assertions by the
+application. The derive cannot inspect foreign serde bodies or prove that a
+type avoids `deserialize_any`.
 
 ## MemQ<T>
 

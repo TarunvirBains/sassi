@@ -21,6 +21,7 @@
 use crate::cacheable::Cacheable;
 use crate::error::WireFormatError;
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Current Sassi binary wire-format major version.
 pub const WIRE_FORMAT_MAJOR: u16 = 1;
@@ -35,6 +36,114 @@ pub(crate) const KIND_PUNNU_ENTRIES_WITH_HINTS: u8 = 0x04;
 /// future kinds cannot be silently misread.
 const FIRST_RESERVED_KIND: u8 = 0x05;
 const HEADER_FIXED_LEN: usize = 14;
+
+/// Conservative marker for component types accepted in Sassi's postcard wire.
+///
+/// This trait is an allowlist, not a proof about serde internals. Sassi
+/// implements it for known postcard-friendly standard types and Sassi-owned
+/// portable values. Application crates may add manual impls for audited
+/// newtypes, but that manual impl is an assertion by the application.
+pub trait SassiWire: Serialize + DeserializeOwned + Send + Sync + 'static {}
+
+/// Marker for complete [`Cacheable`] entry types that opt into the strict wire
+/// portability guard.
+///
+/// `WirePortable` keeps the existing Sassi wire bytes unchanged; it only
+/// tightens compile-time admissibility for callers that choose
+/// [`to_vec_portable`] and [`from_slice_portable`].
+pub trait WirePortable: Cacheable + Serialize + DeserializeOwned + Send + Sync + 'static
+where
+    <Self as Cacheable>::Id: SassiWire,
+{
+}
+
+macro_rules! impl_sassi_wire_for_scalars {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl SassiWire for $ty {}
+        )*
+    };
+}
+
+impl_sassi_wire_for_scalars!(
+    (),
+    bool,
+    char,
+    i8,
+    i16,
+    i32,
+    i64,
+    i128,
+    u8,
+    u16,
+    u32,
+    u64,
+    u128,
+    f32,
+    f64,
+    String,
+    crate::JFiniteF64,
+    crate::JObject,
+    crate::JSahibON,
+);
+
+impl<T> SassiWire for Option<T> where T: SassiWire {}
+
+impl<T, E> SassiWire for Result<T, E>
+where
+    T: SassiWire,
+    E: SassiWire,
+{
+}
+
+impl<T> SassiWire for Vec<T> where T: SassiWire {}
+
+impl<T> SassiWire for Box<T> where T: SassiWire {}
+
+macro_rules! impl_sassi_wire_for_array {
+    ($($len:expr),* $(,)?) => {
+        $(
+            impl<T> SassiWire for [T; $len] where T: SassiWire {}
+        )*
+    };
+}
+
+impl_sassi_wire_for_array!(
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31, 32,
+);
+
+impl<K, V> SassiWire for BTreeMap<K, V>
+where
+    K: SassiWire + Ord,
+    V: SassiWire,
+{
+}
+
+impl<T> SassiWire for BTreeSet<T> where T: SassiWire + Ord {}
+
+macro_rules! impl_sassi_wire_for_tuple {
+    ($($name:ident),+ $(,)?) => {
+        impl<$($name),+> SassiWire for ($($name,)+)
+        where
+            $($name: SassiWire,)+
+        {
+        }
+    };
+}
+
+impl_sassi_wire_for_tuple!(A);
+impl_sassi_wire_for_tuple!(A, B);
+impl_sassi_wire_for_tuple!(A, B, C);
+impl_sassi_wire_for_tuple!(A, B, C, D);
+impl_sassi_wire_for_tuple!(A, B, C, D, E);
+impl_sassi_wire_for_tuple!(A, B, C, D, E, F);
+impl_sassi_wire_for_tuple!(A, B, C, D, E, F, G);
+impl_sassi_wire_for_tuple!(A, B, C, D, E, F, G, H);
+impl_sassi_wire_for_tuple!(A, B, C, D, E, F, G, H, I);
+impl_sassi_wire_for_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_sassi_wire_for_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_sassi_wire_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WireKind {
@@ -224,6 +333,33 @@ where
 {
     let body = decode_header::<T>(bytes, WireKind::Value)?;
     decode_postcard_exact(body)
+}
+
+/// Serialize a wire-portable cacheable payload with the existing Sassi wire.
+///
+/// This is byte-identical to [`to_vec`]; the only difference is the stricter
+/// [`WirePortable`] bound, which transitively requires
+/// `<T as Cacheable>::Id: SassiWire` (and, via the
+/// `#[cacheable(wire_portable)]` derive, that every named field type also
+/// implements [`SassiWire`]).
+pub fn to_vec_portable<T>(payload: &T) -> Result<Vec<u8>, WireFormatError>
+where
+    T: WirePortable,
+    <T as Cacheable>::Id: SassiWire,
+{
+    to_vec(payload)
+}
+
+/// Deserialize a wire-portable cacheable payload with the existing Sassi wire.
+///
+/// This validates and decodes bytes exactly like [`from_slice`]; the only
+/// difference is the stricter [`WirePortable`] bound.
+pub fn from_slice_portable<T>(bytes: &[u8]) -> Result<T, WireFormatError>
+where
+    T: WirePortable,
+    <T as Cacheable>::Id: SassiWire,
+{
+    from_slice(bytes)
 }
 
 /// Encode a Punnu entries snapshot body.

@@ -62,6 +62,7 @@ pub mod backend;
 pub mod cacheable;
 pub mod error;
 pub(crate) mod executor;
+pub mod jsahibon;
 pub mod predicate;
 pub mod punnu;
 pub mod sassi;
@@ -79,8 +80,12 @@ pub use cacheable::{Cacheable, Field};
 pub use error::{BackendError, FetchError, InsertError};
 #[cfg(feature = "serde")]
 pub use error::{PunnuSnapshotError, WireFormatError};
+pub use jsahibon::{JFiniteF64, JObject, JSahibON, JSahibONError};
 pub use predicate::{
-    BasicPredicate, FieldPredicate, IntoBasicPredicate, LookupOp, MemQ, PresentField,
+    BasicPredicate, FieldPredicate, IntoBasicPredicate, JCompareOp, JInPolarity, JOrderedScalar,
+    JPath, JSahibONFieldRef, JSahibONOptionFieldRef, JSahibONPathRef, JSahibONPredicateBody,
+    JSahibONValueRef, JScalar, JScalarKind, JScalarValue, JTypeKind, LookupOp, MemQ, PresentField,
+    evaluate_jsahibon_predicate,
 };
 pub use punnu::{
     BackendFailureMode, CacheTier, DeltaApplyStats, DeltaPunnuFetcher, DeltaQuery,
@@ -109,6 +114,10 @@ pub use sassi_macros::{Cacheable, trait_impl};
 pub mod __private {
     pub use crate::sassi::trait_registry::TraitImplEntry;
     pub use inventory;
+    #[cfg(feature = "serde")]
+    pub use serde;
+    #[cfg(feature = "serde-json-bridge")]
+    pub use serde_json;
 }
 
 /// The crate version, surfaced from `CARGO_PKG_VERSION`. Useful for
