@@ -1,0 +1,179 @@
+name: Sensitive Info Guard
+
+# Scans newly opened/edited public text (issues, issue comments, PR bodies,
+# PR review comments) for credential-like content. Findings are reported
+# with redacted rule names only; the scanner never echoes the matched
+# value, surrounding text, or the event payload. The same workflow can
+# fail and post a polite comment on the issue/PR.
+#
+# Why these triggers:
+#   * `issues` (opened, edited)                  - the title/body of a
+#     newly-opened or edited issue.
+#   * `issue_comment` (created, edited)          - top-level comments on
+#     issues and on PR conversations (GitHub routes those through the
+#     `issue_comment` event).
+#   * `pull_request_target` (opened, edited, reopened)
+#                                                - PR title/body content,
+#                                                  scanned with trusted base
+#                                                  branch code.
+#   * `pull_request_review_comment` (created, edited)
+#                                                - comments left on a
+#     specific PR code line via the review UI.
+#
+# GitHub does not offer a true "pre-publish" hook on issue text, so this
+# workflow runs immediately after the content lands. The intent is to (a)
+# flag content for the submitter to redact, and (b) leave a public,
+# auditable trail that the bot saw the content, using only redacted
+# metadata, never the raw event body.
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+  pull_request_target:
+    types: [opened, edited, reopened]
+  pull_request_review_comment:
+    types: [created, edited]
+
+# Least-privilege permissions: we read repo content (to build xtask) and
+# write issue/PR comments (to leave the redacted advisory). Nothing else.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+# Disable colored output so the captured xtask stdout is plain text.
+env:
+  CARGO_TERM_COLOR: never
+
+# Cancel earlier runs on the same issue/PR if a user edits in quick
+# succession; only the latest text matters.
+concurrency:
+  group: sensitive-info-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Scan event text
+    runs-on: ubuntu-latest
+
+    # Skip our own bot comments to avoid an infinite scan loop: when the
+    # workflow posts an advisory comment below, that comment fires another
+    # `issue_comment` event. We compare the sender login to the well-known
+    # `github-actions[bot]` identity used by `secrets.GITHUB_TOKEN`.
+    if: github.event.sender.login != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Always run the scanner from trusted repository code. This is
+          # especially important for PR text events, where the submitted
+          # branch may be from a fork and must not control the guard.
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry/git/target (xtask)
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sensinfo-${{ hashFiles('xtask/**/*', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-sensinfo-
+
+      # Run the scanner. We redirect the redacted stdout to a file so the
+      # later steps can post or attach it without ever interpolating
+      # `$GITHUB_EVENT_PATH` into a shell or comment body. We do NOT cat
+      # the event payload anywhere in this job.
+      - name: Scan event payload (redacted output)
+        id: scan
+        run: |
+          set +e
+          cargo xtask sensitive-info \
+            --github-event "$GITHUB_EVENT_PATH" \
+            > /tmp/sensitive-info-output.txt 2> /tmp/sensitive-info-stderr.txt
+          scan_status=$?
+          set -e
+          # Re-emit the (already redacted) stderr summary to the workflow
+          # log so reviewers see how many findings without exposing text.
+          cat /tmp/sensitive-info-stderr.txt
+          # Re-emit the (already redacted) stdout findings list.
+          cat /tmp/sensitive-info-output.txt
+          if [ "$scan_status" -eq 0 ] || [ "$scan_status" -eq 1 ]; then
+            echo "scan_status=$scan_status" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::error::Sensitive-info scanner failed with status $scan_status."
+          exit "$scan_status"
+
+      - name: Decide if comment is needed
+        id: decide
+        run: |
+          if [ -s /tmp/sensitive-info-output.txt ]; then
+            echo "has_findings=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build advisory comment body
+        if: steps.decide.outputs.has_findings == 'true'
+        run: |
+          # Constructed entirely from static strings + the redacted xtask
+          # output. We never reference `$GITHUB_EVENT_PATH` here.
+          {
+            echo "## Sensitive-info guard"
+            echo
+            echo "An automated guard detected content that resembles a"
+            echo "credential, token, secret, auth-bearing URL, or PEM"
+            echo "private key in the text you just submitted. **Findings"
+            echo "below are redacted**; only rule names and the source"
+            echo "field path are shown; no raw values are echoed."
+            echo
+            echo "Detected rules:"
+            echo
+            echo '```'
+            cat /tmp/sensitive-info-output.txt
+            echo '```'
+            echo
+            echo "Please edit your submission to remove any real values"
+            echo "and use placeholders such as"
+            echo '`postgres://<user>:<password>@<host>:<port>/<database>`'
+            echo "or \`API_KEY=<your-api-key>\`. See"
+            echo "[CONTRIBUTING.md](../blob/main/CONTRIBUTING.md#do-not-paste-credentials-into-public-text)"
+            echo "for the full guidance."
+            echo
+            echo "<sub>This advisory is automated. The scanner is in"
+            echo "\`xtask/src/sensitive_info.rs\`; matched values are"
+            echo "never logged.</sub>"
+          } > /tmp/sensitive-info-comment.md
+
+      - name: Post advisory comment
+        if: steps.decide.outputs.has_findings == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `gh issue comment` works for both issues and PRs because GitHub
+          # exposes PR conversations through the same Issues comment API.
+          # For `pull_request_review_comment` events, the inline review
+          # comment is what triggered us; posting at the PR conversation
+          # level is still the right place to surface a public advisory.
+          ISSUE_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "no issue/PR number resolved from event; skipping comment"
+            exit 0
+          fi
+          gh issue comment "$ISSUE_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file /tmp/sensitive-info-comment.md
+
+      - name: Fail run on findings
+        if: steps.decide.outputs.has_findings == 'true'
+        run: |
+          echo "::error::Sensitive-info guard detected potentially credential-like content."
+          echo "See the redacted findings above and the advisory comment posted on this issue/PR."
+          exit 1

@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "Cargo xtask workspace helpers for Sassi"
 publish = false
+
+# `serde_json` is the only non-std dependency. It powers the
+# `sensitive-info --github-event <path>` mode, which extracts the
+# documented text fields from a GitHub webhook payload and scans
+# them. Inherited from `[workspace.dependencies]` so the version
+# pin lives in one place across the workspace.
+[dependencies]
+serde_json = { workspace = true }

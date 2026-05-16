@@ -170,6 +170,9 @@ are not part of the ordinary application dependency story.
 - [Release Readiness](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/release-readiness.md)
 - [Bardownski TUI Showcase](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/examples/bardownski/README.md)
 - [Benchmarks](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/sassi/benches/README.md)
+- [Contributing](https://github.com/TarunvirBains/sassi/blob/main/CONTRIBUTING.md)
+  (pre-commit guidance, the sensitive-info guard, and the public-text
+  placeholder conventions)
 - [Changelog](https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/CHANGELOG.md)
 
 ## License
