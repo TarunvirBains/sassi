@@ -1,8 +1,10 @@
 //! `Punnu::get_or_fetch_many` batch path.
 //!
 //! Spec §3.5: split ids into hits + misses, send one batch fetch
-//! for the missing set, merge with hits. Per-id single-flight on
-//! individual lookups within the batch.
+//! for the missing set, merge with hits. Within a single batch call,
+//! duplicate ids are deduplicated before the fetcher is invoked.
+//! Concurrent batch calls for the same ids are not cross-coalesced —
+//! each concurrent call invokes the fetcher independently.
 
 #![cfg(feature = "runtime-tokio")]
 

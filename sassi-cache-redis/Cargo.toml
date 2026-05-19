@@ -13,7 +13,7 @@ keywords = ["cache", "redis", "invalidation"]
 categories = ["caching"]
 
 [dependencies]
-sassi = { path = "../sassi", version = "0.1.0-beta.3" }
+sassi = { path = "../sassi", version = "0.1.0-beta.4" }
 async-trait = { workspace = true }
 async-stream = "0.3"
 futures = { workspace = true }
@@ -25,3 +25,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { version = "1.52", default-features = false, features = ["sync", "rt", "time", "macros"] }
+
+[package.metadata.docs.rs]
+all-features = true

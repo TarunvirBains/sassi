@@ -7,8 +7,8 @@
 //!
 //! Macros call into `sassi-codegen` for the actual `TokenStream`
 //! emission so the codegen logic stays in a regular library crate
-//! that downstream macro crates (e.g., `djogi-macros`) can also
-//! consume without running into proc-macro-cycle limitations.
+//! that downstream macro crates can also consume without running into
+//! proc-macro-cycle limitations.
 
 #![forbid(unsafe_code)]
 
@@ -16,9 +16,8 @@ mod cacheable;
 mod trait_impl;
 
 use proc_macro::TokenStream;
-use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro_crate::crate_name;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{format_ident, quote};
 
 /// Derive macro for `sassi::Cacheable`.
 ///
@@ -50,7 +49,7 @@ pub fn derive_cacheable(input: TokenStream) -> TokenStream {
 ///
 /// Apply it to a concrete trait impl:
 ///
-/// ```ignore
+/// ```text
 /// #[sassi::trait_impl]
 /// impl Nameable for User {
 ///     fn name(&self) -> &str { &self.name }
@@ -69,11 +68,5 @@ fn sassi_path() -> Result<TokenStream2, syn::Error> {
         )
     })?;
 
-    Ok(match found {
-        FoundCrate::Itself => quote!(crate),
-        FoundCrate::Name(name) => {
-            let ident = format_ident!("{}", name);
-            quote!(::#ident)
-        }
-    })
+    Ok(sassi_codegen::resolve_sassi_path(found))
 }

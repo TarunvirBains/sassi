@@ -1,7 +1,7 @@
 //! # sassi-codegen
 //!
 //! Support crate with codegen primitives for `sassi-macros` and downstream
-//! proc-macro consumers (e.g., `djogi-macros`).
+//! proc-macro consumers.
 //!
 //! Ordinary adopters depend on `sassi`, not this crate directly.
 //!
@@ -14,8 +14,8 @@
 //! impls). Each entry
 //! point takes a `sassi_path: &TokenStream` parameter so the caller can
 //! target whatever path prefix the end-user crate exposes (`::sassi`
-//! from `sassi-macros`, `::djogi::cache` from a future
-//! `djogi-macros` integration).
+//! from `sassi-macros`, or an aliased path from a downstream macro
+//! crate).
 //!
 //! Consumers of this crate build their proc-macro by:
 //! 1. Parsing the input via `syn::parse_macro_input!(input as DeriveInput)`.
@@ -41,3 +41,28 @@ pub use derive_options::{
     parse_cacheable_derive_options,
 };
 pub use fields_struct::generate_fields_struct;
+
+/// Convert a `FoundCrate` result from `proc-macro-crate::crate_name("sassi")`
+/// into the absolute path token stream that codegen functions should use as
+/// the `sassi_path` prefix.
+///
+/// - `FoundCrate::Itself` → `::sassi`
+///   (the calling macro is being expanded inside the `sassi` crate itself)
+/// - `FoundCrate::Name(name)` → `::<name>`
+///   (the adopter renamed the `sassi` dependency in their `Cargo.toml`)
+///
+/// This function is the single, testable source of truth for the path-resolution
+/// logic shared by `sassi-macros` and any downstream macro crate that
+/// consumes `sassi-codegen`.
+pub fn resolve_sassi_path(found: proc_macro_crate::FoundCrate) -> proc_macro2::TokenStream {
+    use proc_macro_crate::FoundCrate;
+    use quote::{format_ident, quote};
+
+    match found {
+        FoundCrate::Itself => quote!(::sassi),
+        FoundCrate::Name(name) => {
+            let ident = format_ident!("{}", name);
+            quote!(::#ident)
+        }
+    }
+}

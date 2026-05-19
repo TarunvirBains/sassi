@@ -1,9 +1,9 @@
 [package]
 name = "sassi"
-description = "Typed in-memory pool with composable predicate algebra and cross-runtime trait queries."
+description = "Typed cache substrate for Rust applications with composable predicate algebra and cross-runtime trait queries."
 readme = "../README.md"
-keywords = ["cache", "lru", "predicate", "query", "rust"]
-categories = ["caching", "data-structures"]
+keywords = ["cache", "predicate", "in-memory", "wasm", "query"]
+categories = ["caching", "data-structures", "wasm"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -56,7 +56,7 @@ fastrand = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.3" }
+sassi-macros = { path = "../sassi-macros", version = "0.1.0-beta.4" }
 inventory = { workspace = true }
 # `web-time` is a drop-in for `std::time::Instant` that works on
 # `wasm32-unknown-unknown`. Used only on wasm — native builds keep
@@ -118,3 +118,9 @@ wasm-bindgen-test = "0.3"
 [[bench]]
 name = "punnu_bench"
 harness = false
+
+# docs.rs builds with default features only by default; Sassi's lead
+# documentation describes the wasm + tokio + serde surfaces, so the
+# crate-level docs page renders best when all features are compiled.
+[package.metadata.docs.rs]
+all-features = true

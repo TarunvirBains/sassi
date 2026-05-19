@@ -7,8 +7,8 @@ providing shared L2 storage plus an explicit invalidation pub/sub path.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-beta.3"
-sassi-cache-redis = "0.1.0-beta.3"
+sassi = "0.1.0-beta.4"
+sassi-cache-redis = "0.1.0-beta.4"
 ```
 
 The backend uses the `BackendKeyspace` supplied by `PunnuConfig::namespace` and
@@ -48,5 +48,5 @@ refresh, restart, or namespace/generation rollover.
 
 See the Sassi repository docs for the broader cache model and release notes:
 
-- https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/backends-and-runtimes.md
-- https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.3/docs/release-readiness.md
+- https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.4/docs/backends-and-runtimes.md
+- https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.4/docs/release-readiness.md

@@ -87,7 +87,7 @@ pub trait Cacheable: Send + Sync + 'static {
 /// Field accessor.
 ///
 /// Carries both the column / serde-key name (used by downstream
-/// SQL-emitting consumers like djogi) and the in-memory extractor used
+/// SQL-emitting consumers) and the in-memory extractor used
 /// by sassi's predicate evaluator. The two halves let the same
 /// `Field<T, V>` value participate in a SQL `WHERE` emit on a backend
 /// AND a Rust-side `evaluate()` walk on a frontend, without diverging.

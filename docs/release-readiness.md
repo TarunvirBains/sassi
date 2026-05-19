@@ -1,11 +1,11 @@
 # Release Readiness
 
-Sassi v0.1.0-beta.3 is meant to be usable by capable Rust adopters who are
+Sassi v0.1.0-beta.4 is meant to be usable by capable Rust adopters who are
 willing to work with an early but candidate API surface. The goal is not to
 claim that every future integration is done; it is to make the current
 contracts, tradeoffs, and verification expectations visible before publish.
 
-## v0.1.0-beta.3 Scope
+## v0.1.0-beta.4 Scope
 
 In scope for the beta:
 
@@ -74,7 +74,7 @@ In scope for the beta:
 
 ## Out Of Scope For This Beta
 
-These are intentionally not release claims for v0.1.0-beta.3:
+These are intentionally not release claims for v0.1.0-beta.4:
 
 - Full downstream data-layer integration examples.
 - The Bardownski Dioxus/full-stack implementation.
@@ -102,6 +102,33 @@ These are intentionally not release claims for v0.1.0-beta.3:
 
 Those deferrals are not dismissals. They are places where Sassi needs real
 integration pressure before it should freeze an abstraction.
+
+## Documentation Invariants
+
+The Quick Tour example must appear in three places, all mirroring the same
+body modulo runtime-wrapper shape and rustfmt-driven line breaks (the
+`sassi/examples/quick_tour.rs` file is rustfmt-formatted, while the rustdoc
+in `sassi/src/lib.rs` and the Markdown in `README.md` preserve their
+in-source line shape):
+
+- `sassi/examples/quick_tour.rs` — the CI-verified source of truth. The
+  workspace `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  gate compiles and lints this file (the `--all-targets` flag includes examples).
+  Local maintainers can also explicit-build via `cargo build -p sassi --examples`
+  or `cargo build --workspace --all-features --examples`.
+- `sassi/src/lib.rs` crate-level rustdoc — the doctest body that
+  `cargo test --doc` exercises. Uses a manual
+  `tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(...)`
+  pattern instead of `#[tokio::main]` so the doctest avoids requiring the
+  `rt-multi-thread` tokio feature.
+- `README.md` Quick Example block — adopter-facing surface; manually verified
+  per release. Uses `#[tokio::main(flavor = "current_thread")]` so adopters
+  see a copy-pasteable program entry point.
+
+When the example body changes, update all three places in the same commit.
+CI catches drift in two of the three (example file via `cargo clippy --all-targets`,
+doctest via `cargo test --doc`); README drift is caught at release-readiness review
+time.
 
 ## Issue Invitations
 
@@ -152,9 +179,10 @@ cargo publish --dry-run -p sassi-cache-redis --locked
 
 The `cargo lihaaf` line runs the compile-fail / compile-pass fixture suite
 under `sassi-macros/tests/lihaaf/`. It replaces the earlier `trybuild`-driven
-fixtures and is now the authoritative gate for proc-macro derive errors and
-`MonotonicWatermark` trait-bound rejections. Install once locally with
-`cargo install lihaaf --version 0.1.0-beta.3 --locked`; CI installs it
+fixtures and is now the authoritative gate for proc-macro derive errors,
+`#[sassi::trait_impl]` attribute expansions, and `MonotonicWatermark`
+trait-bound rejections. Install once locally with
+`cargo install lihaaf --version 0.1.0-beta.9 --locked`; CI installs it
 through the same pin. To re-bless snapshots after an intentional diagnostic
 change, run `cargo lihaaf --manifest-path sassi-macros/Cargo.toml --bless`
 and review the resulting `.stderr` diff before committing.
@@ -166,9 +194,13 @@ After each upstream publish is visible in the registry index, rerun the next
 dry-run cleanly before publishing it.
 
 The repository README uses version-tagged GitHub documentation links for the
-crate landing page. Keep the release commit, crates.io publish, `v0.1.0-beta.3`
-tag, and GitHub release aligned so those links resolve for adopters reading the
-published package.
+crate landing page, including the link to `CONTRIBUTING.md`. Workflow and
+contributor-process docs evolve between releases; pinning the README's links
+to the release tag gives adopters reading the published package a snapshot of
+those docs as of the release, with the current state always one click away
+through GitHub's branch navigation. Keep the release commit, crates.io publish,
+`v0.1.0-beta.4` tag, and GitHub release aligned so those links resolve for
+adopters reading the published package.
 
 Benchmark documentation lives in
 [sassi/benches/README.md](../sassi/benches/README.md). The current expectation

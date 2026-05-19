@@ -188,8 +188,8 @@ script effects replication.
 
 ```toml
 [dependencies]
-sassi = "0.1.0-beta.3"
-sassi-cache-redis = "0.1.0-beta.3"
+sassi = "0.1.0-beta.4"
+sassi-cache-redis = "0.1.0-beta.4"
 ```
 
 ## Shared L2 Upgrade From Beta.1
@@ -387,7 +387,7 @@ For `wasm32-unknown-unknown`, enable `runtime-wasm`:
 
 ```toml
 sassi = {
-    version = "0.1.0-beta.3",
+    version = "0.1.0-beta.4",
     default-features = false,
     features = ["serde", "runtime-wasm"],
 }

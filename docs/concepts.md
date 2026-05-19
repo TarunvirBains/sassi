@@ -428,11 +428,12 @@ let bytes = pool.snapshot_postcard(SnapshotMode::WithInternalState)?;
 restored.restore_postcard(&bytes)?;
 ```
 
-The two modes use distinct binary wire kinds (`KIND_PUNNU_ENTRIES` vs.
-`KIND_PUNNU_ENTRIES_WITH_HINTS`); `restore_postcard` auto-dispatches on the
-kind byte. The internal-state body carries its own envelope version
-independent of the wire major so internal-state evolution can ship without
-rejecting entries-only snapshots.
+The two modes use distinct binary wire kinds (one for
+`SnapshotMode::EntriesOnly`, another for `SnapshotMode::WithInternalState`);
+`restore_postcard` inspects the kind byte and dispatches automatically. The
+internal-state body carries its own envelope version independent of the wire
+major so internal-state evolution can ship without rejecting entries-only
+snapshots.
 
 Even with internal-state mode, the snapshot does not carry refresh-handle
 state. Active refresh handles, subscription watermarks/recovery sets,

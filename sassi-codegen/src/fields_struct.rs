@@ -16,8 +16,8 @@ use syn::{Data, DeriveInput, Fields};
 ///
 /// `sassi_path` is the path prefix at which the consumer reaches
 /// sassi's public types — typically `::sassi` when called from
-/// `sassi-macros`, or `::djogi::cache` when called from
-/// `djogi-macros`. Parameterising avoids hard-coding the path so this
+/// `sassi-macros`, or an aliased path when called from a downstream
+/// macro crate. Parameterising avoids hard-coding the path so this
 /// crate stays consumable by any downstream proc-macro that wants to
 /// derive `Cacheable` for its own model types.
 pub fn generate_fields_struct(

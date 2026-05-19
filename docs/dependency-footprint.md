@@ -110,6 +110,35 @@ marker impls that pair with their respective timestamp types. These features
 are additive; they do not enable any other behavior. Consumers that already
 have `time` or `chrono` in their dep graph will deduplicate.
 
+## `sassi-codegen` Public Dependency Footprint
+
+Most adopters never depend on `sassi-codegen` directly — it is consumed by
+`sassi-macros` and is re-exported through `sassi`'s `#[derive(Cacheable)]` and
+`#[sassi::trait_impl]`. Authors writing a *downstream* proc-macro crate
+against `sassi-codegen` (for example, a custom derive that reuses
+`sassi_codegen::resolve_sassi_path` for shared `::sassi` path resolution) take
+on its public dependency surface:
+
+- `proc-macro-crate` — public dependency. `resolve_sassi_path` accepts a
+  `proc_macro_crate::FoundCrate` parameter in its public signature, so any
+  downstream macro crate that calls `resolve_sassi_path` must also depend on
+  `proc-macro-crate` at a version compatible with the one
+  `sassi-codegen/Cargo.toml` pins. If the downstream crate pulls a different
+  major of `proc-macro-crate`, `FoundCrate` will be a different type and the
+  call will not compile.
+- `proc-macro2`, `syn` — public dependencies. The codegen functions return
+  `proc_macro2::TokenStream`, and the parsing helpers take `syn::DeriveInput`.
+  Downstream proc-macro crates already depend on these by convention; the
+  constraint is to keep major versions aligned with the ones pinned in
+  `sassi-codegen/Cargo.toml`. (`quote` is also a `sassi-codegen` dependency
+  but used only in private `quote!()` macro bodies — not in any public
+  signature — so downstream crates may version it independently.)
+
+These constraints are inherent to a shared codegen library: a published
+public signature commits the crate to its parameter types. Bumping any of
+these public deps to a new major in `sassi-codegen` is a semver-breaking
+change for downstream macro crates.
+
 ## Compile-Surface Verification
 
 The CI matrix exercises the production combinations explicitly:

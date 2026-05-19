@@ -3,7 +3,7 @@
 //!
 //! Each `FieldPredicate` carries three pieces of information so it can
 //! be walked by both in-memory evaluators (sassi's own `evaluate`) AND
-//! external walkers (downstream SQL emitters in djogi, predicate-plan
+//! external walkers (downstream SQL emitters, predicate-plan
 //! debug formatters):
 //!
 //! 1. The **field name** (`field_name`) — the column / serde key.
@@ -23,8 +23,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 /// Lookup operator marker. Used for diagnostics + by SQL-emitting
-/// downstream consumers (e.g., djogi's `Q<T>` walker) to choose the
-/// right SQL construction. Also tells walkers what type to request with
+/// downstream consumers (e.g., an external `Q<T>`-style walker) to choose
+/// the right SQL construction. Also tells walkers what type to request with
 /// [`FieldPredicate::value_as`]. Values are stored internally behind
 /// `Arc<dyn Any + Send + Sync>`, but callers downcast to the payload type
 /// shown here:
@@ -173,7 +173,7 @@ impl<T> FieldPredicate<T> {
     /// for null tests it's `()`; for string ops it's `String`.
     ///
     /// **Caller must know `V` at compile time.** This is sufficient for
-    /// in-process typed lowering (e.g., djogi's `Q<T>` SQL emitter,
+    /// in-process typed lowering (e.g., an external SQL emitter,
     /// which has access to the model's field-type registry via the
     /// generated `Cacheable::Fields` shape). It is **not** sufficient
     /// for generic predicate persistence (serde-based round-trip across

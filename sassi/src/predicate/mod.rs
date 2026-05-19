@@ -4,7 +4,7 @@
 //!
 //! - [`BasicPredicate<T>`] — the universal base. Composes via `&`, `|`,
 //!   `^`, `!` operators. Lowers cleanly to SQL when consumed by an ORM
-//!   that knows the `Field<T, V>` shape (e.g., djogi). Evaluates
+//!   that knows the `Field<T, V>` shape. Evaluates
 //!   identically against an in-memory `&T` via [`BasicPredicate::evaluate`].
 //! - [`MemQ<T>`] — the in-memory-only extension. Adds Rust closures
 //!   and sequence operations that can't be projected into SQL.

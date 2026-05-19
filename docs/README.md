@@ -3,7 +3,7 @@
 These docs are for Rust adopters evaluating or wiring Sassi into an application.
 They sit between the crate landing page and the API reference: practical enough
 to copy from, but direct about the tradeoffs that matter before a cache becomes
-part of production behavior.
+typed local application state.
 
 Start here:
 
@@ -28,7 +28,7 @@ Start here:
   dep graph by feature combination (default native, no-default, serde,
   runtime-tokio, runtime-wasm, serde-json-bridge) so adopters can audit binary
   size and supply-chain surface without running cargo.
-- [Release Readiness](release-readiness.md) records the v0.1.0-beta.3 scope,
+- [Release Readiness](release-readiness.md) records the v0.1.0-beta.4 scope,
   known deferrals, issue categories, and verification commands.
 - [Bardownski TUI Showcase](../examples/bardownski/README.md) is the in-repo
   native example for predicate algebra and cross-type trait queries over

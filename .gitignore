@@ -1,6 +1,14 @@
 # Local-only working docs — superpowers brainstorming, design rounds,
-# codex review findings. Mirrors the djogi convention.
+# codex review findings. Standard convention for in-repo working docs.
 docs/superpowers/
+docs/roadmaps/
+
+# Local agent / orchestrator working dirs — codex sessions, claude
+# worktrees, and proof artifacts. None of these are part of the
+# published crate or the public adopter surface.
+.codex
+.worktrees/
+proofs/
 
 # Rust build artifacts. `target/` (not `/target`) covers both the
 # workspace target dir and the per-crate `<crate>/target/` directories

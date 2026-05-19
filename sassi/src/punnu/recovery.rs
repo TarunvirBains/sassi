@@ -213,6 +213,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "RecoverySnapshot dropped without success or restore")]
     fn unresolved_snapshot_panics_in_debug() {
         let mut set = RecoverySet::new(8);

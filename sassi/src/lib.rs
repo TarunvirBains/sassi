@@ -1,7 +1,14 @@
 //! # Sassi
 //!
-//! Typed in-memory pool (`Punnu<T>`) with composable predicate algebra
-//! (`BasicPredicate<T>` + `MemQ<T>`) and cross-runtime trait queries.
+//! Sassi is a typed cache substrate for Rust applications with composable
+//! predicate algebra and cross-runtime trait queries. It is built for when
+//! cached Rust data stops being just a key-value lookup and starts becoming
+//! typed local application state.
+//!
+//! It provides an in-memory pool ([`Punnu<T>`](Punnu)) that lets you
+//! look up domain objects by identity, refresh them, and query a local
+//! view using composable predicate filtering ([`BasicPredicate<T>`] + [`MemQ`])
+//! —without tying that view to an ORM, a web framework, or a database client.
 //!
 //! Sassi is framework-neutral: usable from native services, workers,
 //! libraries, and `wasm32-unknown-unknown` applications without a
@@ -9,50 +16,52 @@
 //! `!` operators and evaluate through the same in-memory path on every
 //! supported target.
 //!
-//! Pre-v0.1.0 beta. The core public surface is available now:
-//! [`Cacheable`] identities, [`Punnu<T>`](Punnu) pools, in-memory
-//! [`MemQ`] scopes, lazy fetch helpers, TTL/LRU policy, event streams,
-//! and atomic delta application.
+//! Beta release (v0.1.0-beta.4). The core public surface is available now:
+//! [`Cacheable`] identities, pools, in-memory scopes, lazy fetch helpers,
+//! TTL/LRU policy, event streams, and atomic delta application.
 //!
 //! # Quick tour
 //!
+//! The same body is mirrored in [`sassi/examples/quick_tour.rs`][example]
+//! (CI-verified by the workspace `cargo clippy --all-targets` gate) and in
+//! the lead `README.md`.
+//!
+//! [example]: https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.4/sassi/examples/quick_tour.rs
+//!
 //! ```
-//! use sassi::{Cacheable, Field, MemQ, Punnu};
+//! use sassi::{Cacheable, MemQ, Punnu};
 //!
-//! #[derive(Clone)]
-//! struct User { id: i64, age: u32 }
-//!
-//! #[derive(Default)]
-//! struct UserFields {
-//!     pub id: Field<User, i64>,
-//!     pub age: Field<User, u32>,
+//! #[derive(sassi::Cacheable)]
+//! struct User {
+//!     id: i64,
+//!     age: u32,
+//!     is_active: bool,
 //! }
 //!
-//! impl Cacheable for User {
-//!     type Id = i64;
-//!     type Fields = UserFields;
+//! async fn run() {
+//!     // 1. Build the in-memory pool and populate it.
+//!     let users = Punnu::<User>::builder().build();
+//!     users
+//!         .insert(User { id: 1, age: 32, is_active: true })
+//!         .await
+//!         .unwrap();
 //!
-//!     fn id(&self) -> i64 { self.id }
-//!
-//!     fn fields() -> UserFields {
-//!         UserFields {
-//!             id: Field::new("id", |u| &u.id),
-//!             age: Field::new("age", |u| &u.age),
-//!         }
-//!     }
+//!     // 2. Query local state with composable predicates.
+//!     let adults = users
+//!         .scope(vec![MemQ::filter_basic(
+//!             User::fields().age.gte(18) & User::fields().is_active.eq(true),
+//!         )])
+//!         .take(10)
+//!         .collect();
+//!     assert_eq!(adults.len(), 1);
 //! }
-//!
 //! # let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
-//! # rt.block_on(async {
-//! let users = Punnu::<User>::builder().build();
-//! users.insert(User { id: 1, age: 32 }).await.unwrap();
-//!
-//! let adults = users
-//!     .scope(vec![MemQ::filter_basic(User::fields().age.gte(18))])
-//!     .collect();
-//! assert_eq!(adults.len(), 1);
-//! # });
+//! # rt.block_on(run());
 //! ```
+//!
+//! The derive requires a field literally named `id`; types whose identifier
+//! uses a different name (e.g. `user_id`) must hand-implement [`Cacheable`]
+//! until v0.2 adds `#[cacheable(id)]`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
