@@ -60,8 +60,7 @@
 //! ```
 //!
 //! The derive requires a field literally named `id`; types whose identifier
-//! uses a different name (e.g. `user_id`) must hand-implement [`Cacheable`]
-//! until v0.2 adds `#[cacheable(id)]`.
+//! uses a different name (e.g. `user_id`) must hand-implement [`Cacheable`].
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

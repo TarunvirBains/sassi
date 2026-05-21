@@ -58,11 +58,9 @@ that want to claim a cache entry is portable over Sassi's existing wire. Add
 and read the same bytes as `to_vec` / `from_slice`; they only require the entry
 to implement `WirePortable`.
 
-Backend and snapshot APIs keep their current loose serde bounds in this
-release. `MemoryBackend`, `FileBackend`, `Punnu::insert_serialized`, entries
+Backend and snapshot APIs keep their current loose serde bounds. `MemoryBackend`, `FileBackend`, `Punnu::insert_serialized`, entries
 export/restore, and whole-pool snapshot/restore do not require
-`WirePortable`. A future release may ratchet backend bounds, but this release
-only adds the strict helper path.
+`WirePortable`.
 
 Rejected JSON-like fields should be projected to portable cache fields. Use
 `JSahibON` when the cache needs raw JSON and local JSON predicates, a typed
@@ -207,11 +205,6 @@ caller. Operators using shared Redis should clear the keyspace or roll
 `PunnuConfig::namespace` during upgrade so beta.2 readers do not attempt to
 decode beta.1 JSON values.
 
-The final commit where the beta.1 JSON value envelope was live is
-`92b77510cb80d98fd749020df3d18571200a315f`; use
-`git show 92b77510cb80d98fd749020df3d18571200a315f:sassi/src/wire.rs` if an
-upgrade tool needs the exact historical decoder.
-
 ## Local Snapshots vs Shared Backend Mutation
 
 Sassi supports two cache surfaces concurrently: shared L2 mutation through
@@ -250,8 +243,7 @@ local_store.save("proposal-cache", bytes).await?;
 Here, "strict" means an active backend write reservation from a pool using
 `BackendFailureMode::Error`; this is a race guard, not an enforcement mechanism
 for the broader rule above. The intended restore path is backend-less local
-hydration; backend seeding remains a future async API rather than a widening of
-`restore_entries_postcard`.
+hydration; `restore_entries_postcard` is presently L1-only.
 
 The snapshot is not a distributed correctness boundary. Applications that need
 multi-device or service-to-service recovery should pair entries snapshots with
