@@ -66,9 +66,7 @@
   page now leads with the "typed cache substrate" framing, includes a
   derive-based Quick Tour example wrapped in `async fn run()`, and
   documents the `Cacheable` derive's requirement that the struct carry a
-  field literally named `id` (with a note that v0.2 will introduce
-  `#[cacheable(id)]` for structs whose identifier field has a
-  different name).
+  field literally named `id`.
 - Refreshed the `sassi` crate metadata to match the README's "cache
   substrate" framing: rewrote `description` from "Typed in-memory pool
   with composable predicate algebra and cross-runtime trait queries." to

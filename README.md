@@ -70,7 +70,7 @@ async fn main() {
 
 The `#[derive(Cacheable)]` macro requires a field literally named `id`. Types
 whose identifier uses a different name (e.g. `user_id`) need a hand-written
-`Cacheable` impl until v0.2 adds `#[cacheable(id)]`.
+`Cacheable` impl.
 
 ## Concepts
 
@@ -81,7 +81,7 @@ whose identifier uses a different name (e.g. `user_id`) need a hand-written
 
 ## Cache Lifecycle Features
 
-- **Fetch-on-miss and coalescing**: `get_or_fetch` collapses concurrent fetches for the same id into a single execution. `get_or_fetch_many` deduplicates ids within a single batch call; concurrent batch calls for the same ids are not cross-coalesced in v0.1.0-beta.4.
+- **Fetch-on-miss and coalescing**: `get_or_fetch` collapses concurrent fetches for the same id into a single execution. `get_or_fetch_many` deduplicates ids within a single batch call; concurrent batch calls for the same ids are not presently cross-coalesced.
 - **Bounded Eviction**: Sampled-LRU eviction and optional TTL keep your memory footprint bounded. TTL cleanup is lazy by default — expired entries are observed as misses by `get` and reclaimed under capacity pressure; configure `ttl_sweep_interval` to opt into a background sweep task.
 - **Refresh**: Built-in mechanisms for periodic polling and watermark-based delta sync drive background updates. Eviction recovery (re-fetching entries that LRU pressure dropped) is opt-in via `DeltaRefreshHandle::with_eviction_recovery(true)`.
 - **Events**: Subscribe to streams of inserts, updates, and deletes to trigger application UI renders or downstream side effects. Events are best-effort observability with a lossy contract — slow subscribers and missing subscribers drop events — not a durable log; build durable side-effect pipelines on the source of truth instead.

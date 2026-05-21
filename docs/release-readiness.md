@@ -5,7 +5,7 @@ willing to work with an early but candidate API surface. The goal is not to
 claim that every future integration is done; it is to make the current
 contracts, tradeoffs, and verification expectations visible before publish.
 
-## v0.1.0-beta.4 Scope
+## Scope
 
 In scope for the beta:
 
@@ -94,14 +94,10 @@ These are intentionally not release claims for v0.1.0-beta.4:
   Applications re-attach refresh handles after restore and resume from a
   consumer-persisted watermark.
 - A backend-seeding restore. `restore_entries_postcard` and `restore_postcard`
-  are L1-only; a future backend-seeding restore, if needed, would be a
-  separate async API.
+  are presently L1-only.
 - Certified framework adapters.
 - Automatic cross-process coherence for Redis `put`/`insert` writes without
   explicit invalidation publication.
-
-Those deferrals are not dismissals. They are places where Sassi needs real
-integration pressure before it should freeze an abstraction.
 
 ## Documentation Invariants
 
@@ -192,15 +188,6 @@ the upstream crate exists on crates.io. Publish or dry-run in dependency order:
 `sassi-codegen`, then `sassi-macros`, then `sassi`, then `sassi-cache-redis`.
 After each upstream publish is visible in the registry index, rerun the next
 dry-run cleanly before publishing it.
-
-The repository README uses version-tagged GitHub documentation links for the
-crate landing page, including the link to `CONTRIBUTING.md`. Workflow and
-contributor-process docs evolve between releases; pinning the README's links
-to the release tag gives adopters reading the published package a snapshot of
-those docs as of the release, with the current state always one click away
-through GitHub's branch navigation. Keep the release commit, crates.io publish,
-`v0.1.0-beta.4` tag, and GitHub release aligned so those links resolve for
-adopters reading the published package.
 
 Benchmark documentation lives in
 [sassi/benches/README.md](../sassi/benches/README.md). The current expectation

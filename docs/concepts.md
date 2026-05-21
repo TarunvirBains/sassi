@@ -105,7 +105,7 @@ callers can inspect field names, lookup operators, and typed operand values.
 That makes it a useful bridge between a data-layer fetcher and Sassi's
 in-memory replay.
 
-It is not a serde wire format in v0.1.0. Persisting or transmitting predicate
+It is not presently a serde wire format. Persisting or transmitting predicate
 values across processes needs an application or downstream crate to define a
 typed codec.
 
