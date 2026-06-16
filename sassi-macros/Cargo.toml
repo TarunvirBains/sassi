@@ -20,7 +20,7 @@ proc-macro2 = { workspace = true }
 proc-macro-crate = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
-sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-beta.4" }
+sassi-codegen = { path = "../sassi-codegen", version = "0.1.0-beta.5" }
 
 [dev-dependencies]
 # `sassi` as a dev-dep forms a cycle (`sassi` regularly depends on

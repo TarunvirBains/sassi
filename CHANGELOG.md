@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `PunnuScope::filter_impl::<Trait>()` — single-type, compile-time trait-narrowed scope filter. Gated on new `TraitImpl<Trait>` marker emitted by `#[sassi::trait_impl]`.
+- `TraitImpl<Trait>` public marker trait (zero runtime cost).
+
 ### Changed
 
 - `cargo-lihaaf` dev-tool pin bumped `0.1.0-beta.9` → `0.1.0-beta.10` in
