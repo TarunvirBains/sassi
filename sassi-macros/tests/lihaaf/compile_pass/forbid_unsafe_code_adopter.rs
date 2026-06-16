@@ -4,8 +4,7 @@
 //! Proves that the `inventory::submit!` expansion does not surface
 //! unsafe attribute syntax (`unsafe(link_section = ...)`) at the
 //! adopter call site — the unsafe machinery is fully encapsulated
-//! inside the `inventory` crate. Closes round-2 BLOCK-1 elevation
-//! risk on the macro emission audit.
+//! inside the `inventory` crate.
 
 #![forbid(unsafe_code)]
 
