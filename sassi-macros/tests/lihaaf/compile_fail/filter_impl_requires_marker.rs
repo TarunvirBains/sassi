@@ -1,4 +1,4 @@
-use sassi::{Cacheable, MemQ, Punnu, punnu::PunnuScope};
+use sassi::{Cacheable, punnu::PunnuScope};
 
 trait IsVehicle: Send + Sync {}
 
