@@ -16,9 +16,10 @@
 //! `!` operators and evaluate through the same in-memory path on every
 //! supported target.
 //!
-//! Beta release (v0.1.0-beta.4). The core public surface is available now:
+//! Beta release (v0.1.0-beta.5). The core public surface is available now:
 //! [`Cacheable`] identities, pools, in-memory scopes, lazy fetch helpers,
-//! TTL/LRU policy, event streams, and atomic delta application.
+//! TTL/LRU policy, event streams, atomic delta application, and trait-narrowed
+//! scope filtering via [`PunnuScope::filter_impl`](crate::punnu::PunnuScope::filter_impl).
 //!
 //! # Quick tour
 //!
@@ -26,7 +27,7 @@
 //! (CI-verified by the workspace `cargo clippy --all-targets` gate) and in
 //! the lead `README.md`.
 //!
-//! [example]: https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.4/sassi/examples/quick_tour.rs
+//! [example]: https://github.com/TarunvirBains/sassi/blob/v0.1.0-beta.5/sassi/examples/quick_tour.rs
 //!
 //! ```
 //! use sassi::{Cacheable, MemQ, Punnu};
