@@ -26,6 +26,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install Rust 1.95 (pinned for lihaaf snapshot stability)
+        uses: dtolnay/rust-toolchain@1.95.0
+
       - name: Cache cargo registry and build
         uses: actions/cache@v5
         with:
@@ -68,7 +71,7 @@ jobs:
         run: cargo install lihaaf --version 0.1.0-beta.10 --locked
 
       - name: Lihaaf compile-fixture suite (sassi-macros)
-        run: cargo lihaaf --manifest-path sassi-macros/Cargo.toml
+        run: cargo +1.95.0 lihaaf --manifest-path sassi-macros/Cargo.toml
 
   wasm-target:
     name: WASM target build and test
