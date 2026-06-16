@@ -27,7 +27,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Install Rust 1.95 (pinned for lihaaf snapshot stability)
-        uses: dtolnay/rust-toolchain@1.95.0
+        run: rustup toolchain install 1.95.0 --no-self-update --profile minimal
 
       - name: Cache cargo registry and build
         uses: actions/cache@v5
