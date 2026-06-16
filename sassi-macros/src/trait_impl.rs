@@ -96,6 +96,7 @@ fn trait_impl_impl(args: TokenStream2, input: TokenStream2) -> TokenStream2 {
     let expanded = quote! {
         #item
 
+        impl #sassi_path::__private::Sealed<dyn #trait_path> for #model_ty {}
         impl #sassi_path::TraitImpl<dyn #trait_path> for #model_ty {}
 
         const _: () = {
@@ -145,6 +146,10 @@ mod marker_emit_tests {
         assert!(
             out.contains("TraitImpl") && out.contains("for Vehicle"),
             "expected a TraitImpl<dyn Searchable> impl for Vehicle; got: {out}"
+        );
+        assert!(
+            out.contains("Sealed") && out.contains("for Vehicle"),
+            "expected a Sealed<dyn Searchable> witness impl for Vehicle; got: {out}"
         );
         assert!(out.contains("TraitImplEntry"));
     }

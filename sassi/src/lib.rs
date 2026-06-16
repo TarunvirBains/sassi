@@ -121,6 +121,7 @@ pub use sassi_macros::{Cacheable, trait_impl};
 /// private module layout.
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::sassi::trait_registry::__sealed::Sealed;
     pub use crate::sassi::trait_registry::TraitImplEntry;
     pub use inventory;
     #[cfg(feature = "serde")]

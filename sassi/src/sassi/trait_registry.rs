@@ -41,6 +41,19 @@ use std::any::{Any, TypeId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Module-private sealing trait. Only `#[sassi::trait_impl]` can emit an
+/// `impl Sealed<dyn Trait> for Type`, so adopters cannot hand-write a
+/// `TraitImpl<dyn Trait>` impl to forge cross-type registration. The
+/// `__` prefix marks this as internal plumbing, not adopter API.
+#[doc(hidden)]
+pub(crate) mod __sealed {
+    /// Sealed supertrait of [`super::TraitImpl`], parameterized by the
+    /// trait object so a type sealed for `dyn A` is not thereby sealed
+    /// for `dyn B`. Re-exported as `crate::__private::Sealed` for the
+    /// macro; never named by adopters.
+    pub trait Sealed<Trait: ?Sized> {}
+}
+
 /// Type-erased collector emitted by `#[sassi::trait_impl]`.
 ///
 /// The returned `Box<dyn Any>` contains a `Vec<Arc<dyn Trait>>` for
@@ -78,7 +91,7 @@ inventory::collect!(TraitImplEntry);
     message = "`{Self}` is not registered as an implementation of `{Trait}`",
     note = "apply `#[sassi::trait_impl]` to the `impl {Trait} for {Self}` block"
 )]
-pub trait TraitImpl<Trait: ?Sized> {}
+pub trait TraitImpl<Trait: ?Sized>: __sealed::Sealed<Trait> {}
 
 /// Handle used by [`Sassi`] to query trait
 /// registrations.
@@ -150,6 +163,9 @@ mod marker_tests {
 
     struct Widget;
     impl Demo for Widget {}
+    // Stand-in witnesses matching what #[sassi::trait_impl] now emits:
+    // both the TraitImpl impl and the sealed supertrait witness.
+    impl super::__sealed::Sealed<dyn Demo> for Widget {}
     // Hand-written marker impl standing in for what the macro will emit.
     impl TraitImpl<dyn Demo> for Widget {}
 
