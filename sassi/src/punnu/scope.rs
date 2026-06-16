@@ -85,14 +85,62 @@ impl<T: Cacheable> PunnuScope<T> {
         self.then(MemQ::filter(predicate))
     }
 
-    /// Assert that every entry in this scope implements `Trait`.
+    /// Narrow this scope to entries whose type implements `Trait`.
     ///
-    /// This is a compile-time guarantee with zero runtime cost. The
-    /// bound `T: TraitImpl<Trait>` proves that the pool type was
-    /// registered via `#[sassi::trait_impl]`, so every `Arc<T>`
-    /// entry already satisfies `Trait`. The method returns `self`
-    /// unchanged; the narrowing is enforced at the type level, not
-    /// through a runtime filter.
+    /// # What
+    /// Restricts the scope to cached entries that participate in `Trait`'s
+    /// cross-type registry (registered via `#[sassi::trait_impl]`). Because
+    /// a [`Punnu<T>`](crate::punnu::Punnu) holds exactly one concrete type,
+    /// the `T: TraitImpl<Trait>` bound proves the *entire* pool qualifies —
+    /// so this is a compile-time-checked identity narrowing, not a runtime
+    /// predicate scan. The bound cannot be satisfied by an ordinary hand-written `impl TraitImpl<dyn Trait>` — `TraitImpl` has a sealed supertrait that only the `#[sassi::trait_impl]` expansion emits. (Reaching into `#[doc(hidden)] sassi::__private` to forge the supertrait explicitly is possible but warranty-voiding.)
+    ///
+    /// # Why
+    /// Use `filter_impl` for the *single-type* trait query — when you have a
+    /// concrete `Punnu<T>` and want to assert (and document, in types) that
+    /// `T` implements `Trait`, while keeping the concrete `Arc<T>` entries.
+    /// For the *cross-type* query that collects `Arc<dyn Trait>` across every
+    /// registered pool, use [`Sassi::all_impl`](crate::Sassi::all_impl)
+    /// instead. `filter_impl` keeps the concrete type; `all_impl` erases it.
+    ///
+    /// # How
+    /// ```
+    /// use sassi::{Cacheable, MemQ, Punnu};
+    /// use std::sync::Arc;
+    ///
+    /// trait IsVehicle: Send + Sync { fn wheels(&self) -> u8; }
+    ///
+    /// #[derive(Clone)]
+    /// struct Car { id: i64 }
+    /// # #[derive(Default)] struct F;
+    /// impl Cacheable for Car {
+    ///     type Id = i64; type Fields = F;
+    ///     fn id(&self) -> i64 { self.id }
+    ///     fn fields() -> F { F }
+    /// }
+    ///
+    /// #[sassi::trait_impl]
+    /// impl IsVehicle for Car { fn wheels(&self) -> u8 { 4 } }
+    ///
+    /// # async fn run() {
+    /// let cars = Punnu::<Car>::builder().build();
+    /// cars.insert(Car { id: 1 }).await.unwrap();
+    /// let v: Vec<Arc<Car>> = cars
+    ///     .scope(Vec::<MemQ<Car>>::new())
+    ///     .filter_impl::<dyn IsVehicle>()
+    ///     .collect();
+    /// assert_eq!(v.len(), 1);
+    /// # }
+    /// # let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    /// # rt.block_on(run());
+    /// ```
+    ///
+    /// # Where
+    /// Reach for `filter_impl` when you have a concrete `Punnu<T>` and want
+    /// the compile-time, zero-cost assertion that `T` is trait-registered
+    /// (e.g. before forwarding the scope to trait-generic code). For the
+    /// erased, cross-pool collection, use
+    /// [`Sassi::all_impl`](crate::Sassi::all_impl).
     pub fn filter_impl<Trait>(self) -> Self
     where
         Trait: ?Sized + 'static,

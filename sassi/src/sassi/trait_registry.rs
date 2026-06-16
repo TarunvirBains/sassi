@@ -79,14 +79,41 @@ pub struct TraitImplEntry {
 
 inventory::collect!(TraitImplEntry);
 
-/// Compile-time marker proving that a concrete type is registered as
-/// an implementation of a trait for Sassi cross-type queries.
+/// Compile-time marker: `T` has a registered implementation of `Trait`
+/// via `#[sassi::trait_impl]`.
 ///
-/// One `impl TraitImpl<dyn Trait> for Type` is emitted by each
-/// `#[sassi::trait_impl]` expansion. Callers use the bound
-/// `T: TraitImpl<dyn Trait>` to prove that every entry in a
-/// single-type [`PunnuScope`](crate::punnu::PunnuScope) implements
-/// `Trait`, enabling zero-cost trait narrowing at compile time.
+/// # What
+/// One marker impl is emitted per `(Type, Trait)` pair the
+/// `#[sassi::trait_impl]` attribute macro processes. The trait carries no
+/// methods and no runtime cost — it exists purely so method bounds (most
+/// notably [`PunnuScope::filter_impl`](crate::punnu::PunnuScope::filter_impl))
+/// can require, at compile time, that the cached type participates in a
+/// given trait's cross-type registry. The marker has a sealed supertrait — a plain hand-written `impl TraitImpl<dyn Trait> for Type {}` is rejected at compile time; registration goes through `#[sassi::trait_impl]`. (Reaching directly into `#[doc(hidden)] sassi::__private` is possible but explicitly warranty-voiding, and mirrors the existing treatment of `TraitImplEntry`.)
+///
+/// # Why
+/// [`Sassi::all_impl`](crate::Sassi::all_impl) answers the *cross-type*
+/// question ("every cached value implementing `Trait`, across pools") and
+/// returns erased `Arc<dyn Trait>`. `filter_impl` answers the *single-type*
+/// question ("narrow this `Punnu<T>` scope to entries that implement
+/// `Trait`") while keeping the concrete `Arc<T>`. Because a `Punnu<T>` holds
+/// exactly one concrete type, the marker bound proves at compile time that
+/// the whole pool qualifies — turning the narrowing into a guarantee the
+/// type system enforces rather than a runtime predicate.
+///
+/// # How
+/// Adopters never write this impl by hand; `#[sassi::trait_impl]` emits it:
+/// ```ignore
+/// #[sassi::trait_impl]
+/// impl Searchable for Vehicle { /* ... */ }
+/// // expands to: impl Searchable for Vehicle { ... }
+/// //          +  impl ::sassi::TraitImpl<dyn Searchable> for Vehicle {}
+/// //          +  the sealed witness + inventory::submit!(TraitImplEntry { ... });
+/// ```
+///
+/// # Where
+/// Reach for the bound only in generic code that must require trait-registry
+/// participation (e.g. when forwarding to `filter_impl` from your own helper).
+/// Most call sites use `filter_impl` directly and never name `TraitImpl`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not registered as an implementation of `{Trait}`",
     note = "apply `#[sassi::trait_impl]` to the `impl {Trait} for {Self}` block"
