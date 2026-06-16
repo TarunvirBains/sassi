@@ -18,3 +18,5 @@ impl Cacheable for Car {
 fn check(scope: PunnuScope<Car>) {
     let _ = scope.filter_impl::<dyn IsVehicle>();
 }
+
+fn main() {}
