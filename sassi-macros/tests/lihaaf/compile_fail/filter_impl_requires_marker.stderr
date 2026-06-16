@@ -1,0 +1,39 @@
+warning: unused imports: `MemQ` and `Punnu`
+ --> $DIR/filter_impl_requires_marker.rs:1:24
+  |
+1 | use sassi::{Cacheable, MemQ, Punnu, punnu::PunnuScope};
+  |                        ^^^^  ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0601]: `main` function not found in crate `filter_impl_requires_marker`
+  --> $DIR/filter_impl_requires_marker.rs:20:2
+   |
+20 | }
+   |  ^ consider adding a `main` function to `$DIR/filter_impl_requires_marker.rs`
+
+error[E0277]: `Car` is not registered as an implementation of `dyn IsVehicle`
+  --> $DIR/filter_impl_requires_marker.rs:19:19
+   |
+19 |     let _ = scope.filter_impl::<dyn IsVehicle>();
+   |                   ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `sassi::TraitImpl<dyn IsVehicle>` is not implemented for `Car`
+  --> $DIR/filter_impl_requires_marker.rs:6:1
+   |
+ 6 | struct Car { id: u32 }
+   | ^^^^^^^^^^
+   = note: apply `#[sassi::trait_impl]` to the `impl dyn IsVehicle for Car` block
+note: required by a bound in `PunnuScope::<T>::filter_impl`
+  --> sassi/src/punnu/scope.rs:99:12
+   |
+96 |     pub fn filter_impl<Trait>(self) -> Self
+   |            ----------- required by a bound in this associated function
+...
+99 |         T: TraitImpl<Trait>,
+   |            ^^^^^^^^^^^^^^^^ required by this bound in `PunnuScope::<T>::filter_impl`
+
+error: aborting due to 2 previous errors; 1 warning emitted
+
+Some errors have detailed explanations: E0277, E0601.
+For more information about an error, try `rustc --explain E0277`.

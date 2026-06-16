@@ -9,6 +9,7 @@
 use crate::cacheable::Cacheable;
 use crate::predicate::{IntoBasicPredicate, MemQ};
 use crate::punnu::Punnu;
+use crate::sassi::trait_registry::TraitImpl;
 use std::cmp::Ordering;
 use std::hash::Hash;
 use std::sync::Arc;
@@ -82,6 +83,22 @@ impl<T: Cacheable> PunnuScope<T> {
         F: Fn(&T) -> bool + Send + Sync + 'static,
     {
         self.then(MemQ::filter(predicate))
+    }
+
+    /// Assert that every entry in this scope implements `Trait`.
+    ///
+    /// This is a compile-time guarantee with zero runtime cost. The
+    /// bound `T: TraitImpl<Trait>` proves that the pool type was
+    /// registered via `#[sassi::trait_impl]`, so every `Arc<T>`
+    /// entry already satisfies `Trait`. The method returns `self`
+    /// unchanged; the narrowing is enforced at the type level, not
+    /// through a runtime filter.
+    pub fn filter_impl<Trait>(self) -> Self
+    where
+        Trait: ?Sized + 'static,
+        T: TraitImpl<Trait>,
+    {
+        self
     }
 
     /// Append an `Arc<T>` mapper.
