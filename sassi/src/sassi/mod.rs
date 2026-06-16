@@ -10,4 +10,4 @@ pub mod orchestrator;
 pub mod trait_registry;
 
 pub use orchestrator::Sassi;
-pub use trait_registry::TraitRegistry;
+pub use trait_registry::{TraitImpl, TraitRegistry};

@@ -66,6 +66,20 @@ pub struct TraitImplEntry {
 
 inventory::collect!(TraitImplEntry);
 
+/// Compile-time marker proving that a concrete type is registered as
+/// an implementation of a trait for Sassi cross-type queries.
+///
+/// One `impl TraitImpl<dyn Trait> for Type` is emitted by each
+/// `#[sassi::trait_impl]` expansion. Callers use the bound
+/// `T: TraitImpl<dyn Trait>` to prove that every entry in a
+/// single-type [`PunnuScope`](crate::punnu::PunnuScope) implements
+/// `Trait`, enabling zero-cost trait narrowing at compile time.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not registered as an implementation of `{Trait}`",
+    note = "apply `#[sassi::trait_impl]` to the `impl {Trait} for {Self}` block"
+)]
+pub trait TraitImpl<Trait: ?Sized> {}
+
 /// Handle used by [`Sassi`] to query trait
 /// registrations.
 ///
@@ -125,5 +139,24 @@ impl TraitRegistry {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::TraitImpl;
+
+    trait Demo: Send + Sync {}
+
+    struct Widget;
+    impl Demo for Widget {}
+    // Hand-written marker impl standing in for what the macro will emit.
+    impl TraitImpl<dyn Demo> for Widget {}
+
+    fn requires_marker<T: TraitImpl<dyn Demo>>() {}
+
+    #[test]
+    fn marker_bound_resolves_for_registered_pair() {
+        requires_marker::<Widget>();
     }
 }

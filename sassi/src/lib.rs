@@ -103,7 +103,7 @@ pub use punnu::{
 };
 #[cfg(feature = "serde")]
 pub use punnu::{PunnuRestoreStats, SnapshotMode};
-pub use sassi::Sassi;
+pub use sassi::{Sassi, TraitImpl};
 pub use time::Instant;
 pub use watermark::{DeltaSyncCacheable, MonotonicWatermark};
 
