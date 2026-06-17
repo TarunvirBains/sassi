@@ -32,30 +32,12 @@ fn main() {
     }
 }
 
-/// Walk up from the current directory to find the workspace root (the
-/// directory containing a `Cargo.toml` with a `[workspace]` section).
+/// Resolve the workspace root from the compile-time location of the `xtask`
+/// crate itself.
 fn workspace_root() -> PathBuf {
-    let start_dir = std::env::current_dir()
-        .expect("cannot determine current directory")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask crate must live under the workspace root")
         .canonicalize()
-        .expect("cannot canonicalize current directory");
-    let mut dir = start_dir.clone();
-    loop {
-        if !start_dir.starts_with(&dir) {
-            panic!("refusing to inspect path outside starting ancestry");
-        }
-        let manifest = dir.join("Cargo.toml");
-        if manifest.exists()
-            && let Ok(text) = std::fs::read_to_string(&manifest)
-            && text.contains("[workspace]")
-        {
-            return dir;
-        }
-        if !dir.pop() {
-            panic!(
-                "cannot locate workspace root - started from {:?}",
-                std::env::current_dir().unwrap_or_default()
-            );
-        }
-    }
+        .expect("cannot canonicalize workspace root")
 }
