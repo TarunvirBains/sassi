@@ -23,7 +23,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{ItemImpl, parse_macro_input, spanned::Spanned};
+use syn::spanned::Spanned;
 
 use crate::sassi_path;
 
@@ -47,13 +47,18 @@ use crate::sassi_path;
 ///   has no captured lifetimes; in practice almost every cross-type
 ///   trait satisfies this naturally.
 pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
-    let args = TokenStream2::from(args);
-    let item = parse_macro_input!(input as ItemImpl);
+    trait_impl_impl(args.into(), input.into()).into()
+}
+
+fn trait_impl_impl(args: TokenStream2, input: TokenStream2) -> TokenStream2 {
+    let item = match syn::parse2::<syn::ItemImpl>(input) {
+        Ok(item) => item,
+        Err(e) => return e.to_compile_error(),
+    };
 
     if !args.is_empty() {
         return syn::Error::new(args.span(), "sassi::trait_impl takes no arguments")
-            .to_compile_error()
-            .into();
+            .to_compile_error();
     }
 
     if !item.generics.params.is_empty() || item.generics.where_clause.is_some() {
@@ -61,8 +66,7 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
             item.generics.span(),
             "#[sassi::trait_impl] currently supports concrete, non-generic impl blocks",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     let trait_path = match &item.trait_ {
@@ -72,27 +76,28 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
                 not_token.span(),
                 "#[sassi::trait_impl] cannot register negative impl blocks",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
         None => {
             return syn::Error::new(
                 item.impl_token.span(),
                 "sassi::trait_impl must be applied to `impl Trait for Type`",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     };
 
     let sassi_path = match sassi_path() {
         Ok(path) => path,
-        Err(e) => return e.to_compile_error().into(),
+        Err(e) => return e.to_compile_error(),
     };
 
     let model_ty = &item.self_ty;
     let expanded = quote! {
         #item
+
+        impl #sassi_path::__private::Sealed<dyn #trait_path> for #model_ty {}
+        impl #sassi_path::TraitImpl<dyn #trait_path> for #model_ty {}
 
         const _: () = {
             fn __sassi_collect_trait_impl(
@@ -121,5 +126,31 @@ pub fn trait_impl(args: TokenStream, input: TokenStream) -> TokenStream {
         };
     };
 
-    expanded.into()
+    expanded
+}
+
+#[cfg(test)]
+mod marker_emit_tests {
+    use super::trait_impl_impl;
+    use quote::quote;
+
+    #[test]
+    fn emits_marker_impl_for_dyn_trait() {
+        let item = quote! {
+            impl Searchable for Vehicle {
+                fn cols(&self) -> &'static [&'static str] { &["title"] }
+            }
+        };
+        let out = trait_impl_impl(quote! {}, item).to_string();
+        assert!(out.contains("impl Searchable for Vehicle"));
+        assert!(
+            out.contains("TraitImpl") && out.contains("for Vehicle"),
+            "expected a TraitImpl<dyn Searchable> impl for Vehicle; got: {out}"
+        );
+        assert!(
+            out.contains("Sealed") && out.contains("for Vehicle"),
+            "expected a Sealed<dyn Searchable> witness impl for Vehicle; got: {out}"
+        );
+        assert!(out.contains("TraitImplEntry"));
+    }
 }

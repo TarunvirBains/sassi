@@ -41,6 +41,19 @@ use std::any::{Any, TypeId};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+/// Module-private sealing trait. Only `#[sassi::trait_impl]` can emit an
+/// `impl Sealed<dyn Trait> for Type`, so adopters cannot hand-write a
+/// `TraitImpl<dyn Trait>` impl to forge cross-type registration. The
+/// `__` prefix marks this as internal plumbing, not adopter API.
+#[doc(hidden)]
+pub(crate) mod __sealed {
+    /// Sealed supertrait of [`super::TraitImpl`], parameterized by the
+    /// trait object so a type sealed for `dyn A` is not thereby sealed
+    /// for `dyn B`. Re-exported as `crate::__private::Sealed` for the
+    /// macro; never named by adopters.
+    pub trait Sealed<Trait: ?Sized> {}
+}
+
 /// Type-erased collector emitted by `#[sassi::trait_impl]`.
 ///
 /// The returned `Box<dyn Any>` contains a `Vec<Arc<dyn Trait>>` for
@@ -65,6 +78,47 @@ pub struct TraitImplEntry {
 }
 
 inventory::collect!(TraitImplEntry);
+
+/// Compile-time marker: `T` has a registered implementation of `Trait`
+/// via `#[sassi::trait_impl]`.
+///
+/// # What
+/// One marker impl is emitted per `(Type, Trait)` pair the
+/// `#[sassi::trait_impl]` attribute macro processes. The trait carries no
+/// methods and no runtime cost — it exists purely so method bounds (most
+/// notably [`PunnuScope::filter_impl`](crate::punnu::PunnuScope::filter_impl))
+/// can require, at compile time, that the cached type participates in a
+/// given trait's cross-type registry. The marker has a sealed supertrait — a plain hand-written `impl TraitImpl<dyn Trait> for Type {}` is rejected at compile time; registration goes through `#[sassi::trait_impl]`. (Reaching directly into `#[doc(hidden)] sassi::__private` is possible but explicitly warranty-voiding, and mirrors the existing treatment of `TraitImplEntry`.)
+///
+/// # Why
+/// [`Sassi::all_impl`](crate::Sassi::all_impl) answers the *cross-type*
+/// question ("every cached value implementing `Trait`, across pools") and
+/// returns erased `Arc<dyn Trait>`. `filter_impl` answers the *single-type*
+/// question ("narrow this `Punnu<T>` scope to entries that implement
+/// `Trait`") while keeping the concrete `Arc<T>`. Because a `Punnu<T>` holds
+/// exactly one concrete type, the marker bound proves at compile time that
+/// the whole pool qualifies — turning the narrowing into a guarantee the
+/// type system enforces rather than a runtime predicate.
+///
+/// # How
+/// Adopters never write this impl by hand; `#[sassi::trait_impl]` emits it:
+/// ```ignore
+/// #[sassi::trait_impl]
+/// impl Searchable for Vehicle { /* ... */ }
+/// // expands to: impl Searchable for Vehicle { ... }
+/// //          +  impl ::sassi::TraitImpl<dyn Searchable> for Vehicle {}
+/// //          +  the sealed witness + inventory::submit!(TraitImplEntry { ... });
+/// ```
+///
+/// # Where
+/// Reach for the bound only in generic code that must require trait-registry
+/// participation (e.g. when forwarding to `filter_impl` from your own helper).
+/// Most call sites use `filter_impl` directly and never name `TraitImpl`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not registered as an implementation of `{Trait}`",
+    note = "apply `#[sassi::trait_impl]` to the `impl {Trait} for {Self}` block"
+)]
+pub trait TraitImpl<Trait: ?Sized>: __sealed::Sealed<Trait> {}
 
 /// Handle used by [`Sassi`] to query trait
 /// registrations.
@@ -125,5 +179,27 @@ impl TraitRegistry {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::TraitImpl;
+
+    trait Demo: Send + Sync {}
+
+    struct Widget;
+    impl Demo for Widget {}
+    // Stand-in witnesses matching what #[sassi::trait_impl] now emits:
+    // both the TraitImpl impl and the sealed supertrait witness.
+    impl super::__sealed::Sealed<dyn Demo> for Widget {}
+    // Hand-written marker impl standing in for what the macro will emit.
+    impl TraitImpl<dyn Demo> for Widget {}
+
+    fn requires_marker<T: TraitImpl<dyn Demo>>() {}
+
+    #[test]
+    fn marker_bound_resolves_for_registered_pair() {
+        requires_marker::<Widget>();
     }
 }

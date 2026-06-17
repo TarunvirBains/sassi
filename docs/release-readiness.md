@@ -178,7 +178,7 @@ under `sassi-macros/tests/lihaaf/`. It replaces the earlier `trybuild`-driven
 fixtures and is now the authoritative gate for proc-macro derive errors,
 `#[sassi::trait_impl]` attribute expansions, and `MonotonicWatermark`
 trait-bound rejections. Install once locally with
-`cargo install lihaaf --version 0.1.0-beta.10 --locked`; CI installs it
+`cargo install lihaaf --version 0.2.0 --locked`; CI installs it
 through the same pin. To re-bless snapshots after an intentional diagnostic
 change, run `cargo lihaaf --manifest-path sassi-macros/Cargo.toml --bless`
 and review the resulting `.stderr` diff before committing.

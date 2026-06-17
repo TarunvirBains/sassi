@@ -1,0 +1,24 @@
+error[E0277]: `Car` is not registered as an implementation of `dyn IsVehicle`
+   --> $DIR/filter_impl_requires_marker.rs:19:19
+    |
+ 19 |     let _ = scope.filter_impl::<dyn IsVehicle>();
+    |                   ^^^^^^^^^^^ unsatisfied trait bound
+    |
+help: the trait `sassi::TraitImpl<dyn IsVehicle>` is not implemented for `Car`
+   --> $DIR/filter_impl_requires_marker.rs:6:1
+    |
+  6 | struct Car { id: u32 }
+    | ^^^^^^^^^^
+    = note: apply `#[sassi::trait_impl]` to the `impl dyn IsVehicle for Car` block
+note: required by a bound in `PunnuScope::<T>::filter_impl`
+   --> sassi/src/punnu/scope.rs:147:12
+    |
+144 |     pub fn filter_impl<Trait>(self) -> Self
+    |            ----------- required by a bound in this associated function
+...
+147 |         T: TraitImpl<Trait>,
+    |            ^^^^^^^^^^^^^^^^ required by this bound in `PunnuScope::<T>::filter_impl`
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0277`.

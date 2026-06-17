@@ -62,11 +62,11 @@ jobs:
         run: cargo test -p sassi --no-default-features --features "serde,runtime-tokio"
 
       # Lihaaf is the authoritative compile-fixture gate for sassi.
-      # Pinned to an exact beta to keep the snapshot byte format and
+      # Pinned to an exact version to keep the snapshot byte format and
       # CLI surface deterministic across runs; bumping the pin is a
       # conscious step that travels with any required `--bless`.
-      - name: Install cargo-lihaaf (pinned beta)
-        run: cargo install lihaaf --version 0.1.0-beta.10 --locked
+      - name: Install cargo-lihaaf (pinned)
+        run: cargo install lihaaf --version 0.2.0 --locked
 
       - name: Lihaaf compile-fixture suite (sassi-macros)
         run: cargo lihaaf --manifest-path sassi-macros/Cargo.toml
