@@ -9,7 +9,7 @@
 
 ### Changed
 
-- `cargo-lihaaf` dev-tool pin bumped `0.1.0-beta.9` → `0.1.0-beta.10` in
+- `cargo-lihaaf` dev-tool pin bumped `0.1.0-beta.9` → `0.2.0` in
   `.github/workflows/ci.yml`, `sassi-macros/Cargo.toml`, and
   `docs/release-readiness.md`. Local fixture canary on `sassi-macros`
   (30/30 OK) confirmed before the pin change.
