@@ -20,10 +20,13 @@ use std::path::{Path, PathBuf};
 /// Run the check from `workspace_root`.  Returns 0 on success, 1 if any
 /// violations are found.
 pub fn run(workspace_root: &Path) -> i32 {
+    let workspace_root = workspace_root
+        .canonicalize()
+        .expect("cannot canonicalize workspace root");
     let mut violations: Vec<(PathBuf, usize, String)> = Vec::new();
 
     // --- Rust files --------------------------------------------------------
-    let rust_files = collect_rust_files(workspace_root);
+    let rust_files = collect_rust_files(&workspace_root);
     for path in &rust_files {
         scan_rust_file(path, &mut violations);
     }
@@ -31,7 +34,7 @@ pub fn run(workspace_root: &Path) -> i32 {
     // --- GitHub Actions workflow files -------------------------------------
     let workflow_dir = workspace_root.join(".github/workflows");
     let workflow_count = count_workflow_files(&workflow_dir);
-    scan_workflow_dir(&workflow_dir, &mut violations);
+    scan_workflow_dir(&workspace_root, &workflow_dir, &mut violations);
 
     if violations.is_empty() {
         println!(
@@ -63,11 +66,23 @@ fn collect_rust_files(workspace_root: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn resolve_existing_within_root(root: &Path, candidate: &Path) -> Option<PathBuf> {
+    let candidate = candidate.canonicalize().ok()?;
+    if candidate.starts_with(root) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 /// Recursively collect `.rs` files that live under a `src/`, `tests/`,
 /// `benches/`, or `examples/` path component.  Skips `target/` and hidden
 /// directories.
 fn walk_for_rust(workspace_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Some(dir) = resolve_existing_within_root(workspace_root, dir) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
         return;
     };
     for entry in entries.flatten() {
@@ -79,6 +94,7 @@ fn walk_for_rust(workspace_root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             walk_for_rust(workspace_root, &path, out);
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs")
+            && let Some(path) = resolve_existing_within_root(workspace_root, &path)
             && let Ok(rel) = path.strip_prefix(workspace_root)
         {
             let in_scan_root = rel.components().any(|c| {
@@ -533,14 +549,22 @@ fn count_workflow_files(workflow_dir: &Path) -> usize {
         .count()
 }
 
-fn scan_workflow_dir(workflow_dir: &Path, violations: &mut Vec<(PathBuf, usize, String)>) {
-    let Ok(entries) = std::fs::read_dir(workflow_dir) else {
+fn scan_workflow_dir(
+    workspace_root: &Path,
+    workflow_dir: &Path,
+    violations: &mut Vec<(PathBuf, usize, String)>,
+) {
+    let Some(workflow_dir) = resolve_existing_within_root(workspace_root, workflow_dir) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&workflow_dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if (name.ends_with(".yml") || name.ends_with(".yaml"))
+            && let Some(path) = resolve_existing_within_root(workspace_root, &path)
             && let Ok(content) = std::fs::read_to_string(&path)
         {
             find_workflow_violations(&path, &content, violations);

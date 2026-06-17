@@ -41,10 +41,10 @@ fn workspace_root() -> PathBuf {
         .expect("cannot canonicalize current directory");
     let mut dir = start_dir.clone();
     loop {
-        let manifest = dir.join("Cargo.toml");
-        if !manifest.starts_with(&start_dir) {
-            panic!("refusing to inspect path outside starting directory tree");
+        if !start_dir.starts_with(&dir) {
+            panic!("refusing to inspect path outside starting ancestry");
         }
+        let manifest = dir.join("Cargo.toml");
         if manifest.exists()
             && let Ok(text) = std::fs::read_to_string(&manifest)
             && text.contains("[workspace]")
