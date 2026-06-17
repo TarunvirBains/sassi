@@ -35,9 +35,16 @@ fn main() {
 /// Walk up from the current directory to find the workspace root (the
 /// directory containing a `Cargo.toml` with a `[workspace]` section).
 fn workspace_root() -> PathBuf {
-    let mut dir = std::env::current_dir().expect("cannot determine current directory");
+    let start_dir = std::env::current_dir()
+        .expect("cannot determine current directory")
+        .canonicalize()
+        .expect("cannot canonicalize current directory");
+    let mut dir = start_dir.clone();
     loop {
         let manifest = dir.join("Cargo.toml");
+        if !manifest.starts_with(&start_dir) {
+            panic!("refusing to inspect path outside starting directory tree");
+        }
         if manifest.exists()
             && let Ok(text) = std::fs::read_to_string(&manifest)
             && text.contains("[workspace]")
