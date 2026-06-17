@@ -13,12 +13,19 @@ fn macros_resolve_renamed_sassi_dependency() {
         .expect("sassi-macros should live below the workspace root")
         .to_path_buf();
     let sassi_path = repo_root.join("sassi");
-    let target_dir = crate_dir.join("target");
+    let src_dir = vetted_child_path(&crate_dir, "src");
+    let target_dir = vetted_child_path(&crate_dir, "target");
+    let manifest_path = vetted_child_path(&crate_dir, "Cargo.toml");
 
-    fs::create_dir_all(crate_dir.join("src")).expect("create temp crate src");
-    fs::write(
-        crate_dir.join("Cargo.toml"),
-        format!(
+    fs::create_dir_all(&src_dir).expect("create temp crate src");
+    let safe_write = |rel: &str, contents: &str| {
+        let candidate = vetted_child_path(&crate_dir, rel);
+        fs::write(candidate, contents).unwrap();
+    };
+
+    safe_write(
+        "Cargo.toml",
+        &format!(
             r#"[package]
 name = "sassi-renamed-dependency-fixture"
 version = "0.0.0"
@@ -32,11 +39,10 @@ cache = {{ package = "sassi", path = "{}" }}
 "#,
             sassi_path.display()
         ),
-    )
-    .expect("write fixture Cargo.toml");
+    );
 
-    fs::write(
-        crate_dir.join("src/main.rs"),
+    safe_write(
+        "src/main.rs",
         r#"
 use cache::{Cacheable, Sassi};
 use std::any::Any;
@@ -65,15 +71,14 @@ fn main() {
     let _registered: Vec<Arc<dyn Nameable>> = Sassi::new().all_impl::<dyn Nameable>();
 }
 "#,
-    )
-    .expect("write fixture main.rs");
+    );
 
     let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .arg("check")
         .arg("--manifest-path")
-        .arg(crate_dir.join("Cargo.toml"))
+        .arg(&manifest_path)
         .arg("--target-dir")
-        .arg(target_dir)
+        .arg(&target_dir)
         .output()
         .expect("run cargo check for renamed dependency fixture");
 
@@ -86,10 +91,72 @@ fn main() {
     );
 }
 
-fn fresh_temp_crate(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
-    if path.exists() {
-        fs::remove_dir_all(&path).expect("remove stale temp crate");
+fn is_within(parent: &Path, child: &Path) -> bool {
+    match (parent.canonicalize(), child.canonicalize()) {
+        (Ok(parent_abs), Ok(child_abs)) => child_abs.starts_with(parent_abs),
+        _ => false,
     }
-    path
+}
+
+fn vetted_child_path(root: &Path, rel: &str) -> PathBuf {
+    let canonical_root = root
+        .canonicalize()
+        .unwrap_or_else(|err| panic!("canonicalize root {}: {err}", root.display()));
+    let candidate = canonical_root.join(rel);
+    match candidate.canonicalize() {
+        Ok(canonical_candidate) => {
+            if canonical_candidate.starts_with(&canonical_root) {
+                canonical_candidate
+            } else {
+                panic!(
+                    "refusing to use path outside test root: {}",
+                    canonical_candidate.display()
+                );
+            }
+        }
+        Err(_) => {
+            let parent = candidate.parent().unwrap_or_else(|| {
+                panic!(
+                    "refusing to use path without parent: {}",
+                    candidate.display()
+                )
+            });
+            let canonical_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|err| panic!("canonicalize parent {}: {err}", parent.display()));
+            let vetted = canonical_parent.join(candidate.file_name().unwrap_or_else(|| {
+                panic!(
+                    "refusing to use path without file name: {}",
+                    candidate.display()
+                )
+            }));
+            if vetted.starts_with(&canonical_root) {
+                vetted
+            } else {
+                panic!(
+                    "refusing to use path outside test root: {}",
+                    vetted.display()
+                );
+            }
+        }
+    }
+}
+
+fn fresh_temp_crate(name: &str) -> PathBuf {
+    let temp_root = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonicalize temp root");
+    let path = vetted_child_path(&temp_root, &format!("{name}-{}", std::process::id()));
+    if path.exists() {
+        if is_within(&temp_root, &path) {
+            fs::remove_dir_all(&path).expect("remove stale temp crate");
+        } else {
+            panic!(
+                "refusing to remove path outside temp root: {}",
+                path.display()
+            );
+        }
+    }
+    fs::create_dir_all(&path).expect("create temp crate root");
+    path.canonicalize().expect("canonicalize temp crate root")
 }
