@@ -13,37 +13,13 @@ fn macros_resolve_renamed_sassi_dependency() {
         .expect("sassi-macros should live below the workspace root")
         .to_path_buf();
     let sassi_path = repo_root.join("sassi");
-    let src_dir = crate_dir.join("src");
-    if !src_dir.starts_with(&crate_dir) {
-        panic!(
-            "refusing to create directory outside test root: {}",
-            src_dir.display()
-        );
-    }
-    let target_dir = crate_dir.join("target");
-    if !target_dir.starts_with(&crate_dir) {
-        panic!(
-            "refusing to use target directory outside test root: {}",
-            target_dir.display()
-        );
-    }
-    let manifest_path = crate_dir.join("Cargo.toml");
-    if !manifest_path.starts_with(&crate_dir) {
-        panic!(
-            "refusing to use manifest path outside test root: {}",
-            manifest_path.display()
-        );
-    }
+    let src_dir = vetted_child_path(&crate_dir, "src");
+    let target_dir = vetted_child_path(&crate_dir, "target");
+    let manifest_path = vetted_child_path(&crate_dir, "Cargo.toml");
 
     fs::create_dir_all(&src_dir).expect("create temp crate src");
     let safe_write = |rel: &str, contents: &str| {
-        let candidate = crate_dir.join(rel);
-        if !candidate.starts_with(&crate_dir) {
-            panic!(
-                "refusing to write outside test root: {}",
-                candidate.display()
-            );
-        }
+        let candidate = vetted_child_path(&crate_dir, rel);
         fs::write(candidate, contents).unwrap();
     };
 
@@ -122,11 +98,55 @@ fn is_within(parent: &Path, child: &Path) -> bool {
     }
 }
 
+fn vetted_child_path(root: &Path, rel: &str) -> PathBuf {
+    let canonical_root = root
+        .canonicalize()
+        .unwrap_or_else(|err| panic!("canonicalize root {}: {err}", root.display()));
+    let candidate = canonical_root.join(rel);
+    match candidate.canonicalize() {
+        Ok(canonical_candidate) => {
+            if canonical_candidate.starts_with(&canonical_root) {
+                canonical_candidate
+            } else {
+                panic!(
+                    "refusing to use path outside test root: {}",
+                    canonical_candidate.display()
+                );
+            }
+        }
+        Err(_) => {
+            let parent = candidate.parent().unwrap_or_else(|| {
+                panic!(
+                    "refusing to use path without parent: {}",
+                    candidate.display()
+                )
+            });
+            let canonical_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|err| panic!("canonicalize parent {}: {err}", parent.display()));
+            let vetted = canonical_parent.join(candidate.file_name().unwrap_or_else(|| {
+                panic!(
+                    "refusing to use path without file name: {}",
+                    candidate.display()
+                )
+            }));
+            if vetted.starts_with(&canonical_root) {
+                vetted
+            } else {
+                panic!(
+                    "refusing to use path outside test root: {}",
+                    vetted.display()
+                );
+            }
+        }
+    }
+}
+
 fn fresh_temp_crate(name: &str) -> PathBuf {
     let temp_root = std::env::temp_dir()
         .canonicalize()
         .expect("canonicalize temp root");
-    let path = temp_root.join(format!("{name}-{}", std::process::id()));
+    let path = vetted_child_path(&temp_root, &format!("{name}-{}", std::process::id()));
     if path.exists() {
         if is_within(&temp_root, &path) {
             fs::remove_dir_all(&path).expect("remove stale temp crate");
